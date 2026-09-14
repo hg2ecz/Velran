@@ -1,0 +1,4 @@
+[policy.publicApi]
+limit = 120
+window_secs = 60
+scope = "ip_route"

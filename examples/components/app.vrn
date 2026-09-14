@@ -1,0 +1,46 @@
+model Article {
+    id: i64
+    title: String
+}
+
+#[component]
+fn ArticleCard(article: Article) -> Html {
+    html {
+        <article class="article-card">
+            <h2>{{ article.title }}</h2>
+            <a @href(article, article.id)>Read</a>
+        </article>
+    }
+}
+
+#[layout]
+fn Main(title: String) -> Html {
+    html {
+        <html>
+            <head><title>{{ title }}</title></head>
+            <body>
+                <header><a href="/">Example News</a></header>
+                <main>@content</main>
+            </body>
+        </html>
+    }
+}
+
+#[query]
+fn loadArticle(db: Db, id: i64) -> Result<Article, DbError> sql {
+    SELECT id, title
+    FROM articles
+    WHERE id = :id
+}
+
+#[page]
+fn article(ctx: PageContext, db: Db, id: i64) -> Result<Html, PageError> {
+    let article = loadArticle(db, id)?;
+    return Ok(html {
+        @layout(Main, "Article") {
+            @component(ArticleCard, article)
+        }
+    });
+}
+
+route article GET "/articles/:id<i64>" public => article;

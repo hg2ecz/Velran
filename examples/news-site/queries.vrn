@@ -1,0 +1,9 @@
+#[query]
+fn articleBySlug(db: Db, slug: Slug) -> Result<models::Article, DbError> sql {
+    SELECT id, slug, title, body FROM articles WHERE slug = :slug
+}
+
+#[query]
+fn insertArticle(tx: Transaction, slug: Slug, title: String, body: String) -> Result<(), DbError> sql {
+    INSERT INTO articles (slug, title, body) VALUES (:slug, :title, :body)
+}

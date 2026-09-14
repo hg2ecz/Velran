@@ -1,0 +1,36 @@
+#[page]
+fn strings(ctx: PageContext, text: String) -> Result<Html, PageError> {
+    let cleaned = text.trim();
+    let left_cleaned = text.trim_start();
+    let right_cleaned = text.trim_end();
+    let lower_text = cleaned.to_lowercase();
+    let upper_text = cleaned.to_uppercase();
+    let chars = cleaned.chars().count();
+    let has_rust = lower_text.contains("rust");
+    let starts_vrn = lower_text.starts_with("vrn");
+    let ends_lang = lower_text.ends_with("lang");
+    let dashed = lower_text.replace(" ", "-");
+    let repeat_source = "vrn";
+    let repeated = repeat_source.repeat(3);
+
+    return Ok(html {
+        <h1>String operations</h1>
+        <p>Original: {{ text }}</p>
+        <p>Trimmed: {{ cleaned }}</p>
+        <p>Trim start: {{ left_cleaned }}</p>
+        <p>Trim end: {{ right_cleaned }}</p>
+        <p>Lower: {{ lower_text }}</p>
+        <p>Upper: {{ upper_text }}</p>
+        <p>Characters: {{ chars }}</p>
+        <p>Contains rust: {{ has_rust }}</p>
+        <p>Starts with vrn: {{ starts_vrn }}</p>
+        <p>Ends with lang: {{ ends_lang }}</p>
+        <p>Spaces replaced: {{ dashed }}</p>
+        <p>Repeated: {{ repeated }}</p>
+    });
+}
+
+route strings GET "/strings"
+    query text<String>
+    validate text length 1 512
+    public => strings;

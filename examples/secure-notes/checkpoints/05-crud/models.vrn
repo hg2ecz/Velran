@@ -1,0 +1,14 @@
+enum NoteStatus {
+    Draft
+    Published
+}
+
+model Note {
+    id: i64
+    ownerUsername: String
+    title: String
+    body: String
+    status: NoteStatus
+    createdAt: DateTime
+    updatedAt: DateTime
+}

@@ -1,0 +1,14 @@
+#[page]
+fn frontPage(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {
+        <main><h1>Public news front page</h1></main>
+    });
+}
+
+#[action]
+fn publish(ctx: ActionContext) -> Result<Redirect, PageError> {
+    return Ok(redirect(frontPage()));
+}
+
+route frontPage GET "/" public cache public ttl 60 => frontPage;
+route publish POST "/publish" auth role Publisher invalidate cache frontPage => publish;

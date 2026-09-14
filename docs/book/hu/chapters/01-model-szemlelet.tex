@@ -1,0 +1,176 @@
+\chapter{Hogyan gondolkodjunk egy Velran alkalmazásról?}
+
+\noindent\textbf{Tanulási út: Gyors út: alap.} Építsd fel azt a mentális modellt, amelyre minden későbbi fejezet épül.\par\medskip
+
+\rustbridgeblockhu{A structok, enumok, \code{Option}, \code{Result} és explicit függvényparaméterek továbbra is ismerős typed építőelemek.}{A model compiler számára láthatóvá teszi az alkalmazás adatstruktúráját, a capability pedig explicitté teszi a külső erőforrásokhoz tartozó authorityt.}{Nem kell új objektummodellt megtanulnod. Maradj a typed értékeknél és explicit bemeneteknél; azt tanuld meg, hol tesz köréjük a Velran security-határt.}
+
+
+Route vagy adatbázis előtt ezt kérdezd: \emph{milyen üzleti adat létezik, milyen alakban, milyen műveletek végezhetők rajta, és milyen határok között?} A Velran több biztonsági és helyességi garanciája abból származik, hogy ezek az adatalakok, inputok, query-k és erőforrás-hozzáférések explicit szerződések.
+
+\section{Először a fogalmak, utána az oldalak}
+
+Egy terméklistánál indulj a \emph{Product} fogalomból, annak typed alakjából, az olvasó/módosító műveletekből, a szükséges capability-kből és policy-kből, és csak ezután a HTTP felületből. A gondolkodás iránya nagyjából:
+
+\begin{lstlisting}
+uzleti fogalom
+    -> typed adatalak
+        -> muveletek
+            -> capability-k es policy-k
+                -> HTTP route
+                    -> HTML / JSON
+\end{lstlisting}
+
+Ez a sorrend segít, hogy az üzleti szabályok ne ad hoc route-okba, template-ekbe vagy összefűzött SQL-be szóródjanak.
+
+\section{Mit jelent a \code{model}?}
+
+A könyvben két közeli fogalommal találkozunk:
+
+\begin{itemize}
+  \item \textbf{adatmodell vagy domain modell}: annak emberi leírása, milyen üzleti fogalmak és kapcsolatok léteznek az alkalmazásban;
+  \item \textbf{\code{model} deklaráció}: a Velran konkrét, fordító által ismert adatalakja.
+\end{itemize}
+
+Például:
+
+\begin{lstlisting}[language=Velran]
+model Product {
+    id: i64
+    name: String
+    price: i64
+}
+\end{lstlisting}
+
+Ez azt mondja a fordítónak, hogy egy \code{Product} rekordnak pontosan ilyen mezői és típusai vannak. A typed SQL query eredményalakja ehhez a szerződéshez igazodik, és ugyanez az érték később HTML- vagy JSON-kimenetben is használható.
+
+\subsection*{A \code{model} nem automatikus adatbázisséma}
+
+A fenti deklaráció önmagában nem hoz létre \code{products} táblát. Az adatbázissémát migration hozza létre, például:
+
+\begin{lstlisting}[language=SQL]
+CREATE TABLE products (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    price INTEGER NOT NULL
+);
+\end{lstlisting}
+
+A rétegek kapcsolódnak, de külön felelősségük van: a migration kezeli a tartós sémát, a \code{model} az alkalmazás typed adatszerződése, a query pedig explicit módon képez sorokat modellé. A model ezért nem hoz létre automatikusan adatbázis-entitást vagy azonos nevű táblát.
+
+\subsection*{A \code{model} nem mutable objektum}
+
+A \code{Product} nem klasszikus objektumorientált osztály. Nincs mögötte rejtett \code{save()} metódus, implicit adatbázis-kapcsolat vagy mutable objektuméletciklus. Ha adatot akarunk módosítani, explicit műveletet és explicit erőforrást használunk.
+
+Itt még az aláírás a lényeg: a \code{listProducts} \code{Db} olvasási hozzáférést kap, a \code{createProduct} pedig explicit \code{Transaction} erőforrást a módosításhoz. A teljes SQL-törzseket a 3. fejezet mutatja meg, amikor már a teljes request útvonalat látjuk.
+
+\section{A model a rétegek közti szerződés}
+
+A \code{model} a rétegek között mozgó typed szerződés.
+
+\begin{lstlisting}
+Database row
+    |  typed query
+    v
+Product model
+    |-------------------|
+    v                   v
+HTML page            JSON API
+    |
+    v
+felhasznalo
+\end{lstlisting}
+
+Ha egy query \code{Product}-ot ígér, a visszaadott mezőknek ehhez az alakhoz kell igazodniuk. Ugyanez a typed rekord-szerződés tér vissza később az object authorizationnél és a JSON-kimenetnél.
+
+\section{Az üzleti fogalomhoz műveletek tartoznak}
+
+Az üzleti adathoz műveletek tartoznak. Ilyen a \code{Product.list} vagy az \code{Article.publish}. Kis programban ezek lehetnek top-level függvények; nagyobb programban a később bemutatott \code{object} namespace csoportosíthatja őket. Fontos különbség:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}lY@{}}
+\toprule
+Elem & Kérdés, amelyre válaszol \\
+\midrule
+\code{model} & Milyen alakú adat a \code{Product}? \\
+\callable{query} & Hogyan olvassuk vagy módosítjuk a tartós adatot? \\
+\code{object} & Mely üzleti fogalomhoz tartoznak ezek a műveletek? \\
+\callable{page}/\callable{action} & Hogyan kapcsolódik az üzleti művelet a webes handlerhez? \\
+\code{route} & Milyen HTTP útvonalon, inputtal és policy-val érhető el? \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{Capability: a hozzáférés is része a modellnek}
+
+Velranban nem csak az adat típusa explicit, hanem az is, milyen erőforráshoz fér hozzá egy művelet. Egy függvény nem ``valahonnan'' kap adatbázist, fájlrendszert vagy current usert.
+
+\begin{lstlisting}[language=Velran]
+#[page]
+fn home(ctx: PageContext, db: Db)
+    -> Result<Html, PageError> {
+    let products = listProducts(db)?;
+    return Ok(html {
+        <ul>
+            @for product in products {
+                <li>{{ product.name }}</li>
+            }
+        </ul>
+    });
+}
+\end{lstlisting}
+
+A \code{db: Db} az aláírásban látható. Fájlkezelésnél AppFs capability, módosító adatbázis-műveletnél Transaction, autentikált műveletnél pedig az auth policy és a hozzá tartozó typed kontextus válik relevánssá.
+
+Tervezési szabály: ha egy műveletnek érzékeny erőforrás kell, annak a kódból és a policy-ból látszania kell.
+
+\section{A route nem az üzleti modell}
+
+A route fontos, de a rendszer külső határa. Például:
+
+\begin{lstlisting}[language=Velran]
+route create POST "/products"
+    form name<String> price<i64>
+    validate name length 1 100 price range 0 100000000
+    public => create;
+\end{lstlisting}
+
+A route a külső HTTP-határt írja le: metódus, path, typed input, validáció és policy. Maga a \code{Product} ettől függetlenül HTML-, JSON-, admin- vagy más route mögött is újrahasználható.
+
+Ezért nagyobb alkalmazásban különösen hasznos a következő határ:
+
+\begin{lstlisting}
+domain/model     : mi az adat es milyen muvelet ertelmes rajta?
+HTTP route       : ki, hogyan es milyen policy-val hivhatja?
+runtime config   : milyen infrastruktura-es eroforras-hatarok kozott futhat?
+\end{lstlisting}
+
+\section{Egy egyszerű tervezési módszer}
+
+Amikor új feature-t kezdesz, a következő öt kérdés jó kiindulópont:
+
+\begin{enumerate}
+  \item \textbf{Mi az üzleti főnév?} -- Product, Article, Invoice, WikiPage.
+  \item \textbf{Milyen typed adatra van ténylegesen szükség?} -- ne automatikusan a teljes adatbázissort másold át.
+  \item \textbf{Mely műveletek olvasnak, és melyek módosítanak?}
+  \item \textbf{Milyen capability kell hozzájuk?} -- Db, Transaction, AppFs, auth és named hálózati egress integration.
+  \item \textbf{Milyen HTTP/policy felületen tesszük elérhetővé?} -- route, input, validáció, auth, cache, rate limit.
+\end{enumerate}
+
+CRUD-nál ez pár perc; nagyobb rendszerben megakadályozza, hogy a route-ok, SQL-ek és jogosultsági szabályok szétcsússzanak.
+
+\section{Mit vigyél tovább a következő fejezetekbe?}
+
+Egy szabályt vigyél tovább: a typed adat, query, tranzakció, capability és HTTP/security policy maradjon explicit, fölösleges objektumhierarchia nélkül. A következő fejezetek telepítik a rendszert, majd ezt a modellt egy teljes \code{Product} requesten alkalmazzák.
+
+\section{Gyakorlat: rajzold fel a határtérképet}
+\paragraph{Gyakorlási mód: vezetett.} Használd az előszóban meghatározott vezetett módszert.
+
+Válassz egy egyszerű, jól ismert funkciót, például jegyzetet, feladatot vagy készletelemet. Kódírás előtt sorold fel a megbízható állapotot, a kérésből érkező adatokat, a tartós rekordokat, a módosítási pontokat és a kívülről látható válaszokat. Ezután jelöld meg, mely átmenetekhez kell validáció, autorizáció, tranzakció vagy explicit capability.
+
+A cél a rejtett feltételezések láthatóvá tétele még a kód előtt.
+
+\section{Tipikus hiba: a route-okból indulunk ki a modell helyett}
+A route-központú tervezés gyakran olyan handlereket eredményez, amelyek újra és újra ugyanazokat az üzleti szabályokat fedezik fel. Ha több route ugyanazt az állapotot parsolja, ugyanazt a tulajdonosi ellenőrzést végzi vagy ugyanazokat az invariánsokat építi újra, vidd vissza a gondolkodást a típusos modellekhez, query-khez és explicit módosítási határokhoz.
+
+\section{Folyamatos mintaprojekt: Secure Notes}
+A compilerrel ellenőrzött \path{examples/secure-notes/checkpoints/01-baseline/main.vrn} \emph{Secure Notes} legyen a folyamatos mintaprojekt. A baseline authenticated, principal szerint szűrt hozzáférést, bounded inputot, CSRF-védett formokat, ownership ellenőrzést és tranzakciós módosításokat kényszerít ki; a későbbi checkpointok ezeket az invariánsokat nem gyengítik.

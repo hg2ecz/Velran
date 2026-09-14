@@ -1,0 +1,14 @@
+# Secret-free recovery point metadata. Fill with real SHA-256 values.
+backup_id=2026-09-04T180000Z
+release_id=2026-09-04.1
+db_backend=postgresql
+server_sha256=REPLACE_ME
+app_source_sha256=REPLACE_ME
+migrations_sha256=REPLACE_ME
+config_sha256=REPLACE_ME
+app_db_backup_sha256=REPLACE_ME
+local_auth_backup_sha256=NOT_USED_OR_REPLACE_ME
+data_root_backup_sha256=REPLACE_ME
+restore_drill_at=REPLACE_AFTER_TEST
+restore_drill_result=REPLACE_AFTER_TEST
+schema_compatibility=backward-compatible

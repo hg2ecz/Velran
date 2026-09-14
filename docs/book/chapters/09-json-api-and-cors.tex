@@ -1,0 +1,377 @@
+\chapter{JSON API, CORS, and browser client integration}
+
+\noindent\textbf{Learning path: Fast path: API branch.} Read now for JSON/API clients or a separate frontend origin.\par\medskip
+
+\rustbridgeblock{Typed scalars, structs/models, collections, \code{Result}, and reusable business functions are the same application core you use for HTML routes.}{JSON input mode, closed request schemas, explicit public projection, content negotiation, and CORS policy define the API boundary.}{Do not build a second business layer for JSON. Reuse the same typed logic and change only the representation and boundary contract.}
+
+
+\invariantblock{Security invariant: CORS is not authorization}{CORS controls which browser origins may make or read cross-origin requests. It does not authenticate a caller, authorize an object, or replace the normal request lifecycle.}
+
+\diagnosticblock{Security diagnostic}{SEC-DATA-004}{A model is being exposed without an explicit public projection, so internal fields could cross the response boundary unintentionally.}{Define and return the intended public projection instead of serializing the internal model shape directly.}
+
+Velran does not force you to choose between classic server-rendered HTML and a JSON API. The same application can contain pages returning \code{Html}, actions processing forms, and typed JSON endpoints. This is useful both when a small JavaScript component needs some data and when a separate frontend application uses the Velran server as an API.
+
+This chapter cleanly separates three operating models:
+
+\begin{enumerate}
+  \item \textbf{same-origin HTML + API}: the browser loads the page and calls the API from the same origin;
+  \item \textbf{cross-origin public API}: another origin calls the API, but there is no session cookie;
+  \item \textbf{cross-origin session auth}: a separate frontend origin uses cookie-based sessions, so CORS and CSRF policy are both required.
+\end{enumerate}
+
+The most important rule is: \textbf{CORS is neither authentication nor CSRF protection}. CORS is a browser-side access policy; authentication decides who the user is, while CSRF protection prevents an authenticated session from being abused for unauthorized state changes from another origin.
+
+\section{The same lifecycle also applies to APIs}
+
+JSON changes the representation, not the trust model. A state-changing API request should still be reasoned about in the same order:
+
+\begin{lstlisting}
+HTTP request
+  -> parse: closed typed JSON schema
+  -> validate: bounds/refinements
+  -> authenticate: session or machine identity when required
+  -> authorize: object/permission/tenant decision
+  -> query / transaction
+  -> response: explicit JSON projection or stable error envelope
+\end{lstlisting}
+
+CORS sits beside this lifecycle rather than replacing one of its stages. It answers whether a browser origin may make the response available to frontend code. It does not establish identity, object authority, CSRF safety, or database integrity. Keeping CORS outside the core authorization chain prevents a common design error: treating an allowed origin as an allowed user.
+
+\section{The first typed JSON endpoint}
+
+A JSON endpoint handler returns \code{Json}. \code{json(...)} converts a supported runtime value into a JSON representation.
+
+\begin{lstlisting}[language=Velran]
+#[page]
+fn statusApi(ctx: PageContext) -> Result<Json, PageError> {
+    let healthy = true;
+    return Ok(json(healthy));
+}
+
+route statusApi GET "/api/status" public => statusApi;
+\end{lstlisting}
+
+A successful response is JSON, for example:
+
+\Needspace{9\baselineskip}
+\begin{lstlisting}
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+
+true
+\end{lstlisting}
+
+\code{json(value)} is not an arbitrary object serializer. Scalars can be encoded directly, but database/domain models cross a public JSON boundary through an explicit \code{expose(...)} projection. This prevents a newly added model field---especially a sensitive one---from silently appearing in an existing API. The response shape is therefore deliberate rather than a reflection of an arbitrary runtime object.
+
+\section{JSON lists from the database}
+
+Typed SQL and JSON responses connect directly. The query still returns an exact model shape, and the JSON layer represents that typed value.
+
+\begin{lstlisting}[language=Velran]
+model Product {
+    id: i64
+    name: String
+    price: i64
+}
+
+#[query]
+fn listProducts(db: Db, offset: i64)
+    -> Result<Vec<Product>, DbError> sql {
+    SELECT id, name, price
+    FROM products
+    ORDER BY id
+    LIMIT 100 OFFSET :offset
+}
+
+#[page]
+fn productsApi(ctx: PageContext, db: Db,
+                    offset: i64)
+    -> Result<Json, PageError> {
+    let products = listProducts(db, offset)?;
+    return Ok(json(expose(products, id, name, price)));
+}
+
+route productsApi GET "/api/products"
+    query offset<i64>
+    validate offset range 0 1000000
+    public => productsApi;
+\end{lstlisting}
+
+The important point is not merely JSON encoding. The reusable list query owns its static row bound; the client supplies only a bounded offset, not SQL cardinality authority. Route input remains typed and validated, and the response uses an explicit public projection. A newly added model field therefore does not silently become part of the API.
+
+\Needspace{17\baselineskip}
+\section{Typed JSON POST body}
+
+A route declares \code{json} input mode for a JSON request body.
+
+\begin{lstlisting}[language=Velran]
+#[action]
+fn echoApi(ctx: ActionContext,
+                  name: String,
+                  age: i64,
+                  active: bool)
+    -> Result<Json, PageError> {
+    return Ok(json(name));
+}
+
+route echoApi POST "/api/echo"
+    json name<String> age<i64> active<bool>
+    validate name length 1 100 age range 0 150
+    auth user
+    => echoApi;
+\end{lstlisting}
+
+A valid request is:
+
+\begin{lstlisting}
+POST /api/echo HTTP/1.1
+Content-Type: application/json
+Accept: application/json
+X-CSRF-Token: <session CSRF token>
+
+{"name":"Alice","age":42,"active":true}
+\end{lstlisting}
+
+The JSON input schema is \textbf{closed}. Unknown or missing keys, duplicate keys, wrong scalar types, and unsupported nested objects, arrays, floats, or \code{null} values are errors. These are request-contract violations and therefore return \code{400 Bad Request}. A missing or incorrect \code{Content-Type} on a JSON route returns \code{415 Unsupported Media Type}. Field and request-size limits apply just as they do to other request bodies.
+
+The \code{json}, \code{form}, and \code{upload} body modes are mutually exclusive on the same POST route, and the compiler enforces this. JSON expects \code{application/json}. Simple forms use URL-encoded form data; uploads use multipart form data. Each endpoint should have one unambiguous request contract.
+
+\section{Content negotiation and 406}
+
+The client can use the \code{Accept} header to state what representation it can receive. For a JSON route, supported examples include:
+
+\begin{lstlisting}
+Accept: application/json
+Accept: application/*
+Accept: */*
+\end{lstlisting}
+
+If a handler would return JSON but the client accepts only \code{text/html}, the server returns \code{406 Not Acceptable}. This is preferable to silently returning a representation the client explicitly rejected.
+
+\section{API errors}
+
+On JSON routes, runtime-classified application errors use a simple common envelope: a stable \code{error} code, while detailed diagnosis remains in server-side logs. Clients should not parse the English text of error messages; they should use the HTTP status and stable error code.
+
+Once a route is known to return JSON, errors use a JSON envelope, for example:
+
+\begin{lstlisting}
+HTTP/1.1 401 Unauthorized
+Content-Type: application/json; charset=utf-8
+
+{"error":"unauthorized"}
+\end{lstlisting}
+
+Typical error codes include:
+
+\begin{itemize}
+  \item \code{bad_request};
+  \item \code{unauthorized};
+  \item \code{forbidden};
+  \item \code{csrf_failed};
+  \item \code{unsupported_media_type};
+  \item \code{database_unavailable};
+  \item \code{resource_limit};
+  \item \code{internal_error}.
+\end{itemize}
+
+This is especially important for browser clients. An authenticated JSON route returns \code{401} to an anonymous request rather than an HTML login redirect. The frontend can therefore decide based on status code without having to interpret HTML as an API error.
+
+\section{Same-origin: the default and simplest model}
+
+If HTML and API are served from the same scheme + host + port combination, they are same-origin from the browser's point of view.
+
+\begin{lstlisting}
+https://app.example/
+https://app.example/api/products
+\end{lstlisting}
+
+No CORS configuration is normally needed. A simple client is:
+
+\begin{lstlisting}
+const response = await fetch("/api/products?limit=20&offset=0", {
+  headers: { Accept: "application/json" }
+});
+
+if (!response.ok) {
+  throw new Error(`HTTP ${response.status}`);
+}
+
+const products = await response.json();
+\end{lstlisting}
+
+Prefer same-origin unless a separate frontend origin is a real requirement; it removes a trust boundary and most CORS complexity.
+
+\section{CORS: exact-origin allowlist}
+
+Cross-origin browser access is denied by default. Trusted server configuration must enumerate exact origins; there is no wildcard origin.
+
+\begin{lstlisting}
+[web]
+cors_origins = ["https://frontend.example"]
+cors_allow_credentials = false
+\end{lstlisting}
+
+The CLI equivalent is:
+
+\begin{lstlisting}
+velran-server --cors-origin https://frontend.example ...
+\end{lstlisting}
+
+List every permitted origin explicitly; never reflect an arbitrary request \code{Origin}.
+
+\section{Preflight}
+
+Before some cross-origin requests, the browser sends an \code{OPTIONS} preflight. Velran allows the preflight only when:
+
+\begin{itemize}
+  \item the \code{Origin} is configured;
+  \item the target GET/POST route exists;
+  \item the requested request headers are supported.
+\end{itemize}
+
+Supported headers include \code{Content-Type}, \code{Accept}, and \code{X-CSRF-Token}; preflight remains part of route/origin policy, not a generic allow-all OPTIONS endpoint.
+
+\section{Credentialed CORS with a session cookie}
+
+When a frontend on a different origin uses Velran session authentication, credentialed CORS is required:
+
+\begin{lstlisting}
+[web]
+cors_origins = ["https://frontend.example"]
+cors_allow_credentials = true
+\end{lstlisting}
+
+In production this is allowed only over HTTPS. With this configuration the session cookie uses \code{SameSite=None; Secure}, because the browser must send it on cross-site requests.
+
+The JavaScript fetch call also needs explicit credential mode:
+
+\begin{lstlisting}
+const response = await fetch("https://api.example/api/account", {
+  credentials: "include",
+  headers: { Accept: "application/json" }
+});
+\end{lstlisting}
+
+\code{credentials: "include"} only allows matching cookies to be sent; it grants no application authority.
+
+\section{CSRF on a JSON API}
+
+With cookie-based sessions, the browser manages the session cookie automatically, so state-changing JSON requests need CSRF protection just like HTML forms.
+
+For form POST, the token is a body field:
+
+\begin{lstlisting}
+_csrf=<token>
+\end{lstlisting}
+
+For JSON POST, use a header:
+
+\begin{lstlisting}
+X-CSRF-Token: <token>
+\end{lstlisting}
+
+For a separate frontend origin, an authenticated token endpoint can be defined:
+
+\begin{lstlisting}[language=Velran]
+#[page]
+fn csrfApi(ctx: PageContext) -> Result<Json, PageError> {
+    return Ok(json(csrfToken));
+}
+
+route csrfApi GET "/api/csrf" auth user => csrfApi;
+\end{lstlisting}
+
+The token belongs to the same session; CORS does not replace CSRF validation.
+
+\section{Complete browser POST flow}
+
+For a separate session-auth frontend, the browser sends the session cookie and session-bound CSRF token; the runtime verifies origin, authentication, CSRF, and typed input before the handler performs the business operation.
+
+Example client:
+
+\begin{lstlisting}
+const csrf = await fetch("https://api.example/api/csrf", {
+  credentials: "include",
+  headers: { Accept: "application/json" }
+}).then(async r => {
+  if (!r.ok) throw new Error(`CSRF HTTP ${r.status}`);
+  return r.json();
+});
+
+const result = await fetch("https://api.example/api/echo", {
+  method: "POST",
+  credentials: "include",
+  headers: {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+    "X-CSRF-Token": csrf
+  },
+  body: JSON.stringify({ name: "Alice", age: 42, active: true })
+}).then(async r => {
+  if (!r.ok) throw new Error(`API HTTP ${r.status}`);
+  return r.json();
+});
+\end{lstlisting}
+
+\section{Reverse proxy and origin}
+
+Behind Apache or Nginx, public scheme/host and trusted-proxy configuration must agree. The application must not decide what origin is safe based on arbitrary forwarded headers supplied by the client. The installation chapter explains the trusted-proxy boundary; the full \code{server.toml} key reference appears near the end of the book.
+
+Always place the \textbf{frontend origin as seen by the browser} in the CORS allowlist, for example:
+
+\begin{lstlisting}
+https://frontend.example
+\end{lstlisting}
+
+not an internal proxy or container address.
+
+\section{What not to do}
+
+\begin{itemize}
+  \item Do not enable or reflect CORS permissively; enumerate exact origins.
+  \item Do not treat CORS as authentication or CSRF protection, and do not send session credentials over HTTP in production.
+  \item Keep each POST route to one typed body mode and bound API input.
+  \item JSON clients should handle API status codes such as 401/403, not HTML login redirects.
+\end{itemize}
+
+\section{Which architecture should you choose?}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}L{0.27\textwidth}Y@{}}
+\toprule
+\textbf{Situation} & \textbf{Recommended model} \\
+\midrule
+server-rendered page + small JS & same-origin HTML + JSON API \\
+SPA on the same domain & same-origin API, no CORS \\
+separate public frontend, no session & exact-origin CORS without credentials \\
+separate frontend + session auth & exact-origin credentialed CORS + HTTPS + CSRF \\
+server-to-server client & CORS is irrelevant; auth and network policy matter \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{Runnable example}
+
+The complete repository example is \path{examples/json-api/app.vrn}.
+
+Start same-origin; add a separate frontend origin and CORS only when deployment requires it.
+
+\section{Verified companion examples}
+The repository companions are:
+\begin{itemize}
+  \item \path{examples/json-api/app.vrn} -- JSON API route flow;
+  \item \path{examples/typed-query-form/main.vrn} -- typed query/form structs;
+  \item \path{examples/json-typed-response/app.vrn} -- typed JSON response boundary.
+\end{itemize}
+Prefer these files when you need a complete request/response example rather than an isolated listing.
+
+\section{Practice: separate API design from CORS design}
+\paragraph{Exercise mode: supported.} Use the supported method defined in the preface.
+
+Describe the JSON request and response contract without mentioning browsers. Then, separately, decide whether a browser on another origin needs permission to call it. This prevents CORS from being mistaken for authentication or API authorization.
+
+\section{Common mistake: enabling permissive CORS by default}
+CORS is a browser-origin policy, not a general network security mechanism. Prefer same-origin deployment when practical; when cross-origin access is required, enumerate exact origins and credential behavior deliberately.
+
+\section{Running project checkpoint: Secure Notes}
+Start from \path{examples/secure-notes/checkpoints/09-json-api/main.vrn} and its verified JSON companions. Expose a read-only JSON representation of the authenticated user's notes. Keep the same authorization rules as the HTML page. Add CORS only if you intentionally deploy a separate frontend origin; otherwise leave the API same-origin.

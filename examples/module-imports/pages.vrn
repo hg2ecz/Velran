@@ -1,0 +1,9 @@
+use catalog::math as math;
+
+#[page]
+fn home(ctx: PageContext) -> Result<Html, PageError> {
+    let value = math::answer();
+    return Ok(html {<p>{{ value }}</p>});
+}
+
+route home GET "/" public => home;

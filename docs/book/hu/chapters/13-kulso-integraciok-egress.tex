@@ -1,0 +1,201 @@
+\chapter{Külső szolgáltatások és egress policy}
+
+\noindent\textbf{Tanulási út: Teljes út / integráció.} Olvasd el, mielőtt outbound hálózati integrációt adsz az alkalmazáshoz.\par\medskip
+
+\invariantblock{Biztonsági invariáns: az egress explicit capability}{Az alkalmazáskód nem kap tetszőleges hálózati hozzáférést. A kifelé irányuló kommunikáció névvel ellátott, konfigurált capability-határon halad át, így a destination, credential, limit és audit policy felülvizsgálható marad.}
+
+\diagnosticblockhu{Compiler diagnostic}{SEC-EFFECT-002}{Egy handler hálózati effectet végez anélkül, hogy a megfelelő integration capability szerepelne a \code{uses} listában.}{Deklaráld explicit a named integration capabilityt a handler signature-ben; ne helyettesítsd ambient vagy raw hálózati hozzáféréssel.}
+
+Az outbound HTTPS külön trust boundary, mert a kapcsolatot maga az alkalmazás kezdeményezi. A Velran ezért explicit capabilityként kezeli, nem ambient hálózati jogosultságként.
+
+\section{A jelenlegi Velran-határ}
+
+A Velran szándékosan nem ad korlátlan \code{http.get(userUrl)} jellegű API-t. Ehelyett a source named integrationt deklarál, a handler pedig explicit capabilityt kap:
+
+\begin{lstlisting}[language=Velran]
+integration Billing {
+    egress payments
+}
+
+#[action]
+fn charge(
+    ctx: ActionContext,
+    amount: i64
+) -> Result<Json, PageError>
+    uses Billing
+{
+    let status = Billing.postJson("/v1/charges", amount)?;
+    return Ok(json(status));
+}
+\end{lstlisting}
+
+A deklaráció csak trusted \emph{nevet} tesz láthatóvá. Host, IP, port, TLS és hálózati tartomány nem lesz az alkalmazáskód authorityje. A compiler a hívást \code{net.payments} effectként rögzíti; a handler a megfelelő \code{uses Billing} capability nélkül nem indíthatja el.
+
+A biztonságos út:
+
+\begin{lstlisting}
+Velran business intent
+        |
+        v
+named integration capability
+        |
+        v
+trusted operator egress policy
+        |
+        v
+bounded HTTPS transport
+\end{lstlisting}
+
+\section{Miért nem reprezentálható arbitrary URL?}
+
+A user-controlled fetch target klasszikus SSRF kockázat. Loopback, link-local metadata service vagy belső infrastruktúra nem válhat normál alkalmazási céllá:
+
+\begin{lstlisting}
+http://127.0.0.1/...
+http://169.254.169.254/...
+http://internal-db.example/...
+http://[::1]/...
+\end{lstlisting}
+
+A Velran source a deklarált integráción belül relatív pathot választhat, de scheme-et, hostot, IP-t vagy portot nem. A path compiler által ismert rooted relative literal; absolute, protocol-relative és dinamikus destination URL tiltott.
+
+\section{Named target: a hálózati authority konfigurálása}
+
+A trusted egress policy köti a nyelvi target-nevet a konkrét transport authorityhez:
+
+\begin{lstlisting}
+[[target]]
+name = "payments"
+hosts = ["api.payments.example"]
+cidrs = ["203.0.113.0/24", "2001:db8:1200::/48"]
+ports = [443]
+tls_required = true
+max_dns_answers = 8
+max_sent_bytes = 262144
+max_received_bytes = 2097152
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+\end{lstlisting}
+
+A typed Velran outbound surface által használt targetet a startup policy egyértelműen a támogatott endpoint formára oldja fel. Outbound effectet használó program hiányzó vagy inkonzisztens egress policyval nem indul el.
+
+\section{A policy több réteget ellenőriz}
+
+Az egress policy több egy hostname allowlistnél.
+
+\subsection*{Host, port és TLS}
+
+A destination host és port trusted policyból jön, a TLS identity verification pedig a konfigurált hostname-et használja. Alkalmazási input nem kapcsolhatja ki a TLS-t és nem választhat másik portot.
+
+\subsection*{DNS és CIDR}
+
+Minden A és AAAA választ ellenőrizni kell az engedélyezett tartományok ellen. Ha egyetlen answer sérti a policyt, a feloldás fail-closed módon elutasított. Ez DNS rebinding és hibás split-horizon konfiguráció ellen is véd.
+
+\subsection*{Peer verification connect után}
+
+TCP kapcsolat után a tényleges peer IP újra ellenőrzött. A DNS-validáció nem maradandó proof.
+
+\section{IPv4 és IPv6 ugyanazt az authority modellt követi}
+
+A policy dual-stack. Az IPv4-mapped IPv6 cím normalizálódik, ezért IPv4 tiltás nem kerülhető meg IPv6 reprezentációval. Loopback, link-local, ULA, multicast és unspecified tartomány implicit trustot nem kap.
+
+\section{Typed outbound műveletek}
+
+Az első Velran call surface szándékosan kicsi:
+
+\begin{lstlisting}[language=Velran]
+let status = Billing.get("/v1/status")?;
+let status = Billing.postJson("/v1/charges", amount)?;
+\end{lstlisting}
+
+Fontos korlátok:
+
+\begin{itemize}
+  \item page handler outbound GET-et végezhet, outbound POST side effectet nem;
+  \item JSON POST action capability;
+  \item generic outbound JSON sink nem fogad \code{Secret}, \code{Sensitive}, credential-purpose vagy upload értéket;
+  \item server-side egress nem ad browser network authorityt -- a generált CSP \code{connect-src 'none'} marad, amíg nincs külön browser capability;
+  \item a jelenlegi typed call HTTP status code-ot ad vissza, nem automatikusan trusted response body-t.
+\end{itemize}
+
+Ez utóbbi tudatos döntés. Külső response data csak untrusted adatként, typed validation/refinement boundaryn keresztül kerülhetne domain értékké; arbitrary upstream JSON nem válik csendben trusted adattá.
+
+\section{Méret-, protokoll- és időkorlátok}
+
+Az upstream lehet hibás vagy ellenséges. A transport ezért DNS answer-, request byte-, response byte- és időkorlátot alkalmaz. Az operator target limitjein felül a typed Velran status-call surface saját hard upstream-body ceilingt is használ, és elutasítja a nem támogatott transfer/content encodingot.
+
+A teljes request részt vesz a cumulative external-I/O budgetben is. Több külön-külön megengedett network operation így sem állhat össze egyetlen korlátlan kéréssé.
+
+\section{Secretek külső szolgáltatáshoz}
+
+A külső credential külön secret-store boundary mögött marad:
+
+\begin{lstlisting}
+/run/secrets/velran/
+  payments-bearer
+\end{lstlisting}
+
+A secret név nem válhat arbitrary filesystem pathszá. Credential nem kerülhet response-ba, normál logba, security eventbe vagy audit payloadba. A typed \code{Secret<T>} és a trusted Rust secret store ugyanazt a határt erősíti két külön rétegen.
+
+\section{Retry, idempotencia és exceptional outcome}
+
+Side-effecting POST automatikus retry-ja szándékosan nem default. Retry-szenzitív critical operation a Velran idempotency contractját használja, ne ad-hoc retry loopot.
+
+Critical database worknél a transaction outcome explicit:
+
+\begin{lstlisting}[language=Velran]
+let outcome = transaction db {
+    charge(tx)?;
+};
+
+match outcome {
+    Committed => { return Ok(json(true)); }
+    RolledBack => { fail conflict; }
+    CommitUnknown => { fail conflict; }
+}
+\end{lstlisting}
+
+Idempotens critical transactionnek kötelező az outcome capture és exhaustive kezelés. A \code{CommitUnknown} nem jelentheti csendben azt, hogy ``retry POST'', mert a side effect már commitolhatott.
+
+\section{A webhook az ellenkező irányú boundary}
+
+Outbound integration és inbound webhook két külön probléma. A webhook route deklarált verification policyt, raw-body signature verificationt, timestamp/replay-window ellenőrzést és atomic replay claimet használ még a handler authority előtt. Webhookot ne modellezz egyszerű public JSON POST-ként.
+
+\section{Szinkron request vagy háttérmunka?}
+
+Jelenleg nincs first-class background-job subsystem. Rövid, bounded integration maradhat request/response ciklusban. Hosszú vagy megbízhatóan retry-zandó workflowhoz explicit job/outbox design kell; ne ad-hoc thread, subprocess vagy korlátlan request-idő.
+
+\section{Minimum tesztelés}
+
+Bizonyítsd legalább:
+
+\begin{itemize}
+  \item unknown integration vagy hiányzó \code{uses} capability compile-time reject;
+  \item dynamic és absolute destination path reject;
+  \item page-side POST reject;
+  \item allowed host + IPv4 és IPv6 működik;
+  \item mixed DNS answer egyetlen tiltott címmel fail closed;
+  \item forbidden port, TLS identity mismatch és peer-IP mismatch fail closed;
+  \item request/response byte limit és timeout enforced;
+  \item unsupported upstream transfer/content encoding reject;
+  \item cumulative external-I/O exhaustion resource-limit failure;
+  \item secret nem folyhat generic outbound JSON-ba.
+\end{itemize}
+
+\section{A fejezet lényege}
+
+A külső HTTPS \textbf{named, typed, bounded capability}; a destination authority trusted deployment policy marad. Az SSRF-védelem, TLS policy és resource limit így a secure path része.
+
+\section{Ellenőrzött companion példa}
+A minimális natív outbound-capability példa az \path{examples/outbound-native/app.vrn}. Szándékosan kicsi: a lényegi contract az, hogy a forrás csak named integration capabilityt nevez meg, míg a tényleges destination authority a trusted deployment policy tulajdona.
+
+\section{Gyakorlat: írj egress contractot}
+\paragraph{Gyakorlási mód: önálló.} Használd az előszóban meghatározott önálló módszert.
+
+Egy külső szolgáltatáshoz rögzítsd a destination identity-t, az engedélyezett műveletet, timeoutot, retry policy-t, credential-forrást, várt response shape-et és failure-viselkedést. Ezeket az integráció contractjának tekintsd, ne mellékes kliensbeállításnak.
+
+\section{Tipikus hiba: tetszőleges kimenő destinationt engedünk}
+Egy integráció ne alakítsa a felhasználó által vezérelt inputot tetszőleges hálózati célponttá. Az egress maradjon named, bounded és reviewable, hogy egy generikus HTTP helperből ne alakulhasson ki SSRF-jellegű viselkedés.
+
+\section{Folyamatos mintaprojekt: Secure Notes}
+Adj egy opcionális named integrációt, például publikációs értesítés küldését. Ne tedd a core persistence útvonal kritikus részévé: egy sikertelen külső hívás hatása legyen expliciten megtervezve, ne hagyja a jegyzetet félkész állapotban.

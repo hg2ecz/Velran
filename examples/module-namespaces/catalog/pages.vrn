@@ -1,0 +1,16 @@
+#[page]
+fn index(ctx: PageContext, db: Db) -> Result<Html, PageError> {
+    let products = catalog::queries::recent(db)?;
+    return Ok(html {
+        <main>
+            <h1>Products</h1>
+            <ul>
+                @for product in products {
+                    <li>{{ product.name }}</li>
+                }
+            </ul>
+        </main>
+    });
+}
+
+route catalogIndex GET "/catalog" public => catalog::pages::index;

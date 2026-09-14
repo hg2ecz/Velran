@@ -1,0 +1,181 @@
+\chapter{Production deployment és service lifecycle}
+
+\noindent\textbf{Tanulási út: Gyors út: production alap.} Tanuld meg a release/activation contractot és a biztonságos deployment workflow-t.\par\medskip
+
+\invariantblock{Biztonsági invariáns: aktiválás előtt ellenőrzés}{A teljes candidate generációt fordítsd és validáld, mielőtt aktívvá válhatna. Ha a verification vagy activation elbukik, az előző known-good generáció szolgáljon tovább.}
+
+\diagnosticblockhu{Production diagnostic}{SEC-PROD-002}{Az alkalmazás hiányos production policyt deklarál, ezért a szigorú deployment contract nem bizonyítható.}{Deklaráld mind a négy kötelező invariantot: HTTPS required, debug disabled, HSTS required és database TLS required.}
+
+Ez a fejezet nem ismétli meg a konfigurációs referencia és az observability részleteit. A production szempontból azt foglalja össze, hogyan lesz egy ellenőrzött release-ből futó service, hogyan történik a release-váltás, és hogyan marad kontrollált a process lifecycle. A teljes backup/restore és disaster recovery a következő fejezet önálló témája.
+
+\section{Az alkalmazás production contractja}
+
+A production security egy része magában a Velran programban deklarált:
+
+\begin{lstlisting}[language=Velran]
+production {
+    https required;
+    debug disabled;
+    hsts required;
+    database tls required;
+}
+\end{lstlisting}
+
+Ez nem második secret/config rendszer. Követelményt deklarál; certificate/path/trusted network továbbra is server/operator config. Másképp fogalmazva: a Velran source azt mondja meg, \emph{minek kell igaznak lennie}, a trusted deployment config pedig azt, \emph{hogyan teszi ezt igazzá az adott környezet}. Startup elbukik, ha a valós topology nem teljesíti a contractot. Source reload nem változtathatja meg csendben; production security requirement módosítás restartot és explicit operator review-t igényel.
+
+\section{Release útvonal}
+
+Ajánlott sorrend:
+
+\begin{lstlisting}
+./verify.sh
+-> cargo build --locked --release
+-> immutable release directory
+-> velran-server --config ... --check-config
+-> velran-cli migrate verify
+-> approved velran-cli migrate apply
+-> velran-cli migrate verify
+-> atomic current symlink switch
+-> controlled restart
+-> /health/live
+-> /health/ready
+-> log / metric / audit review
+\end{lstlisting}
+
+A buildelt \code{velran-server} és \code{velran-cli} bináris, az alkalmazásforrás és a migration legyen ugyanahhoz a release-azonosítóhoz köthető. Ne egy élő \code{/srv/velran/current} könyvtár tartalmát módosítsd fájlonként; új immutable release könyvtárat készíts, majd atomikusan válts symlinket.
+
+\section{systemd service}
+
+A \code{velran-server} hosszú életű service process. Az \code{velran-cli} nem daemon: migration, auth-admin vagy más operátori művelet idejére indul és kilép.
+
+\begin{lstlisting}
+[Service]
+User=velran
+Group=velran
+ExecStart=/usr/local/bin/velran-server \
+  --config /usr/local/etc/velran/server.toml
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+\end{lstlisting}
+
+A service fusson nem privilegizált felhasználó alatt. systemd esetén a process-szintű cgroup felső korlátok -- például \code{MemoryMax}, \code{CPUQuota} és \code{TasksMax} -- tulajdonosa a systemd legyen; a Velran ne próbálja ugyanazokat a cgroup kontrollokat párhuzamosan írni. Minden erőforrás-határhoz egyértelmű authority tartozzon.
+
+Közvetlen TLS esetén a 80/443 portokhoz csak a bind-service capabilityt (\path{CAP_NET_BIND_SERVICE}) add meg. Ha a Velran reverse proxy mögött, például \code{127.0.0.1:8080}-on figyel, erre nincs szükség.
+
+\section{Controlled restart és readiness}
+
+Process-szintű konfigurációmódosítás után előbb fusson \code{--check-config}, majd controlled restart. Behind-proxy módban a SIGHUP a logok újranyitása mellett tranzakciósan újraépíti a domain/application hosting állapotot, de listener, DB/Redis/auth kapcsolat, cgroup policy, logging sink és más process-szintű beállítás továbbra is restartot igényel.
+
+Az application source változása az alább részletezett candidate-activation útvonalat használja: request handlingtől elkülönített compile/validation után atomikus domaincsere történik. Elutasított candidate esetén a korábbi generáció marad aktív.
+
+Rolling deploymentnél csak ready instance kapjon forgalmat: indítsd el az újat, várd meg a readiness állapotot, majd vedd ki a régit. A health diagnosztika az observability fejezetben szerepel.
+
+\section{Migration és rollback nem ugyanaz}
+
+Az alkalmazás binárisának vagy forrásának visszaváltása egyszerű lehet, az adatbázis-séma visszaállítása viszont nem. Ezért production migrationnél preferáld az expand/contract mintát: az új release előbb backward-compatible sémát vezessen be, az inkompatibilis takarítás csak későbbi release-ben történjen.
+
+Ne kapcsolj automatikus reverse SQL-t az alkalmazás symlink visszaállításához. Ha a migration adatot alakított át vagy törölt, a valódi recovery pont a bizonyított backup lehet.
+
+\section{Recovery gate a deployment előtt}
+
+Destruktív vagy schema-kompatibilitást érintő release előtt legyen ismert recovery point és friss restore-evidence. A backup tartalma, a DB/AppFs konzisztencia, az RPO/RTO, valamint a rollback és restore döntési fa a következő fejezetben szerepel. A deployment felelőssége itt az, hogy a release-váltás előtt ez a gate teljesüljön.
+
+\section{Deploy utáni minimum ellenőrzés}
+
+\begin{enumerate}
+  \item az új process fut és ready;
+  \item a publikus főoldal vagy smoke route válaszol;
+  \item nincs új error spike a server logban;
+  \item access logban a státuszkód-eloszlás normális;
+  \item audit log írható;
+  \item DB/Redis dependency metrikák nem romlottak;
+  \item egy rollback döntéshez ismert a release hash és az adatbázis migration állapota.
+\end{enumerate}
+
+
+\section{Release-invariantok}
+
+Production release-nél a deployment tooling részleteitől függetlenül maradjon igaz néhány alapinvariant:
+
+\begin{itemize}
+  \item a build és verification a locked dependency graphot használja;
+  \item application source, migrationök, server/CLI binárisok és a jóváhagyott config verzió egy release recordhoz köthető;
+  \item production secret nem kerül az immutable release fába;
+  \item candidate alkalmazás csak teljes fordítás és validáció után válhat aktívvá;
+  \item az aktiválás atomikus: request vagy a régi, vagy az új generációt látja, félbemaradt keveréket nem;
+  \item hibás candidate esetén a korábbi known-good generáció szolgál tovább;
+  \item a váltás előtt ismert a DB migration state és az application rollback kompatibilitási határa.
+\end{itemize}
+
+Operátori szabály: a candidate vagy átmegy a teljes gate-en és atomikusan aktiválódik, vagy nem aktiválódik. A natív fordítás hibája deployment hiba, soha nem fallback-jelzés.
+
+\section{Mi reloadolható és mi igényel restartot?}
+
+A source reload szándékosan szűkebb, mint a process reconfiguration. A kettőt külön operátori eseményként kezeld.
+
+\begin{longtable}{L{0.28\textwidth}L{0.30\textwidth}L{0.32\textwidth}}
+\toprule
+Változás & Normál mechanizmus & Indok \\
+\midrule
+Velran application source/modulgráf & candidate compile, validation, atomic generation swap & application-local code generation \\
+Immutable release symlink célja & a figyelt source path candidate generationt indít & megőrzi az atomikus release layoutot \\
+Logrotation támogatott topológiában & SIGHUP/log reopen & nincs application-policy változás \\
+Listener/TLS/process topology & config check + controlled restart & process-level authority \\
+DB/Redis/auth connection config & config check + controlled restart & connection/service lifecycle \\
+Cgroup/resource authority & controlled restart & process-level isolation boundary \\
+Production security requirement & operator review + restart & source reload nem gyengítheti csendben a policyt \\
+\bottomrule
+\end{longtable}
+
+Ez a különbség megakadályozza, hogy a kényelmes source reload implicit process-config csatornává váljon.
+
+\section{Candidate aktiválás: az operátori szabály}
+
+Kezeld az aktiválást kétlépcsős határként: \emph{előbb compile/validate, utána activate}. Hiba esetén a known-good generáció szolgál tovább; az aktív generált artifactot ne módosítsd helyben. Alkalmazásfejlesztőként ennél a contractnál megállhatsz.
+
+\subsection*{A motorháztető alatt: hogyan őrzi meg a natív aktiválás a határt}
+
+Alkalmazásfejlesztőként első olvasáskor ezt a részt átugorhatod. A source-reload supervisor a logikai entrypointot és a teljes tranzitív modulgráfot figyeli. Miután a fájlkészlet a debounce időn át stabil, a fordítás a request handlingtől elkülönítve történik. A candidate ugyanazokon a route-, resource-, cache-, authentication- és hosting ellenőrzéseken megy át, mint startupkor.
+
+Belsőleg az elfogadott forrás verified executable IR-ré, generált safe Rusttá, majd \code{rustc} által fordított immutable \code{cdylib}-bé és új runtime-generációvá válik. Csak ezek sikere után történik az adott domain runtime atomikus cseréje. A régi runtime-ot már birtokló requestek azon a generáción fejeződnek be; a későbbiek az újat használják. Sikeres kódaktiváláskor a public-cache generationök is ugyanennél a határnál lépnek előre.
+
+Native compile vagy activation hiba esetén nincs VM/interpreter fallback. Ez implementációs részlet, de fontos operátori következménnyel: a hiba látható marad, és a known-good generáció marad az authority.
+
+\section{Pre-deploy evidence}
+
+Forgalom- vagy release-váltás előtt legyen elegendő evidence ahhoz, hogy később négy kérdésre válaszolni lehessen:
+
+\begin{enumerate}
+  \item \textbf{Mi épült?} release identifier, source revision/artifact identity és hashek.
+  \item \textbf{Milyen dependency és capability lett jóváhagyva?} locked Cargo graph, valamint supply-chain capability/provenance verification.
+  \item \textbf{Milyen sémát várunk?} migration set és sikeres migration verification.
+  \item \textbf{Hogyan állunk helyre?} ismert backup/restore readiness és az application rollback kompatibilitási határa.
+\end{enumerate}
+
+Ez az evidence szándékosan secretmentes. Provenance-ot és operációs állapotot bizonyít anélkül, hogy credentialt másolna a release recordba.
+
+\section{Deployment anti-patternök}
+
+Kerüld ezeket a shortcutokat:
+
+\begin{itemize}
+  \item unlocked release build, amely csendben dependency resolutiont módosíthat;
+  \item fájlok közvetlen szerkesztése az aktív release könyvtárban;
+  \item application rollback automatikus adatbázis-rollbackként kezelése;
+  \item migration implicit futtatása server startup közben;
+  \item secret CLI argumentba, release manifestbe vagy source-ba írása;
+  \item forgalom küldése readiness siker előtt;
+  \item hibás candidate elfogadása egy másik execution engine-re való fallbackkel.
+\end{itemize}
+
+\section{Gyakorlat: próbálj el egy sikertelen aktiválást}
+\paragraph{Gyakorlási mód: üzemeltetési szcenárió.} Használd az előszóban meghatározott üzemeltetési módszert.
+
+Készíts olyan candidate release-t, amely szándékosan elbukik egy pre-activation ellenőrzésen. Bizonyítsd, hogy az aktív generáció változatlan marad, a hiba pedig látható az operátornak. Ezután próbálj el egy sikeres aktiválást és rollbacket is.
+
+\section{Tipikus hiba: a build sikerét deployabilitynek tekintjük}
+A lefordított artefakt csak egy része a release evidence-nek. Konfiguráció, migration, secret, TLS anyag, resource policy, health check és activation semantics mind legyen érvényes, mielőtt traffic függ az új generációtól.
+
+\section{Folyamatos mintaprojekt: Secure Notes}
+Fagyaszd be az \path{examples/secure-notes/checkpoints/18-production/main.vrn} snapshotot production candidate-ként. Csomagold a Secure Notes-ot production candidate-ként. Rögzítsd a pontos verification parancsokat, migration állapotot, config checket, activation evidence-et és rollback pontot. A cél ismételhető release-eljárás, nem egyszeri sikeres telepítés.

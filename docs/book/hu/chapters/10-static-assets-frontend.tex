@@ -1,0 +1,349 @@
+\chapter{Statikus assetek és frontend-integráció}
+
+\noindent\textbf{Tanulási út: Gyors út: böngészős ág.} Most olvasd, ha static assetet vagy progresszív böngészős enhancementet adsz hozzá.\par\medskip
+
+A webalkalmazásnak nem csak dinamikus HTML- és JSON-válaszai vannak. CSS, ikon, kép, font, source map vagy egy külön frontend build artifactjai más életciklusú fájlok: a release részeként érkeznek, tartalmuk ideális esetben immutable, és a böngésző agresszíven cache-elheti őket.
+
+A Velran ezért a statikus asseteket külön, \textbf{read-only static rootból} szolgálja ki. Ez nem ugyanaz a terület, mint az AppFs írható data rootja, és nem ugyanaz a fogalom, mint a felhasználó által feltöltött média.
+
+\noindent\textbf{Első olvasás:} tanuld meg a három fájléletciklust, a fingerprintelt cache-elést és a V1 JavaScript/CSP határt. A szerver-vs-proxy kiszolgálási példák deployment referenciaként maradhatnak későbbre.
+
+\section{Három külön fájléletciklus}
+
+Egy production alkalmazásban legalább három fájlcsoportot érdemes külön kezelni:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}lYYY@{}}
+\toprule
+ & Példa & Írhatóság & Életciklus \\
+\midrule
+release & CSS, font, logo & read-only & deploykor cserélődik \\
+runtime data & export, generált fájl & AppFs policy szerint & alkalmazás futása közben \\
+user media & feltöltött kép & kontrolláltan írható & üzleti adattal együtt \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Tipikus könyvtárszerkezet:
+
+\begin{lstlisting}
+/usr/local/bin/velran-server
+/usr/local/bin/velran-cli
+/srv/myapp/releases/2026-09-04/
+  main.vrn
+  migrations/
+  public/
+    css/
+    img/
+    fonts/
+/srv/myapp/data/
+/run/secrets/velran/
+\end{lstlisting}
+
+A \code{public/} legyen deployment artifact. A \code{data/} ezzel szemben runtime állapot. Ha a kettőt összekevered, egy upload felülírhat release-fájlt, vagy egy rollback véletlenül felhasználói adatot cserélhet vissza.
+
+\section{A static root konfigurálása}
+
+A server configban a statikus namespace külön szekció:
+
+\begin{lstlisting}
+[static_assets]
+root = "/srv/myapp/current/public"
+url_prefix = "/assets/"
+max_asset_bytes = 8388608
+max_age_secs = 300
+immutable_max_age_secs = 31536000
+precompressed = true
+\end{lstlisting}
+
+Ugyanez CLI-ből is beállítható. A fontosabb opciók:
+
+\begin{lstlisting}
+--static-root
+--static-url-prefix
+--max-static-asset-bytes
+--static-max-age-secs
+--static-immutable-max-age-secs
+\end{lstlisting}
+
+A static prefix rezervált route namespace. Ha az URL prefix \code{/assets/}, az application ne deklaráljon ezzel ütköző dinamikus vagy statikus route-ot. Az ütközést a szerver fail-closed módon kezelje: jobb startupkor hibázni, mint requestenként bizonytalan route-választást végezni.
+
+\section{Fingerprint: a hosszú cache kulcsa}
+
+A statikus asset tartalma és URL-je legyen összekötve. Például:
+
+\begin{lstlisting}
+public/
+  css/app.01234567.css
+  img/logo.a91f028c.svg
+  fonts/ui-f1e2d3c4.woff2
+\end{lstlisting}
+
+A Velran fingerprinteltnek tekinti azt a fájlnevet, amelyben legalább 8 hexadecimális karakterből álló, ponttal, kötőjellel vagy underscore-ral határolt token szerepel. Ilyen fájlnál a response hosszú immutable cache-t kaphat:
+
+\begin{lstlisting}
+Cache-Control: public, max-age=31536000, immutable
+\end{lstlisting}
+
+Nem fingerprintelt fájlnál a biztonságosabb alap rövid és revalidálható:
+
+\begin{lstlisting}
+Cache-Control: public, max-age=300, must-revalidate
+\end{lstlisting}
+
+A lényeg: \textbf{ne ugyanazon URL mögött cseréld le a tartalmat egyéves cache mellett}. Új CSS buildhez új fingerprintelt fájlnév tartozzon. A régi fájl akár maradhat is a release-ben addig, amíg a régi HTML-reprezentációk kifuthatnak.
+
+\section{Egy minimális asset build pipeline}
+
+A Velran nem akar frontend build rendszert előírni. A pipeline feladata egyszerűen az, hogy determinisztikus outputot készítsen a \code{public/} könyvtárba.
+
+Egy kis alkalmazásnál a forrás lehet például:
+
+\begin{lstlisting}
+assets-src/
+  app.css
+  logo.svg
+public/
+\end{lstlisting}
+
+A release build lépései:
+
+\begin{enumerate}
+  \item tiszta \code{public/} könyvtár létrehozása;
+  \item CSS/font/kép build vagy másolás;
+  \item content hash képzése;
+  \item fingerprintelt fájlnév létrehozása;
+  \item opcionális Brotli/gzip siblingek készítése;
+  \item az alkalmazásban a fingerprintelt URL használata.
+\end{enumerate}
+
+A hash nem security token. A feladata az, hogy a fájlnév a tartalom verzióját azonosítsa.
+
+\section{ETag és conditional GET}
+
+Minden statikus reprezentáció saját \code{ETag} értéket kap. A böngésző később küldhet:
+
+\begin{lstlisting}
+If-None-Match: "velran-..."
+\end{lstlisting}
+
+Ha a reprezentáció nem változott, a szerver \code{304 Not Modified} választ adhat body nélkül. GET mellett HEAD is támogatott.
+
+A static request nem hoz létre sessiont és nem küld session cookie-t. Ez fontos teljesítmény- és security tulajdonság: egy CSS vagy font letöltése ne váljon session-lifecycle eseménnyé.
+
+\section{Precompressed Brotli és gzip}
+
+A Velran server request közben nem tömöríti a statikus fájlt. A release pipeline opcionálisan előre elkészítheti:
+
+\begin{lstlisting}
+app.01234567.css
+app.01234567.css.br
+app.01234567.css.gz
+\end{lstlisting}
+
+A kliens \code{Accept-Encoding} értéke alapján a szerver a Brotli, majd gzip, végül az eredeti reprezentáció közül választ. Tömörített válasznál a header például:
+
+\begin{lstlisting}
+Content-Encoding: br
+Vary: Accept-Encoding
+\end{lstlisting}
+
+Ennek két előnye van: nincs requestenkénti compression CPU-költség, és a web request nem nyit dinamikus tömörítési erőforrás-felületet.
+
+\section{MIME, nosniff és path confinement}
+
+A server ismert webes kiterjesztésekhez MIME típust rendel, ismeretlen extensionnél pedig \code{application/octet-stream} típust használ. A válasz mindig kap:
+
+\begin{lstlisting}
+X-Content-Type-Options: nosniff
+\end{lstlisting}
+
+A static path szándékosan szigorú. Jó:
+
+\begin{lstlisting}
+/assets/css/app.01234567.css
+\end{lstlisting}
+
+Tiltott többek között a \code{..}, encoded traversal, backslash, üres path komponens és control karakter. A V1 static pathban percent-encoding sincs; a build pipeline használjon URL-safe fájlneveket.
+
+Linuxon a static root ugyanahhoz a confinement szemlélethez igazodik, mint az AppFs: a kiszolgálás nem válhat tetszőleges host filesystem olvasássá symlink vagy path traversal segítségével.
+
+\section{CSS, kép és font a Velran HTML-ben}
+
+A V1 CSP same-origin style, image, font és media asseteket enged. Egy release-ben ezért természetes minta:
+
+\begin{lstlisting}
+/assets/css/app.01234567.css
+/assets/img/logo.a91f028c.svg
+/assets/fonts/ui-f1e2d3c4.woff2
+\end{lstlisting}
+
+A HTML-ben mindig a release-hez tartozó fingerprintelt URL jelenjen meg. A sablon ne felhasználói inputból állítson elő asset URL-t; az assetnév a build része, nem request adat.
+
+\section{Fontos V1-határ: JavaScript kiszolgálható, de Velran HTML-ben nem fut}
+
+A static server ismeri a \code{.js} és \code{.mjs} MIME típust, ezért ilyen build artifact fizikailag kiszolgálható. Ez azonban \textbf{nem jelenti azt, hogy a Velran által renderelt HTML scriptet futtathat}.
+
+A V1 HTML security modellben:
+
+\begin{itemize}
+  \item a CSP nem nyit \code{script-src} engedélyt;
+  \item a compiler a \code{<script>} markupot elutasítja;
+  \item nincs inline-script vagy ``unsafe'' escape hatch.
+\end{itemize}
+
+Ez tudatos security határ. A könyv előző fejezetének JavaScript \code{fetch} példái ezért kétféleképpen értelmezendők:
+
+\begin{enumerate}
+  \item külön frontend alkalmazás fut a saját originjén, és Velran JSON API-t hív;
+  \item a kód a browser API kliens viselkedését szemlélteti, nem azt, hogy V1 Velran HTML-be script tag írható.
+\end{enumerate}
+
+Ha az alkalmazás klasszikus Velran szerver-renderelt oldal, építs HTML + CSS + typed form/action modellre. Ha teljes JavaScript frontend szükséges, kezeld azt külön frontendként, és a Velran legyen typed JSON backend.
+
+\section{Velran szolgálja ki vagy Apache/Nginx?}
+
+Két működő deployment modell van.
+
+\subsection*{1. Velran-owned static namespace}
+
+Ez legyen az alapértelmezett. A reverse proxy minden requestet a Velran szervernek ad, és a Velran kezeli az \code{/assets/} namespace-t is:
+
+\begin{lstlisting}
+Internet
+   |
+Apache / Nginx :443
+   |
+127.0.0.1:8080 Velran
+   |-- application routes
+   `-- /assets/*
+\end{lstlisting}
+
+Előnye, hogy a fingerprint-, ETag-, precompressed-, nosniff- és path-policy egy helyen marad. Kis és közepes alkalmazásnál ez általában bőven elég.
+
+\subsection*{2. A reverse proxy szolgálja ki közvetlenül}
+
+Nagy forgalomnál dönthetsz úgy, hogy az Apache vagy Nginx közvetlenül a read-only release \code{public/} könyvtárból szolgál. Ekkor viszont \textbf{neked kell reprodukálnod} a fontos contractot:
+
+\begin{itemize}
+  \item read-only, külön static root;
+  \item traversal/symlink elleni biztonságos path-kezelés;
+  \item helyes MIME + \code{nosniff};
+  \item fingerprintelt fájlokra hosszú immutable cache;
+  \item nem fingerprintelt fájlokra rövid/revalidálható cache;
+  \item Brotli/gzip esetén helyes \code{Vary};
+  \item a namespace ne ütközzön application route-tal.
+\end{itemize}
+
+Ez már operátori optimalizáció, nem szükséges ahhoz, hogy az alkalmazás helyes legyen.
+
+\section{Nginx minta közvetlen static kiszolgálásra}
+
+Egy egyszerű kiindulás:
+
+\Needspace{15\baselineskip}
+\begin{lstlisting}
+server {
+    listen 443 ssl;
+    server_name app.example;
+
+    location /assets/ {
+        alias /srv/myapp/current/public/;
+        try_files $uri =404;
+        add_header X-Content-Type-Options nosniff always;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}
+\end{lstlisting}
+
+Ez csak topológiai alapminta. A production konfigurációban a cache policy-t, precompressed fájlokat és symlink/release szabályokat is ugyanahhoz az immutable deployment modellhez kell igazítani.
+
+\section{Apache minta közvetlen static kiszolgálásra}
+
+Apache esetén a gondolat ugyanaz:
+
+\Needspace{15\baselineskip}
+\begin{lstlisting}
+Alias /assets/ /srv/myapp/current/public/
+
+<Directory /srv/myapp/current/public/>
+    Require all granted
+    Options -Indexes
+    AllowOverride None
+    Header always set X-Content-Type-Options "nosniff"
+</Directory>
+
+ProxyPass        / http://127.0.0.1:8080/
+ProxyPassReverse / http://127.0.0.1:8080/
+\end{lstlisting}
+
+Ha Apache közvetlenül szolgálja az asseteket, az \code{Alias} szabálynak a proxy catch-all előtt kell érvényesülnie, és a cache headereket is explicit konfigurálni kell.
+
+\section{Deploy: asset és alkalmazáskód ugyanahhoz a release-hez tartozzon}
+
+A legkönnyebben elkerülhető assethiba az, amikor az új HTML már új CSS fájlnevet hivatkozik, de a static rootban még a régi release van -- vagy fordítva.
+
+Ezért a helyes sorrend:
+
+\begin{lstlisting}
+build application
+-> build/fingerprint assets
+-> optional .br/.gz
+-> immutable release directory
+-> preflight
+-> atomic current switch
+-> controlled restart/reload
+\end{lstlisting}
+
+Az alkalmazáskód és a \code{public/} könyvtár ugyanazon release artifact része legyen. Így rollbackkor mindkettő együtt áll vissza.
+
+\section{Ellenőrzés curl-lel}
+
+Deploy után legalább ezeket érdemes ellenőrizni:
+
+\begin{lstlisting}
+curl -I https://app.example/assets/css/app.01234567.css
+curl -I -H 'Accept-Encoding: br' \
+  https://app.example/assets/css/app.01234567.css
+curl -I -H 'If-None-Match: "velran-..."' \
+  https://app.example/assets/css/app.01234567.css
+\end{lstlisting}
+
+Ellenőrizd a \code{Content-Type}, \code{Cache-Control}, \code{ETag}, \code{X-Content-Type-Options}, valamint tömörített reprezentációnál a \code{Content-Encoding} és \code{Vary} headert.
+
+\section{Gyakorlati döntési szabály}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}lY@{}}
+\toprule
+Helyzet & Ajánlott megoldás \\
+\midrule
+szerver-renderelt Velran oldal & Velran static root + CSS/image/font \\
+kis/közepes production & reverse proxy mindent Velrannak továbbít \\
+nagy statikus forgalom & Apache/Nginx direct static, azonos policy-vel \\
+teljes JavaScript frontend & külön frontend deployment + Velran JSON API \\
+user upload & AppFs/media pipeline, nem static root \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+A legfontosabb szabály: \textbf{a statikus asset deployment artifact, nem alkalmazásadat}. Ha ezt a határt megtartod, a cache, rollback, backup és security modell egyszerre lesz egyszerűbb.
+
+\section{Ellenőrzött companion példa}
+Az aktuális static-asset companion az \path{examples/static-assets/app.vrn}. A release asseteket tartsd read-only módon, az AppFs/runtime állapottól elkülönítve, a fejezet deployment modelljének megfelelően.
+
+\section{Gyakorlat: osztályozd a frontend minden fájlját}
+\paragraph{Gyakorlási mód: támogatott.} Használd az előszóban meghatározott támogatott módszert.
+
+Egy page által használt minden fájlt sorolj immutable deployment asset, generált HTML, JSON response vagy módosuló alkalmazásadat kategóriába. Ellenőrizd, hogy a static root alatt kizárólag immutable deployment asset található.
+
+\section{Tipikus hiba: a frontend-kényelem eltünteti a trust boundaryt}
+Egy JavaScript frontend nem változtatja meg a szerveroldali autorizáció követelményeit. A kliensoldali validáció és elrejtett vezérlők UX-eszközök; minden authoritative validáció, autorizáció és módosítási szabály a szerver határán marad.
+
+\section{Folyamatos mintaprojekt: Secure Notes}
+Adj kis stylesheetet és szükség esetén progresszív JavaScript enhancementet a jegyzet UI-hoz. Az alkalmazás maradjon helyes kliensoldali ellenőrzésekbe vetett bizalom nélkül is, a felhasználói tartalom pedig maradjon a static asset fán kívül.

@@ -1,0 +1,27 @@
+object Article {
+    model {
+        id: i64
+        slug: Slug
+        title: String
+        body: String
+        authorUsername: String
+    }
+
+    #[query]
+fn bySlug(db: Db, slug: Slug) -> Result<Article, DbError> sql {
+        SELECT id, slug, title, body, authorUsername FROM articles WHERE slug = :slug
+    }
+
+    #[page]
+fn show(ctx: PageContext, db: Db, slug: Slug) -> Result<Html, PageError> {
+        let article = Article.bySlug(db, slug)?;
+        return Ok(html {
+            <article>
+                <h1>{{ article.title }}</h1>
+                @markdown(article.body)
+            </article>
+        });
+    }
+}
+
+route articleShow GET "/cikk/:slug<Slug>" public cache public ttl 60 => Article.show;

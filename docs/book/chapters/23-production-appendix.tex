@@ -1,0 +1,355 @@
+
+
+\chapter{Appendix and production checklist}
+
+\section{Current verification note}
+
+The current Velran source tree has completed the repository-level Verified Development Milestone, including formatting, the workspace test suite, \code{./verify.sh}, and local test serving. Before a production release, repeat the lock/provenance refresh and full repository verification on the exact release tree and collect the target-environment deployment, recovery, and operational evidence. Repository verification is necessary, but it is not a substitute for production-environment release evidence.
+
+\noindent\textbf{Learning path: Fast path: final release gate.} Use the checklist to prove release readiness rather than relying on memory.\par\medskip
+
+This chapter introduces no new language elements. It is a compact operations aid assembled from the preceding chapters: directory layout, reverse-proxy examples, a systemd unit, logrotate configuration, a pre-release gate, and a troubleshooting map. Treat the examples as starting points; adapt domains, certificates, permissions, and resource limits to your environment.
+
+\section{Recommended production directory layout}
+
+Velran is locally installed software, so this book consistently uses the \code{/usr/local} hierarchy for programs and configuration. Application state and logs live separately.
+
+\begin{lstlisting}
+/usr/local/bin/
+  velran-server
+  velran-cli
+
+/usr/local/etc/velran/
+  server.toml
+  rate-limits.toml
+  resource-profiles.toml
+
+/run/secrets/velran/
+  database-url
+  redis-url
+  local-auth-database-url
+
+/srv/velran/
+  current/                 # current application release
+  releases/
+    2026-09-04.1/
+  data/                    # AppFs / durable application data
+
+/var/log/velran/
+  server.log
+  access.log
+  audit.log
+\end{lstlisting}
+
+Keep release contents read-only where possible. The server should have write permission only where durable state or logs actually need to be written. Secret files must not live inside the application release directory or source control.
+
+\section{Complete minimal Apache reverse-proxy example}
+
+This example assumes one Apache reverse proxy. Apache owns public TLS; Velran listens only on loopback.
+
+The corresponding minimum Velran configuration is:
+
+\begin{lstlisting}
+[server]
+listen = "127.0.0.1:8080"
+insecure_dev_cookies = false
+
+[tls]
+public_host = "www.example.com"
+
+[web]
+trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
+\end{lstlisting}
+
+In reverse-proxy production mode the certificate and key stay on the proxy, but trusted \code{public_host} is still required for Host/Origin pinning. The proxy must produce authoritative \code{X-Forwarded-Proto: https} metadata.
+
+\begin{lstlisting}
+<VirtualHost *:80>
+    ServerName www.example.com
+    Redirect permanent / https://www.example.com/
+</VirtualHost>
+
+<VirtualHost *:443>
+    ServerName www.example.com
+
+    SSLEngine on
+    SSLCertificateFile \
+      /etc/letsencrypt/live/www.example.com/fullchain.pem
+    SSLCertificateKeyFile \
+      /etc/letsencrypt/live/www.example.com/privkey.pem
+
+    ProxyPreserveHost On
+    ProxyPass        / http://127.0.0.1:8080/
+    ProxyPassReverse / http://127.0.0.1:8080/
+
+    RequestHeader set X-Forwarded-Proto "https"
+</VirtualHost>
+\end{lstlisting}
+
+Typical Apache modules are \code{proxy}, \code{proxy_http}, \code{headers}, and \code{ssl}. The Velran trusted-proxy list should contain only the real proxy. For a loopback proxy this normally means \code{127.0.0.1/32} and, if needed, \code{::1/128}. An Internet-sized trusted-proxy range is a configuration error.
+
+\section{Complete minimal Nginx reverse-proxy example}
+
+\begin{lstlisting}
+server {
+    listen 80;
+    server_name www.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name www.example.com;
+
+    ssl_certificate
+      /etc/letsencrypt/live/www.example.com/fullchain.pem;
+    ssl_certificate_key
+      /etc/letsencrypt/live/www.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+    }
+}
+\end{lstlisting}
+
+Here Nginx directly sees the client, so it creates the forwarded client address itself. Do not pass through arbitrary Internet-supplied \code{X-Forwarded-*} values as authority. With multiple proxies, design the trust chain explicitly.
+
+\section{systemd service example}
+
+The repository contains the complete example at \code{examples/systemd/velran.service}. Its essential shape is:
+
+\begin{lstlisting}
+[Unit]
+Description=Velran application
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=velran
+Group=velran
+WorkingDirectory=/srv/velran/current
+ExecStartPre=/usr/local/bin/velran-server \
+  --config /usr/local/etc/velran/server.toml \
+  --check-config
+ExecStart=/usr/local/bin/velran-server \
+  --config /usr/local/etc/velran/server.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=45s
+
+MemoryMax=1G
+MemorySwapMax=0
+CPUQuota=200%
+TasksMax=256
+LimitNOFILE=8192
+# For direct TLS on 80/443 add only:
+# AmbientCapabilities=CAP_NET_BIND_SERVICE
+# CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ReadWritePaths=/srv/velran/data /var/log/velran
+
+[Install]
+WantedBy=multi-user.target
+\end{lstlisting}
+
+Systemd hard limits and Velran request/runtime resource policy are complementary defense layers. In the systemd baseline, systemd itself is the process cgroup authority, so do not also enable Velran's \code{[cgroup]} writer mode. For direct binds to 80/443 grant only \code{CAP_NET_BIND_SERVICE}; behind a reverse proxy on a high loopback port, omit it. \code{TimeoutStopSec} should exceed the configured graceful-shutdown window. In behind-proxy mode SIGHUP can transactionally reload domain/application hosting state, while process-level configuration changes still require a controlled restart; application source alone is normally activated by the automatic source-reload supervisor.
+
+\section{logrotate example}
+
+\begin{lstlisting}
+/var/log/velran/server.log /var/log/velran/access.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 velran velran
+    sharedscripts
+    postrotate
+        systemctl kill -s HUP --kill-who=main \
+          velran.service >/dev/null 2>&1 || true
+    endscript
+}
+
+/var/log/velran/audit.log {
+    daily
+    rotate 90
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 velran velran
+    sharedscripts
+    postrotate
+        systemctl kill -s HUP --kill-who=main \
+          velran.service >/dev/null 2>&1 || true
+    endscript
+}
+\end{lstlisting}
+
+Retention is a legal and risk decision. Audit logs usually deserve longer retention and central forwarding; the numbers above are examples, not universal requirements.
+
+\section{Pre-release production gate}
+
+The following list is intentionally short and executable. The earlier chapters provide the rationale.
+
+\begin{enumerate}
+  \item \textbf{Source and build:} identify the release commit; pin \code{Cargo.lock}; build the platform with \code{cargo build --locked --release -p velran-server -p velran-cli}; pass \code{velran-cli check} on application source.
+  \item \textbf{Migration:} run \code{migrate status} and \code{migrate verify} before production; apply approved schema changes explicitly; verify again afterward.
+  \item \textbf{Configuration:} pass config-check on the real production \code{server.toml}; review the redacted effective configuration.
+  \item \textbf{Secrets:} keep DB/Redis/auth secret files out of the repository, with narrow filesystem permissions, and out of logs and release records.
+  \item \textbf{HTTP edge:} verify domain, TLS, and Host handling; the trusted-proxy list contains only real proxies.
+  \item \textbf{Auth:} production cookie policy is active; local-auth/LDAP configuration is verified; admin/MFA recovery is documented.
+  \item \textbf{CSRF and CORS:} state-changing browser requests are CSRF protected; CORS allowlists are explicit; credentialed CORS has no wildcard origin.
+  \item \textbf{Database:} the application DB user is least privilege; pool/budget matches backend capacity; important query indexes are understood.
+  \item \textbf{Storage/upload:} AppFs confinement is correct; byte/pixel limits are active; the application cannot write release content.
+  \item \textbf{Redis/cache/rate limit:} multi-instance shared security/runtime state lives in Redis; Redis outage behavior is known and tested.
+  \item \textbf{Egress:} only named outbound targets are allowed; host/CIDR/port/TLS/timeout/size policy is explicit; secrets do not appear in URLs or logs.
+  \item \textbf{Resources:} request/runtime limits and process hard limits are consistent; cgroup authority is either systemd or a separately delegated Velran cgroup, not both.
+  \item \textbf{Observability:} server/access/audit logs are writable; request IDs work; metrics and readiness are reachable from the correct management network; minimum alerts are defined.
+  \item \textbf{Backup/recovery:} recent verified DB + AppFs + identity backups exist; a recovery manifest exists; restore drills are real rather than theoretical.
+  \item \textbf{Deploy/rollback:} release artifact and checksum are known; the previous release can be restored; schema changes have an explicit app-rollback versus full-restore decision.
+  \item \textbf{Post-start evidence:} liveness, readiness, and at least one business smoke request succeed; logs show no startup fallback or unexpected policy failure.
+\end{enumerate}
+
+\subsection*{Platform-release security evidence}
+
+When releasing the Velran platform itself, do not call the tree release-ready unless the exact source tree passes:
+
+\begin{lstlisting}
+cargo fmt --all -- --check
+cargo metadata --locked --format-version 1 >/dev/null
+cargo check --workspace --locked
+cargo test --workspace --locked
+./verify.sh
+\end{lstlisting}
+
+The supply-chain envelope must match both \code{Cargo.lock} and \path{SUPPLY-CHAIN-CAPABILITIES.txt}. Release packaging must not regenerate or bless a Cargo-stale lockfile. Verify the release manifest after all documentation/book changes as well.
+
+\section{Quick troubleshooting map}
+
+\begin{longtable}{L{0.23\textwidth}L{0.30\textwidth}L{0.38\textwidth}}
+\toprule
+Symptom & First place to look & Next question \\
+\midrule
+\endhead
+Service does not start & config-check, server log & Config/secret/path/policy or dependency readiness? \\
+\addlinespace
+502/504 at proxy & proxy log, Velran listener/readiness & Is the process running, loopback port correct, readiness green? \\
+\addlinespace
+400/415 & access log + route body contract & Malformed input, wrong schema, or wrong Content-Type? \\
+\addlinespace
+401 & auth/session audit event & No session, expired, invalidated, or MFA missing? \\
+\addlinespace
+403 & route/object authorization, CSRF/CORS & Who is the actor, and which policy denied access? \\
+\addlinespace
+404/405/406 & route map + request method/Accept & Does the route exist, and is the method/representation acceptable? \\
+\addlinespace
+409 & optimistic-lock/business state & Did the record change, or did a \code{Changed} query modify zero rows? \\
+\addlinespace
+413/431 & request hard limits & Did body/upload or headers exceed configured limits? \\
+\addlinespace
+421/426 & Host/proxy/TLS policy & Are public host, trusted proxy, and effective HTTPS correct? \\
+\addlinespace
+422 & named-form rerender & Which field failed typed decode or validation? \\
+\addlinespace
+429 & rate-limit metrics/audit & Which limiter and identity/IP bucket was exhausted? \\
+\addlinespace
+500 & server log by request ID & Was there a real internal invariant failure? \\
+\addlinespace
+503 & readiness + server log & Did DB/Redis/auth/storage or a request resource limit make service temporarily unavailable? \\
+\addlinespace
+DB error & DB readiness + query context & Connection, timeout, schema drift, lock, or constraint? \\
+\addlinespace
+File/media error & AppFs path/permissions/limits & Is the storage root writable, with confinement and byte/pixel limits correct? \\
+\addlinespace
+External API error & egress policy + adapter log & DNS, CIDR, port, TLS, timeout, or response-size denial? \\
+\addlinespace
+Logs disappear after rotation & log fallback metric, service log & Did SIGHUP arrive, and are new-file permissions correct? \\
+\bottomrule
+\end{longtable}
+
+\section{What to carry into production}
+
+Five rules summarize the operational model:
+
+\begin{itemize}
+  \item expose HTTP only after typed data, explicit policy, and bounded external input are defined;
+  \item keep stable policy in trusted configuration and secrets in secret files;
+  \item make schema mutation, release activation, and rollback explicit operator decisions;
+  \item treat proxy, Redis, DB, AppFs, and outbound integrations according to their declared authority boundaries;
+  \item verify before release, then prove health, observability, backup, and restore with evidence.
+\end{itemize}
+
+\section{Velran web developer competency checklist}
+
+This checklist answers a different question from the production gate: \emph{can you build and operate a small Velran web application without copying a recipe blindly?} A checked item should mean that you can perform the task, explain the relevant boundary, and diagnose the most likely failure mode.
+
+\subsection*{Core application development}
+\begin{itemize}[label={\texttt{[ ]}},leftmargin=2em]
+  \item I can read an existing Velran project and identify pages, actions, queries, routes, modules, migrations, and configuration boundaries.
+  \item I can add a page or action handler and connect it to a route with an explicit access policy.
+  \item I can choose between query, form, JSON, and multipart input and keep externally controlled strings and collections bounded.
+  \item I can model application data with Rust-like structs, enums, \code{Option<T>}, \code{Vec<T>}, and \code{Result<T,E>} without falling back to legacy Velran spellings.
+  \item I can add a database migration, write a typed query, and keep database constraints aligned with application-level validation.
+  \item I can implement create, read, update, and delete flows with transactions where multiple writes form one logical operation.
+  \item I can recognize when optimistic locking or another concurrency rule is required instead of silently overwriting newer state.
+  \item I can split a growing application into modules without weakening route, data, or capability boundaries.
+  \item I can expose a typed JSON endpoint and distinguish browser-oriented form flows from API-oriented request/response flows.
+  \item I can render database-backed Markdown on the server, keep Markdown as the source of truth, and apply public response caching only when the route is truly non-personalized and its freshness contract permits it.
+  \item I can use the canonical repository examples and Secure Notes checkpoints to verify my design instead of inventing unsupported syntax from memory.
+\end{itemize}
+
+\subsection*{Security boundaries}
+\begin{itemize}[label={\texttt{[ ]}},leftmargin=2em]
+  \item I understand that authentication proves who the actor is, while authorization decides whether that actor may perform this operation on this object.
+  \item I can choose deliberately between \code{public}, authenticated, MFA, role, permission, webhook, and critical-operation route policies.
+  \item I can enforce ownership or another object-level authorization rule before reading or changing a protected object.
+  \item I can push principal/tenant filtering into the database query when a collection must never contain another actor's records.
+  \item I can explain why unbounded external input, unrestricted upload/media processing, and unrestricted outbound networking are security boundaries rather than convenience features.
+  \item I can keep CSRF, CORS, trusted-proxy, Host, cookie, and credential handling separate in my mental model instead of treating them as one generic ``web security'' switch.
+  \item I can interpret the most common compiler/security diagnostics and fix the violated invariant rather than suppressing the check.
+  \item I can review a change and state which capability, filesystem, database, network, or identity boundary it expands.
+\end{itemize}
+
+\subsection*{Build, verification, and production}
+\begin{itemize}[label={\texttt{[ ]}},leftmargin=2em]
+  \item I can run the normal development loop: edit, \code{velran-cli check}, targeted tests, build, and the repository verification gates appropriate to the change.
+  \item I understand the native path from verified source through executable IR and generated Rust to \code{rustc}, immutable generation, and atomic activation at the level needed to diagnose a failed build or activation.
+  \item I can distinguish application reloadable state from configuration or infrastructure changes that require a process restart.
+  \item I can prepare and verify a migration instead of coupling schema mutation to server startup.
+  \item I can read server, access, and audit logs using a request ID and use readiness/metrics to separate application failure from dependency failure.
+  \item I can deploy with an explicit release artifact, checksum, configuration review, smoke test, and rollback decision.
+  \item I can explain what belongs in backup, restore a consistent DB/AppFs/identity state in isolation, and treat a restore drill as evidence rather than documentation alone.
+  \item I can run \code{./verify.sh}, understand which gate failed, distinguish learner examples from rejection fixtures/manifests, and avoid ``fixes'' that merely weaken the guard.
+\end{itemize}
+
+\subsection*{How to use the checklist}
+Do not aim to memorize every command. The target is independent reasoning. If an item is uncertain, return to the corresponding Secure Notes checkpoint, change one thing deliberately, run the relevant verifier, and explain why the resulting behavior is safe. When every item above is demonstrable on a small application, you have the practical baseline expected from a Velran web developer; later chapters and reference material then deepen rather than replace that baseline.
+
+\section{Practice: run the checklist as evidence collection}
+\paragraph{Exercise mode: operational scenario.} Use the operational-scenario method defined in the preface.
+
+Do not tick checklist items from memory. Attach a command result, configuration review, test result, restore rehearsal, or other concrete evidence to every item that can affect release safety.
+
+\section{Common mistake: treating a checklist as a substitute for engineering judgment}
+A checklist catches known classes of omission; it cannot prove that an unfamiliar architecture is safe. Stop the release when an item is ambiguous and resolve the design question instead of interpreting the checkbox optimistically.
+
+\section{Final Secure Notes checkpoint}
+Use this appendix to perform a release-readiness review of the final checkpoint in \path{examples/secure-notes/checkpoints/23-release-readiness/main.vrn}. Trace evidence from source and lockfile through its baseline migration, compiler verification, configuration, native activation, backup, and restore procedure. Any item that cannot be evidenced becomes the next engineering task before production activation.

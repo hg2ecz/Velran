@@ -1,0 +1,12 @@
+[package]
+name = "storage"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+authors = ["Zsolt Krüpl"]
+
+[dependencies]
+rustix = { workspace = true, features = ["fs"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt"] }
+multer = { workspace = true, features = ["tokio-io"] }
+rand = { workspace = true }

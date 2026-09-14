@@ -1,0 +1,10 @@
+#[action]
+fn create(ctx: ActionContext, db: Db, title: String, body: String) -> Result<Redirect, PageError> {
+    let articleSlug = slug(title);
+    transaction db {
+        queries::insertArticle(tx, articleSlug, title, body)?;
+    }
+    return Ok(redirect(adminArticles()));
+}
+
+route articleCreate POST "/admin/articles" form models::ArticleForm auth role Editor invalidate cache article => actions::create;

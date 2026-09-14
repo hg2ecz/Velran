@@ -1,0 +1,181 @@
+\chapter{Production deployment and service lifecycle}
+
+\noindent\textbf{Learning path: Fast path: core for production.} Learn the release/activation contract and safe deployment workflow.\par\medskip
+
+\invariantblock{Security invariant: verify before activation}{Compile and validate the complete candidate generation before it can become active. If verification or activation fails, keep the previous known-good generation serving traffic.}
+
+\diagnosticblock{Production diagnostic}{SEC-PROD-002}{The application declares an incomplete production policy, so the strict deployment contract cannot be proven.}{Declare all required production invariants: HTTPS required, debug disabled, HSTS required, and database TLS required.}
+
+This chapter does not repeat the configuration reference or observability details. From a production perspective, it summarizes how a verified release becomes a running service, how release switching works, and how the process lifecycle remains controlled. Complete backup, restore, and disaster recovery are covered separately in the next chapter.
+
+\section{The application production contract}
+
+Production security is partly declared by the Velran program itself:
+
+\begin{lstlisting}[language=Velran]
+production {
+    https required;
+    debug disabled;
+    hsts required;
+    database tls required;
+}
+\end{lstlisting}
+
+This is not a second secret/configuration system. It states requirements; the server/operator configuration still supplies certificates, paths and trusted networks. In other words, the Velran source says \emph{what must be true}, while trusted deployment configuration says \emph{how this environment makes it true}. Startup fails if the real topology cannot satisfy the contract. Source reload cannot silently change it; changing production security requirements requires a restart and explicit operator review.
+
+\section{Release path}
+
+Recommended order:
+
+\begin{lstlisting}
+./verify.sh
+-> cargo build --locked --release
+-> immutable release directory
+-> velran-server --config ... --check-config
+-> velran-cli migrate verify
+-> approved velran-cli migrate apply
+-> velran-cli migrate verify
+-> atomic current symlink switch
+-> controlled restart
+-> /health/live
+-> /health/ready
+-> log / metric / audit review
+\end{lstlisting}
+
+The built \code{velran-server} and \code{velran-cli} binaries, application source, and migrations should all be attributable to the same release identifier. Do not modify files one by one inside a live \code{/srv/velran/current} directory. Prepare a new immutable release directory and switch the symlink atomically.
+
+\section{systemd service}
+
+\code{velran-server} is a long-lived service process. \code{velran-cli} is not a daemon: it starts for a migration, auth administration, or another operator task and exits when the task is complete.
+
+\begin{lstlisting}
+[Service]
+User=velran
+Group=velran
+ExecStart=/usr/local/bin/velran-server \\
+  --config /usr/local/etc/velran/server.toml
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+\end{lstlisting}
+
+Run the service under an unprivileged account. Under systemd, let systemd own the process-level cgroup ceilings such as \code{MemoryMax}, \code{CPUQuota}, and \code{TasksMax}; do not simultaneously configure Velran to write the same cgroup controls. The goal is one clear authority for each resource boundary.
+
+For direct TLS on ports 80/443, grant only the bind-service capability (\path{CAP_NET_BIND_SERVICE}). Behind a reverse proxy on \code{127.0.0.1:8080}, omit it.
+
+\section{Controlled restart and readiness}
+
+After changing process-level configuration, run \code{--check-config} first, then perform a controlled restart. In behind-proxy mode, SIGHUP reopens logs and transactionally rebuilds domain/application hosting state, but listener, database/Redis/auth connections, cgroup policy, logging sinks, and other process-level settings still require restart.
+
+Application-source changes use the candidate-activation path described below: compile and validate away from request handling, then swap the domain atomically. A rejected candidate leaves the previous generation active.
+
+During a rolling deployment, send traffic only to ready instances: start the new instance, wait for readiness, then remove the old one. Health diagnostics are covered in the observability chapter.
+
+\section{Migration and rollback are not the same operation}
+
+Rolling back an application binary or source release may be simple; rolling back a database schema is not. Prefer expand/contract migrations in production: first introduce a backward-compatible schema, then remove obsolete structures only in a later release after the rollback window has closed.
+
+Do not tie automatic reverse SQL to switching the application symlink back. If a migration transformed or deleted data, the real recovery point may be the verified backup.
+
+\section{Recovery gate before deployment}
+
+Before a destructive or schema-compatibility-sensitive release, require a known recovery point and recent restore evidence. Backup contents, DB/AppFs consistency, RPO/RTO, and the rollback-versus-restore decision tree are covered in the next chapter. Deployment is responsible for ensuring that this gate is satisfied before the release switch.
+
+\section{Minimum post-deploy checks}
+
+\begin{enumerate}
+  \item the new process is running and ready;
+  \item the public home page or a smoke route responds through the real edge path;
+  \item there is no new error spike in the server log;
+  \item the access-log status distribution looks normal;
+  \item the audit log is writable;
+  \item DB/Redis dependency metrics have not degraded;
+  \item the release hash and database migration state are known for a rollback decision.
+\end{enumerate}
+
+
+\section{Release invariants}
+
+A production release should preserve a small set of invariants regardless of deployment tooling:
+
+\begin{itemize}
+  \item build and verification use the locked dependency graph;
+  \item the application source, migrations, server/CLI binaries and approved configuration version are attributable to one release record;
+  \item production secrets remain outside the immutable release tree;
+  \item a candidate application is fully compiled and validated before it can become active;
+  \item activation is atomic: requests observe either the old generation or the new generation, never a half-installed mixture;
+  \item a failed candidate leaves the previous known-good generation serving traffic;
+  \item database migration state and application rollback compatibility are known before the switch.
+\end{itemize}
+
+Operationally: a candidate either passes the complete gate and activates atomically, or it does not activate. Native compilation failure is a deployment failure, never a fallback signal.
+
+\section{What can reload and what requires restart}
+
+Source reload is intentionally narrower than process reconfiguration. Treat these as different operational events.
+
+\begin{longtable}{L{0.28\textwidth}L{0.30\textwidth}L{0.32\textwidth}}
+\toprule
+Change & Normal mechanism & Reason \\
+\midrule
+Velran application source/module graph & compile candidate, validate, atomic generation swap & application-local code generation \\
+Immutable release symlink target & watched source path triggers candidate generation & preserves atomic release layout \\
+Log rotation in supported topology & SIGHUP/log reopen & no application-policy change \\
+Listener/TLS/process topology & config check + controlled restart & process-level authority \\
+DB/Redis/auth connection configuration & config check + controlled restart & connection/service lifecycle \\
+Cgroup/resource authority & controlled restart & process-level isolation boundary \\
+Production security requirements & operator review + restart & source reload must not silently weaken policy \\
+\bottomrule
+\end{longtable}
+
+This distinction prevents a convenient source reload mechanism from turning into an implicit process-configuration channel.
+
+\section{Candidate activation: the operator rule}
+
+Treat activation as a two-step boundary: \emph{compile/validate first, activate second}. Failure leaves the known-good generation serving traffic; never edit the active generated artifact in place. Application developers can stop at this contract.
+
+\subsection*{Under the hood: how native activation preserves the boundary}
+
+This subsection is optional for application developers. The source-reload supervisor watches the logical entrypoint and complete transitive module graph. After the file set remains stable for the debounce period, compilation happens away from request handling. The candidate is checked against the same route, resource, cache, authentication and hosting constraints used at startup.
+
+Internally, the accepted source becomes verified executable IR, generated safe Rust, a \code{rustc}-compiled immutable \code{cdylib}, and only then a new runtime generation. Only after those checks succeed is the domain runtime replaced atomically. Requests that already hold the previous runtime finish on that generation; later requests use the new one. Public-cache generations advance at the same activation boundary, so stale rendered content does not survive merely because its previous TTL has not expired.
+
+There is no VM/interpreter fallback if native compilation or activation fails. This is an implementation detail with an operational consequence: failure remains visible and the known-good generation remains authoritative.
+
+\section{Pre-deploy evidence}
+
+Before switching traffic or the active release, record enough evidence to answer four questions later:
+
+\begin{enumerate}
+  \item \textbf{What was built?} release identifier, source revision/artifact identity and hashes.
+  \item \textbf{What dependencies and capabilities were approved?} locked Cargo graph plus supply-chain capability/provenance verification.
+  \item \textbf{What schema is expected?} migration set and successful migration verification.
+  \item \textbf{How do we recover?} known backup/restore readiness and the compatibility boundary for application rollback.
+\end{enumerate}
+
+This evidence is deliberately secret-free. It proves provenance and operational state without copying credentials into release records.
+
+\section{Deployment anti-patterns}
+
+Avoid the following shortcuts:
+
+\begin{itemize}
+  \item running an unlocked release build that silently updates dependency resolution;
+  \item editing files directly inside the active release directory;
+  \item treating application rollback as automatic database rollback;
+  \item letting the server apply migrations implicitly during startup;
+  \item putting secrets in command-line arguments, release manifests or source files;
+  \item sending traffic before readiness has succeeded;
+  \item accepting a failed candidate by falling back to a different execution engine.
+\end{itemize}
+
+\section{Practice: rehearse an activation failure}
+\paragraph{Exercise mode: operational scenario.} Use the operational-scenario method defined in the preface.
+
+Prepare a candidate release that intentionally fails one pre-activation check. Verify that the active generation remains unchanged and that the failure is visible to operators. Then rehearse a successful activation and rollback.
+
+\section{Common mistake: equating build success with deployability}
+A compiled artifact is only one piece of release evidence. Configuration, migrations, secrets, TLS material, resource policy, health checks, and activation semantics must all be valid before traffic depends on the generation.
+
+\section{Running project checkpoint: Secure Notes}
+Freeze \path{examples/secure-notes/checkpoints/18-production/main.vrn} as the production candidate. Package Secure Notes as a production candidate. Record the exact verification commands, migration state, configuration check, activation evidence, and rollback point. The goal is a repeatable release procedure rather than a one-off successful deployment.

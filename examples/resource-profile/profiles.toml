@@ -1,0 +1,14 @@
+# The server-wide request hard ceiling is still configured by
+# --max-instructions and --max-runtime-alloc-bytes.
+
+[profile.default]
+max_instructions = 100000
+max_alloc_bytes = 33554432
+max_external_io_bytes = 33554432
+max_concurrent = 4096
+
+[profile.compute]
+max_instructions = 2000000
+max_alloc_bytes = 134217728
+max_external_io_bytes = 134217728
+max_concurrent = 2

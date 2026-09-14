@@ -1,0 +1,138 @@
+\chapter{Fejlesztői referencia és továbblépés}
+
+\noindent\textbf{Tanulási út: Teljes út / referenciatérkép.} Ebből keresd meg egy nyelvi, security vagy operátori kérdés authoritative forrását.\par\medskip
+
+\section{Canonical dokumentációs térkép}
+
+Ez a könyv a hosszú formájú fejlesztői útmutató. A jelenlegi high-level security státusz a \path{SECURITY-STATUS.md}; a részletes canonical témadokumentáció a \path{docs/} alatt él. Ahol van magyar operator/fejlesztő companion, az a \path{docs/hu/} alatt található.
+
+\begin{longtable}{L{0.34\textwidth}L{0.58\textwidth}}
+\toprule
+Téma & Canonical projekt-dokumentáció \\
+\midrule
+Aktuális security architecture & \path{SECURITY-STATUS.md}, \path{docs/99-security-architecture-and-status.md} \\
+Secure-by-construction alap & \path{docs/57-secure-by-construction-foundation.md} \\
+Domain típusok és bounded collectionök & \path{docs/62-domain-types-and-bounded-collections.md} \\
+Nominal type és refinement & \path{docs/63-nominal-domain-types.md}, \path{docs/64-domain-value-refinement.md} \\
+Public projection és secret flow & \path{docs/65-explicit-public-projections.md}, \path{docs/66-secret-consumer-contracts.md} \\
+Password, token és session & \path{docs/67-typed-credentials-and-passwords.md} - \path{docs/74-platform-owned-browser-sessions.md} \\
+Permission, MFA, critical operation & \path{docs/75-function-level-permissions.md} - \path{docs/77-critical-operation-contracts.md} \\
+Resource profile és bounded request input & \path{docs/78-route-budget-profiles.md}, \path{docs/79-bounded-request-collections.md} \\
+Public error boundary & \path{docs/80-public-error-boundaries.md} \\
+Tenant authority és isolation & \path{docs/81-tenant-membership-authority.md}, \path{docs/82-compiler-enforced-tenant-isolation.md} \\
+Idempotens critical operation & \path{docs/83-idempotent-critical-operations.md} \\
+Verified webhook & \path{docs/81-verified-webhook-integrity.md} \\
+Safe upload state machine & \path{docs/84-safe-file-upload-state-machine.md} \\
+Effect/capability modell & \path{docs/85-effect-capability-foundation.md} \\
+Typed outbound integration & \path{docs/86-typed-outbound-integration-calls.md} \\
+Production security policy & \path{docs/87-production-configuration-policy.md} \\
+Typed HTTP metadata & \path{docs/88-typed-http-metadata.md} \\
+Crypto key purpose/lifecycle & \path{docs/89-crypto-key-purpose-lifecycle.md} \\
+Generált CSP/security header & \path{docs/90-generated-security-headers.md} \\
+Supply-chain capability/provenance & \path{docs/92-supply-chain-capability-provenance.md} \\
+Authentication abuse protection & \path{docs/93-authentication-abuse-protection.md} \\
+Zárt sum type/exhaustive match & \path{docs/94-sum-types-and-exhaustive-match.md} \\
+Transaction outcome semantics & \path{docs/95-transaction-outcome-semantics.md} \\
+Authenticated encryption/key lifecycle & \path{docs/96-authenticated-encryption-key-lifecycle.md} \\
+Advanced resource safety & \path{docs/97-advanced-resource-safety.md} \\
+Typed security event & \path{docs/79-typed-security-events.md} \\
+Bounded JSON boundary & \path{docs/100-bounded-json-boundary.md} \\
+Security monitoring/redaction & \path{docs/98-security-monitoring-and-redaction.md} \\
+Dependency security & \path{docs/19-dependency-security.md} \\
+Modulok/névterek & \path{docs/21-modules-and-namespaces.md} \\
+Matematika/idő, string/list/dict/regex & \path{docs/44-math-and-timing.md}, \path{docs/46-string-builtins.md} - \path{docs/49-regular-expressions.md} \\
+Optimistic locking & \path{docs/24-optimistic-locking.md} \\
+IPv6-ready egress & \path{docs/32-ipv6-egress.md} \\
+Debian package/install & \path{docs/36-debian-package.md} \\
+Reverse proxy/multidomain/reload & \path{docs/37-multi-domain-hosting.md} - \path{docs/39-automatic-source-reload.md} \\
+Maintainability/architecture gate & \path{docs/50-maintainability-and-clean-code.md} \\
+\bottomrule
+\end{longtable}
+
+\section{Napi secure fejlesztési checklist}
+
+\begin{enumerate}
+  \item Authority legyen explicit: route policy, DB capability, tenant, permission/MFA és named outbound integration.
+  \item Untrusted inputot nominal/domain típusra refine-olj; validationt ne keverd authorizationnel.
+  \item Protected write előtt object/mutation authorization proof kell.
+  \item Permission/MFA/transaction/audit/idempotency igénynél használj critical contractot.
+  \item Retry-szenzitív transactionnél kezeld exhaustívan a \code{Committed}, \code{RolledBack},\\ \code{CommitUnknown} állapotot.
+  \item Ne vezess vissza raw SQL/HTML, arbitrary redirect/header/filename vagy arbitrary outbound URL kerülőutat.
+  \item Upload maradjon staged/private inspectionig és explicit publishig.
+  \item Secret maradjon typed secret/credential/key boundary mögött; monitoringhoz\\ \code{redact(...)}.
+  \item DB row, collection, file, outbound body és request idő legyen bounded.
+  \item Platform release előtt locked Cargo metadata/check/test, \code{./verify.sh}, supply-chain és release-manifest verification.
+\end{enumerate}
+
+
+\section{Hogyan használd a dokumentációs készletet?}
+
+A kérdéshez illő dokumentációs réteget használd:
+
+\begin{longtable}{L{0.25\textwidth}L{0.31\textwidth}L{0.34\textwidth}}
+\toprule
+Dokumentumosztály & Mire jó? & Authority \\
+\midrule
+Ez a könyv & tanulási út és end-to-end fejlesztési workflow & magyarázó, a canonical docshoz igazítva \\
+\path{docs/*.md} & feature-contractok, invariantok és fókuszált példák & canonical témadokumentáció \\
+\path{docs/hu/*.md} & magyar companion napi fejlesztéshez/üzemeltetéshez & fordított companion, ahol létezik \\
+\path{SECURITY-STATUS.md} & aktuális high-level security architecture/status & jelenlegi architecture summary \\
+\path{RUST_FIRST_LANGUAGE_POLICY.md} & nyelvi/backend irány és native execution boundary & jelenlegi language policy \\
+\path{history/development-notes/} & régi iterációk, kísérletek és leváltott design-context & nem normatív történet \\
+\bottomrule
+\end{longtable}
+
+Ha a források eltérnek, az aktuális canonical feature-docot és a verified compiler/runtime viselkedést preferáld, majd frissítsd a stale szöveget. A történeti note design-előzményt magyaráz, nem aktuális szintaxis- vagy deployment utasítás.
+
+\section{Feladatorientált olvasási útvonalak}
+
+Gyakori munkáknál gyorsabb ez a sorrend, mint a repository numerikus végigolvasása:
+
+\begin{itemize}
+  \item \textbf{CRUD alkalmazás:} 3--7. fejezet, majd form, optimistic locking és domain-type dokumentumok.
+  \item \textbf{JSON/API service:} 9. fejezet, bounded JSON, typed HTTP metadata és public error boundary.
+  \item \textbf{Authentication-sensitive mutáció:} 7. fejezet, function permission, MFA elevation, critical-operation contract és idempotency.
+  \item \textbf{Fájl/kép fogadása:} 8. fejezet és a safe upload state-machine dokumentum.
+  \item \textbf{Külső service hívása:} 13. fejezet, secure routing/egress és typed outbound integration dokumentumok.
+  \item \textbf{Production előkészítés:} 15--23. fejezet, production configuration policy, supply-chain provenance, recovery és production checklist.
+  \item \textbf{Security invariant vizsgálata:} indulj a \path{SECURITY-STATUS.md}-ből, majd kövesd az adott invariant nevét viselő fókuszált dokumentumot.
+\end{itemize}
+
+\section{Futtatható companion példák}
+
+A könyv szándékosan tartalmaz teljes programokat és fókuszált kódrészleteket is. Ha egy példát másolni, módosítani vagy regressziós fixture-ként használni szeretnél, indulj olyan repository-példából, amely részt vesz a projekt verificationben:
+
+\begin{longtable}{L{0.27\textwidth}L{0.31\textwidth}L{0.32\textwidth}}
+\toprule
+Feladat & Verified companion & Mit érdemes tanulmányozni? \\
+\midrule
+Kis moduláris alkalmazás & \path{examples/starter-project/} & modulok, typed page/action, CSRF és typed route helper \\
+CRUD és typed SQL & \path{examples/crud/app.vrn} & \code{Vec<T>}, \code{Option<T>}, transaction, validation és object authorization \\
+Authentication policy & \path{examples/auth/app.vrn} & authenticated route policy és session-aware alkalmazásfolyam \\
+Fájl és upload & \path{examples/upload/app.vrn} & typed upload boundary és biztonságos fájlkezelés \\
+JSON/API & \path{examples/json-api/app.vrn} & typed JSON request/response és API route-viselkedés \\
+Component/layout & \path{examples/components/app.vrn} & componentek, layoutok és typed HTML composition \\
+Wiki/CMS & \path{examples/wiki/main.vrn} & slugolt tartalom, Markdown renderelés, layout és mutációs flow \\
+SQL-alapú Markdown & \path{examples/markdown-sql-cache/} & typed id lookup, biztonságos szerveroldali Markdown renderelés és opcionális public response cache \\
+Optimistic locking & \path{examples/optimistic-locking/main.vrn} & verziózott update és conflict handling \\
+Outbound integration & \path{examples/outbound-native/app.vrn} & named, typed outbound hívás és egress boundary \\
+Security event & \path{examples/typed-security-events/} & typed security-event emission és monitoring boundary \\
+\bottomrule
+\end{longtable}
+
+A könyv rövid listingje szándékosan elhagyhat a tárgyalt fogalomhoz nem szükséges deklarációkat. Az ilyen fragment magyarázó példa, nem állítás arról, hogy önmagában teljes program. Copy/paste kiindulópontként a fenti companion fájlokat használd. A csak verifikációra szolgáló rejection esetek a \path{tests/fixtures/} alatt vannak, nem a tanulói példakatalógusban; a corpus metaadatai a \path{tests/manifests/} alatt élnek. A \path{tools/check-book-velran-examples.sh} pedig védi a könyvet a visszacsúszó legacy szintaxistól, a hiányzó route-policytól, a nem létező példaútvonaltól és az angol/magyar Velran-listing driftjétől.
+
+\section{A példák hitelességének megőrzése}
+
+A dokumentációs példák production-source szabályokat kövessenek: aktuális Rust-like szintaxis, explicit route policy, typed/bounded input, compiler-owned SQL, raw HTML/redirect/egress shortcut nélkül és native-only executionnel. Ha van megfelelő verified \path{examples/} fixture, azt preferáld. A módosítás csak language-corpus review és EN/HU szerkezeti paritás után kész.
+
+\section{Gyakorlat: válaszd ki a megfelelő authority-t}
+\paragraph{Gyakorlási mód: üzemeltetési szcenárió.} Használd az előszóban meghatározott üzemeltetési módszert.
+
+Egy nyelvi kérdésnél döntsd el, hogy a válasz a compiler által ellenőrzött nyelvi felülethez, a web framework contracthoz, deployment dokumentációhoz vagy történeti jegyzethez tartozik. Először a leginkább authoritative aktuális forrást használd, a fordított vagy történeti anyagot pedig a megjelölt szerepe szerint kezeld.
+
+\section{Tipikus hiba: dokumentációs konfliktust találgatással oldunk fel}
+Ha két dokumentum eltér, ne kombináld őket csendben. Preferáld a canonical aktuális specifikációt vagy verified viselkedést, majd frissítsd a stale dokumentumot, hogy a konfliktus ne maradjon meg a következő olvasónak.
+
+\section{Olvasói checkpoint: Secure Notes}
+Válassz egy Secure Notes tervezési döntést, és keresd meg az azt alátámasztó aktuális authoritative dokumentációt. Ez gyakorlati tesztje annak, hogy a dokumentációs térkép használható, nem csak teljes.

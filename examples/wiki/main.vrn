@@ -1,0 +1,95 @@
+model WikiPage {
+    id: i64
+    slug: Slug
+    title: String
+    body: String
+}
+
+form WikiForm {
+    title<String>
+    body<String>
+    validate title length 2 200 body length 1 300000
+}
+
+#[query]
+fn wikiBySlug(db: Db, slug: Slug) -> Result<WikiPage, DbError> sql {
+    SELECT id, slug, title, body
+    FROM wiki_pages
+    WHERE slug = :slug
+}
+
+#[query]
+fn wikiById(db: Db, id: i64) -> Result<WikiPage, DbError> sql {
+    SELECT id, slug, title, body
+    FROM wiki_pages
+    WHERE id = :id
+}
+
+#[query]
+fn updateWikiPage(
+    tx: Transaction,
+    id: i64,
+    title: String,
+    body: String
+) -> Result<(), DbError> mutates WikiPage by id sql {
+    UPDATE wiki_pages
+    SET title = :title, body = :body
+    WHERE id = :id
+}
+
+#[layout]
+fn Main(title: String) -> Html {
+    html {
+        <html>
+            <head><title>{{ title }}</title></head>
+            <body><main>@content</main></body>
+        </html>
+    }
+}
+
+
+#[page]
+fn wikiIndex(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {
+        <main>
+            <h1>Wiki</h1>
+            <p>A szerkesztes sikeresen elmentve.</p>
+        </main>
+    });
+}
+
+#[page]
+fn wikiShow(ctx: PageContext, db: Db, slug: Slug) -> Result<Html, PageError> {
+    let page = wikiBySlug(db, slug)?;
+    return Ok(html {
+        @layout(Main, page.title) {
+            <article>
+                <h1>{{ page.title }}</h1>
+                @markdown(page.body)
+            </article>
+        }
+    });
+}
+
+#[action]
+fn wikiEdit(
+    ctx: ActionContext,
+    db: Db,
+    id: i64,
+    title: String,
+    body: String
+) -> Result<Redirect, PageError> {
+    let page = wikiById(db, id)?;
+    authorize page authenticated;
+    transaction db {
+        updateWikiPage(tx, page.id, title, body)?;
+    }
+    return Ok(redirect(wikiIndex()));
+}
+
+route wikiIndex GET "/wiki" public => wikiIndex;
+route wikiShow GET "/wiki/:slug<Slug>" public => wikiShow;
+route wikiEdit POST "/admin/wiki/:id<i64>"
+    form WikiForm
+    auth role Editor
+    => wikiEdit;

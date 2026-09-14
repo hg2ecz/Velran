@@ -1,0 +1,55 @@
+model Product {
+    id: i64
+    name: String
+    price: i64
+}
+
+#[query]
+fn listProducts(
+    db: Db,
+    offset: i64
+) -> Result<Vec<Product>, DbError> sql {
+    SELECT id, name, price
+    FROM products
+    ORDER BY id
+    LIMIT 100 OFFSET :offset
+}
+
+#[page]
+fn productsApi(
+    ctx: PageContext,
+    db: Db,
+    limit: i64,
+    offset: i64
+) -> Result<Json, PageError> {
+    let products = listProducts(db, offset)?;
+    return Ok(json(expose(products, id, name, price)));
+}
+
+#[page]
+fn csrfApi(ctx: PageContext) -> Result<Json, PageError> {
+    return Ok(json(csrfToken));
+}
+
+#[action]
+fn echoApi(
+    ctx: ActionContext,
+    name: String,
+    age: i64,
+    active: bool
+) -> Result<Json, PageError> {
+    return Ok(json(name));
+}
+
+route productsApi GET "/api/products"
+    query limit<i64> offset<i64>
+    validate limit range 1 100 offset range 0 1000000
+    public => productsApi;
+
+route csrfApi GET "/api/csrf" auth user => csrfApi;
+
+route echoApi POST "/api/echo"
+    json name<String> age<i64> active<bool>
+    validate name length 1 100 age range 0 150
+    auth user
+    => echoApi;

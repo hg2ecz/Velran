@@ -1,0 +1,72 @@
+model Product {
+    id: i64
+    name: String
+    price: i64
+}
+
+#[query]
+fn listProducts(db: Db) -> Result<Vec<Product>, DbError> sql {
+    SELECT id, name, price
+    FROM products
+    ORDER BY id DESC
+    LIMIT 50
+}
+
+#[query]
+fn createProduct(
+    tx: Transaction,
+    name: String,
+    price: i64
+) -> Result<(), DbError> sql {
+    INSERT INTO products(name, price)
+    VALUES (:name, :price)
+}
+
+#[page]
+fn home(ctx: PageContext, db: Db) -> Result<Html, PageError> {
+    let products = listProducts(db)?;
+
+    return Ok(html {
+        <main>
+            <h1>Mini termeklista</h1>
+
+            <form method="post" @action(create)>
+                <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+                <label>
+                    Nev
+                    <input name="name" maxlength="100">
+                </label>
+                <label>
+                    Ar
+                    <input name="price">
+                </label>
+                <button type="submit">Hozzaadas</button>
+            </form>
+
+            <ul>
+                @for product in products {
+                    <li>#{{ product.id }} - {{ product.name }} - {{ product.price }}</li>
+                }
+            </ul>
+        </main>
+    });
+}
+
+#[action]
+fn create(
+    ctx: ActionContext,
+    db: Db,
+    name: String,
+    price: i64
+) -> Result<Redirect, PageError> {
+    transaction db {
+        createProduct(tx, name, price)?;
+    }
+    return Ok(redirect(home()));
+}
+
+route home GET "/" public => home;
+route create POST "/products"
+    form name<String> price<i64>
+    validate name length 1 100 price range 0 100000000
+    public => create;

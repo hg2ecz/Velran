@@ -1,0 +1,34 @@
+#[inline(never)]
+fn maybe_normalize(input: &str) -> Option<String> {
+    return Some(input.trim().to_lowercase());
+}
+
+#[inline(never)]
+fn accepted(input: &str) -> Result<bool, String> {
+    return Ok(input.contains("safe"));
+}
+
+#[inline(never)]
+fn rejected(input: &str) -> Result<i64, String> {
+    return Err(input.trim().to_lowercase());
+}
+
+#[page]
+fn pureTaggedSum(ctx: PageContext, text: String) -> Result<Html, PageError> {
+    let maybe = maybe_normalize(&text);
+    let ok_result = accepted(&text);
+    let err_result = rejected(&text);
+    let has_value = maybe.is_some();
+    let normalized = maybe.unwrap_or("fallback".to_string());
+    let accepted_ok = ok_result.is_ok();
+    let accepted_value = ok_result.unwrap_or(false);
+    let rejected_err = err_result.is_err();
+    let rejected_value = err_result.unwrap_or(0);
+    return Ok(html {
+        <p>option={{ has_value }} value={{ normalized }}</p>
+        <p>ok={{ accepted_ok }} accepted={{ accepted_value }}</p>
+        <p>err={{ rejected_err }} fallback={{ rejected_value }}</p>
+    });
+}
+
+route GET "/pure-fn-tagged-sum" -> pureTaggedSum

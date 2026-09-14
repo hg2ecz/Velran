@@ -1,0 +1,201 @@
+\chapter{External services and egress policy}
+
+\noindent\textbf{Learning path: Complete path / integration chapter.} Read before adding outbound network integrations.\par\medskip
+
+\invariantblock{Security invariant: egress is an explicit capability}{Application code does not gain arbitrary network access. Outbound communication crosses a named, configured capability boundary so destinations, credentials, limits, and audit policy remain reviewable.}
+
+\diagnosticblock{Compiler diagnostic}{SEC-EFFECT-002}{A handler performs a network effect without declaring the matching integration capability in \code{uses}.}{Declare the named integration capability explicitly in the handler signature; do not replace it with ambient or raw network access.}
+
+Outbound HTTPS is a separate trust boundary because the application initiates the connection. Velran therefore exposes it as an explicit capability, not ambient network access.
+
+\section{The current Velran boundary}
+
+Velran intentionally has no unrestricted \code{http.get(userUrl)} style API. Instead, source declares a named integration and the handler explicitly receives the capability:
+
+\begin{lstlisting}[language=Velran]
+integration Billing {
+    egress payments
+}
+
+#[action]
+fn charge(
+    ctx: ActionContext,
+    amount: i64
+) -> Result<Json, PageError>
+    uses Billing
+{
+    let status = Billing.postJson("/v1/charges", amount)?;
+    return Ok(json(status));
+}
+\end{lstlisting}
+
+The declaration exposes only a trusted \emph{name}. Host, IP, port, TLS and network ranges are not source-code authority. The compiler records the call as the \code{net.payments} effect; a handler cannot perform the call without the matching \code{uses Billing} capability.
+
+The safe-path rule is therefore:
+
+\begin{lstlisting}
+Velran business intent
+        |
+        v
+named integration capability
+        |
+        v
+trusted operator egress policy
+        |
+        v
+bounded HTTPS transport
+\end{lstlisting}
+
+\section{Why arbitrary URLs are intentionally unrepresentable}
+
+A user-controlled fetch target creates classic SSRF risk. Examples that must never become ordinary application destinations include loopback, link-local metadata services and internal infrastructure:
+
+\begin{lstlisting}
+http://127.0.0.1/...
+http://169.254.169.254/...
+http://internal-db.example/...
+http://[::1]/...
+\end{lstlisting}
+
+Velran source can choose a relative path within a declared integration, but not the scheme, host, IP or port. Paths must be compiler-known rooted relative literals; absolute, protocol-relative and dynamic destination URLs are rejected.
+
+\section{Named target: configuring the network authority}
+
+The trusted egress policy binds the Velran target name to concrete transport authority. A target may look like:
+
+\begin{lstlisting}
+[[target]]
+name = "payments"
+hosts = ["api.payments.example"]
+cidrs = ["203.0.113.0/24", "2001:db8:1200::/48"]
+ports = [443]
+tls_required = true
+max_dns_answers = 8
+max_sent_bytes = 262144
+max_received_bytes = 2097152
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+\end{lstlisting}
+
+For the Velran typed call surface the startup policy must resolve the target unambiguously to the supported endpoint shape. An application using an outbound effect does not start if the required egress policy is missing or inconsistent.
+
+\section{Policy checks multiple layers}
+
+Egress policy is intentionally stronger than a hostname allowlist.
+
+\subsection*{Host, port and TLS}
+
+The destination host and port come from trusted policy, and TLS identity verification uses the configured hostname. Application input cannot weaken TLS or choose a different port.
+
+\subsection*{DNS and CIDR}
+
+Every A and AAAA answer is checked against the allowed network ranges. If any answer violates policy, the resolution is rejected fail closed. This protects against DNS rebinding and accidental split-horizon exposure.
+
+\subsection*{Peer verification after connect}
+
+After TCP connection establishment, the actual peer IP is checked again. The selected address must still satisfy CIDR policy; DNS validation is not treated as permanent proof.
+
+\section{IPv4 and IPv6 use the same authority model}
+
+The policy is dual-stack. IPv4-mapped IPv6 addresses are normalized before policy evaluation so an IPv4 restriction cannot be bypassed through an IPv6 representation. Loopback, link-local, ULA, multicast and unspecified ranges receive no implicit trust.
+
+\section{Typed outbound operations}
+
+The first Velran call surface deliberately stays small:
+
+\begin{lstlisting}[language=Velran]
+let status = Billing.get("/v1/status")?;
+let status = Billing.postJson("/v1/charges", amount)?;
+\end{lstlisting}
+
+Important constraints are part of the security model:
+
+\begin{itemize}
+  \item page handlers may perform outbound GET but not outbound POST side effects;
+  \item JSON POST is an action capability;
+  \item generic outbound JSON cannot receive \code{Secret}, \code{Sensitive}, credential-purpose or upload values;
+  \item server-side egress does not grant browser network authority -- generated CSP keeps \code{connect-src 'none'} unless a separately designed browser capability exists;
+  \item the current typed call returns the HTTP status code, not an automatically trusted response body.
+\end{itemize}
+
+The last point is deliberate. External response data would have to enter as untrusted data and cross a typed validation/refinement boundary; the language does not silently convert arbitrary upstream JSON into trusted domain values.
+
+\section{Size, protocol and time limits}
+
+An upstream service may be broken or hostile. The transport therefore bounds DNS answers, request bytes, response bytes and time. In addition to operator target limits, the Velran status-call surface applies its own hard upstream-body ceiling and rejects unsupported transfer/content encodings.
+
+The complete request also participates in the runtime cumulative external-I/O budget. This prevents several individually legal network operations from composing into one unbounded request.
+
+\section{Secrets for external services}
+
+External credentials remain behind a dedicated secret-store boundary, for example:
+
+\begin{lstlisting}
+/run/secrets/velran/
+  payments-bearer
+\end{lstlisting}
+
+Secret names cannot become arbitrary filesystem paths. Credentials must never be written to response bodies, ordinary logs, security events or audit payloads. Velran's typed \code{Secret<T>} rules and the trusted Rust secret store reinforce the same boundary at different layers.
+
+\section{Retries, idempotency and exceptional outcomes}
+
+Automatic retry of a side-effecting POST is intentionally not a default. Critical retry-sensitive application operations should use the Velran idempotency contract rather than ad-hoc retry loops.
+
+For critical database work, transaction outcome is explicit:
+
+\begin{lstlisting}[language=Velran]
+let outcome = transaction db {
+    charge(tx)?;
+};
+
+match outcome {
+    Committed => { return Ok(json(true)); }
+    RolledBack => { fail conflict; }
+    CommitUnknown => { fail conflict; }
+}
+\end{lstlisting}
+
+An idempotent critical transaction must capture and exhaustively handle this outcome. \code{CommitUnknown} must not silently become ``retry the POST'', because the side effect may already have committed.
+
+\section{Webhooks are the inverse boundary}
+
+An outbound integration and an inbound webhook solve opposite problems. A webhook route uses a declared verification policy, raw-body signature verification, timestamp/replay-window checks and an atomic replay claim before the handler receives authority. Do not model a webhook as merely a public JSON POST.
+
+\section{Synchronous request or background work?}
+
+Velran currently has no first-class background-job subsystem. A short, bounded integration can remain in the request/response cycle. A long or reliably retryable workflow should wait for an explicit job/outbox design rather than being emulated with ad-hoc threads, subprocesses or unbounded request time.
+
+\section{Minimum testing}
+
+Prove at least:
+
+\begin{itemize}
+  \item unknown integration or missing \code{uses} capability is rejected at compile time;
+  \item dynamic and absolute destination paths are rejected;
+  \item page-side POST is rejected;
+  \item allowed host + allowed IPv4 and IPv6 work;
+  \item mixed DNS answers with one forbidden address fail closed;
+  \item forbidden port, TLS identity mismatch and peer-IP mismatch fail closed;
+  \item request/response byte limits and timeouts are enforced;
+  \item unsupported upstream transfer/content encoding is rejected;
+  \item cumulative external-I/O exhaustion becomes a resource-limit failure;
+  \item secrets cannot flow into generic outbound JSON.
+\end{itemize}
+
+\section{The essence of this chapter}
+
+External HTTPS is a \textbf{named, typed, bounded capability}; trusted deployment policy owns the destination. SSRF resistance, TLS policy and resource limits therefore remain part of the secure path.
+
+\section{Verified companion example}
+The minimal native outbound-capability example is \path{examples/outbound-native/app.vrn}. It is intentionally small: the important contract is that source names an integration capability while trusted deployment policy owns the actual destination authority.
+
+\section{Practice: write an egress contract}
+\paragraph{Exercise mode: independent.} Use the independent method defined in the preface.
+
+For one external service, record the destination identity, allowed operation, timeout, retry policy, credential source, expected response shape, and failure behavior. Treat each of these as part of the integration contract rather than as incidental client configuration.
+
+\section{Common mistake: allowing arbitrary outbound destinations}
+An integration should not turn user-controlled input into an arbitrary network destination. Keep egress named, bounded, and reviewable so SSRF-style behavior cannot emerge from a generic HTTP helper.
+
+\section{Running project checkpoint: Secure Notes}
+Add one optional named integration, such as sending a publication notification. Keep it off the core persistence path: a failed external call must have an explicitly designed effect rather than leaving the note in an ambiguous half-updated state.

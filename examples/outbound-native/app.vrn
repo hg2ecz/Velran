@@ -1,0 +1,11 @@
+integration Catalog {
+    egress catalog_api
+}
+
+#[page]
+fn status(ctx: PageContext) -> Result<Json, PageError> uses Catalog {
+    let status = Catalog.get("/health")?;
+    Ok(json(status))
+}
+
+route status GET "/outbound-status" public => status;

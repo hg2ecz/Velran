@@ -1,0 +1,31 @@
+#[page]
+fn regex_demo(
+    ctx: PageContext,
+    text: String
+) -> Result<Html, PageError> {
+    let looks_like_code = regexMatch(text, "^[A-Z]{2}-[0-9]{4}$");
+    let normalized = regexReplace(text, "[^A-Za-z0-9]+", "-");
+    let captures = regexCaptures(text, "^(?P<prefix>[A-Za-z]+)-(?P<number>[0-9]+)$");
+
+    let prefix = "";
+    let number = "";
+    if captures.contains_key("prefix") {
+        prefix = captures["prefix"];
+    }
+    if captures.contains_key("number") {
+        number = captures["number"];
+    }
+
+    return Ok(html {
+        <h1>Regexp demo</h1>
+        <p>Input: {{ text }}</p>
+        <p>Code shape: {{ looks_like_code }}</p>
+        <p>Normalized: {{ normalized }}</p>
+        <p>Captured prefix: {{ prefix }}</p>
+        <p>Captured number: {{ number }}</p>
+    });
+}
+
+route regex_demo GET "/regex"
+    query text<String>
+    public => regex_demo;

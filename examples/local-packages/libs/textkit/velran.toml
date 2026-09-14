@@ -1,0 +1,4 @@
+[package]
+name = "textkit"
+kind = "lib"
+entry = "lib.vrn"

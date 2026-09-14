@@ -1,0 +1,19 @@
+[package]
+name = "data"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+authors = ["Zsolt Krüpl"]
+
+[features]
+default = ["db-sqlite", "db-postgres", "db-mysql", "redis"]
+db-sqlite = ["sqlx/sqlite"]
+db-postgres = ["sqlx/postgres"]
+db-mysql = ["sqlx/mysql"]
+redis = ["dep:redis"]
+
+[dependencies]
+sqlx = { workspace = true, default-features = false, features = ["runtime-tokio", "tls-rustls", "any"] }
+redis = { workspace = true, default-features = false, optional = true, features = ["tokio-rustls-comp", "connection-manager"] }
+tokio = { workspace = true, features = ["time", "macros", "rt-multi-thread"] }
+sha2 = { workspace = true }

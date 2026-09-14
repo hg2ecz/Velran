@@ -1,0 +1,15 @@
+mod metrics;
+
+#[page]
+fn home(ctx: PageContext) -> Result<Html, PageError> {
+    let summary = metrics::build_summary();
+    let length = summary.length_value();
+    return Ok(html {
+        <main>
+            <h1>Library visibility</h1>
+            <p>{{ length }}</p>
+        </main>
+    });
+}
+
+route home GET "/" public => home;

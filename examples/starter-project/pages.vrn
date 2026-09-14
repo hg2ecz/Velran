@@ -1,0 +1,24 @@
+#[page]
+fn home(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {
+        <main>
+            @flash()
+            <h1>Velran starter</h1>
+            <form method="post" @action(saveDemo)>
+                <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+                <button type="submit">Save demo</button>
+            </form>
+        </main>
+    });
+}
+
+#[page]
+fn article(ctx: PageContext, db: Db, slug: Slug) -> Result<Html, PageError> {
+    let article = queries::articleBySlug(db, slug)?;
+    return Ok(html {
+        <article><h1>{{ article.title }}</h1></article>
+    });
+}
+
+route home GET "/" public => pages::home;
+route article GET "/articles/:slug<Slug>" public => pages::article;

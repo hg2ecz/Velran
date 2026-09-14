@@ -1,0 +1,274 @@
+\chapter{Data entry: typed SQL, CRUD, forms, and PRG}
+
+\noindent\textbf{Learning path: Fast path: core.} Add bounded forms and CRUD without weakening authorization or transaction boundaries.\par\medskip
+
+\rustbridgeblock{Typed values, structs, \code{Option}/\code{Result}, comparisons, and normal control flow remain the language of business rules.}{Route form declarations, validation bounds, transaction capabilities, authorization proofs, and typed redirects define the protected mutation boundary.}{Do not rewrite business validation as framework magic. Keep domain logic Rust-like and use Velran constructs where data crosses trust or effect boundaries.}
+
+
+\invariantblock{Security invariant: bound input before effect}{Treat request data as untrusted until it is parsed into the expected type, normalized where needed, and checked against explicit bounds. Do this before database mutation, file write, redirect target selection, or another protected effect.}
+
+\diagnosticblock{Verifier diagnostic}{SEC-A01-005}{A mutation query received an object key without authorization proof for that model/key pair.}{Load the object, authorize it, then pass the authorized key (or an unchanged local alias) into the mutation.}
+
+A CRUD mutation follows one cycle: read, accept typed form input, validate, authorize, mutate in a transaction, then redirect and read again. The key distinction is: \emph{valid input is not yet authorized input}.
+
+\section{Apply the lifecycle to a CRUD mutation}
+
+For a typical edit request, read the seven-stage model concretely as follows:
+
+\begin{lstlisting}
+POST /notes/42
+  -> parse: Form<NoteEdit>
+  -> validate: title/body bounds
+  -> authenticate: require a user session
+  -> authorize: load note 42, then prove ownership/permission
+  -> transaction: optimistic-lock update + audit
+  -> response: typed redirect to GET
+\end{lstlisting}
+
+Three rules matter most. Validation never proves authorization. Authentication never proves object ownership. A successful read performed before the transaction never replaces an authoritative concurrency check inside the mutation. Keeping these statements separate prevents many CRUD vulnerabilities from looking like ordinary form bugs.
+
+\section{Typed SQL and CRUD}
+
+\subsection*{Query}
+
+\begin{lstlisting}[language=Velran]
+#[query]
+fn articleBySlug(db: Db, slug: Slug)
+    -> Result<Article, DbError> sql {
+    SELECT id, slug, title, body
+    FROM articles
+    WHERE slug = :slug
+}
+\end{lstlisting}
+
+The SQL text is static and compiler-owned. A user-provided value may enter only as a typed bind, such as \code{:slug}.
+
+\subsection*{Mutation in a transaction}
+
+\begin{lstlisting}[language=Velran]
+#[query]
+fn articleById(db: Db, id: i64)
+    -> Result<Article, DbError> sql {
+    SELECT id, slug, title, body
+    FROM articles
+    WHERE id = :id
+}
+
+#[query]
+fn updateArticle(
+    tx: Transaction,
+    id: i64,
+    title: String,
+    body: String
+) -> Result<(), DbError> mutates Article by id sql {
+    UPDATE articles
+    SET title = :title, body = :body
+    WHERE id = :id
+}
+\end{lstlisting}
+
+The action loads the object, establishes authorization, and only then uses the authorized object key for the mutation:
+
+\begin{lstlisting}[language=Velran]
+#[action]
+fn update(
+    ctx: ActionContext,
+    db: Db,
+    id: i64,
+    title: String,
+    body: String
+) -> Result<Redirect, PageError> {
+    let article = articleById(db, id)?;
+    authorize article authenticated;
+    transaction db {
+        updateArticle(tx, article.id, title, body)?;
+    }
+    return Ok(redirect(adminArticles()));
+}
+\end{lstlisting}
+
+For an ordinary local transaction, success commits and a known database failure rolls back. A \code{Transaction} capability cannot escape the block. For retry-sensitive critical work, capture the explicit transaction outcome instead of assuming every failure proves rollback; Chapter~\ref{ch:db-deep-dive} explains \code{CommitUnknown}.
+
+\subsection*{Portable database schema}
+
+V1 aims for patterns that can remain portable across SQLite, PostgreSQL, and MariaDB. Canonical text may be used as the portable representation for \code{Date}, \code{DateTime}, \code{Uuid}, and \code{Decimal}.
+
+\subsection*{Migration}
+
+The server does not migrate automatically at startup. The recommended flow is:
+
+\begin{lstlisting}
+migrate verify
+migrate apply
+migrate verify
+\end{lstlisting}
+
+Keep migration credentials separate from normal application-runtime credentials.
+
+\section{Forms, validation, and PRG}
+
+\subsection*{Named form schema}
+
+\begin{lstlisting}[language=Velran]
+form ArticleForm {
+    title<String>
+    body<String>
+    published<bool>
+    validate title length 2 200 body length 1 200000
+}
+\end{lstlisting}
+
+Route:
+
+\begin{lstlisting}[language=Velran]
+route articleCreate POST "/admin/articles"
+    form ArticleForm
+    auth role Editor
+    => create;
+\end{lstlisting}
+
+The handler parameter order and types should follow the form fields.
+
+\subsection*{Invalid submission}
+
+For a named form, a missing required field, a field-level typed decode failure, or a declared validation failure results in 422 \emph{Unprocessable Content}. The runtime refills field values in escaped form, attaches field errors, and inserts a CSRF token into the form. An unknown or duplicate field is instead a 400 because it violates the request schema.
+
+This intentionally differs from inline form or JSON schemas: there a typed decode/validation failure is a request-contract violation and returns \code{400}. Use a named form when you want to report the error on the same user-facing form with field-level feedback.
+
+\subsection*{Successful POST and PRG}
+
+After a successful mutation, return a redirect so the browser loads the destination with GET. This Post/Redirect/Get pattern eliminates the common accidental resubmission problem.
+
+\subsection*{A complete simple form-action pattern}
+
+\begin{lstlisting}[language=Velran]
+#[action]
+fn create(
+    ctx: ActionContext,
+    db: Db,
+    title: String,
+    body: String,
+    published: bool
+) -> Result<Redirect, PageError> {
+    let articleSlug = slug(title);
+    transaction db {
+        insertArticle(tx, articleSlug, title, body)?;
+    }
+    return Ok(redirect(adminArticles()));
+}
+\end{lstlisting}
+
+For a named form, a missing checkbox-like \code{bool} field is interpreted as \code{false}.
+
+\subsection*{A practical decision order}
+
+For a state-changing form, use this order during design and review:
+
+\begin{enumerate}
+  \item decode and validate the request at the route/form boundary;
+  \item load the target object if the operation concerns an existing record;
+  \item establish object/permission/tenant authorization;
+  \item perform the mutation inside the appropriate transaction or critical-operation contract;
+  \item redirect with a typed GET route helper;
+  \item invalidate only the caches that the mutation actually makes stale.
+\end{enumerate}
+
+This ordering prevents a common mistake: treating a well-formed identifier or form as proof that the caller may modify the referenced object.
+
+
+\section{A complete edit cycle: validation, authorization, concurrency}
+
+For a create form, validation and a transaction may be enough. Editing an existing business object adds a third concern: the copy shown to the user may be stale by the time the POST arrives. Velran keeps these concerns separate rather than turning one successful validation step into an implicit proof of everything that follows.
+
+A practical edit flow is:
+
+\begin{enumerate}
+  \item decode the request into the declared form types;
+  \item apply field and cross-field validation;
+  \item load the current object and establish authorization;
+  \item compare the submitted version through an optimistic-locking mutation;
+  \item commit the mutation and any business audit record in the same transaction;
+  \item redirect to a GET route after success.
+\end{enumerate}
+
+The version check belongs in the mutation itself. A separate ``does this version still exist?'' SELECT would recreate a race between checking and writing.
+
+\begin{lstlisting}[language=Velran]
+model Article {
+    id: i64
+    title: String
+    version: i64
+}
+
+#[query]
+fn updateArticle(
+    tx: Transaction,
+    id: i64,
+    title: String,
+    version: i64
+) -> Result<Changed, DbError> mutates Article by id sql {
+    UPDATE articles
+    SET title = :title, version = version + 1
+    WHERE id = :id AND version = :version
+}
+\end{lstlisting}
+
+\code{Changed} means that exactly one row must change. A zero-row result represents a stale edit and maps to a conflict instead of silently overwriting somebody else's newer value. More than one affected row violates the mutation invariant and is treated as a database error.
+
+\subsection*{Four boundaries that should not be collapsed}
+
+\begin{longtable}{L{0.20\textwidth}L{0.31\textwidth}L{0.39\textwidth}}
+\toprule
+Boundary & Question & Typical outcome \\
+\midrule
+Request schema & Is this request structurally allowed? & unknown/duplicate field: 400 \\
+Named-form validation & Can the user correct this value? & field/type/declared validation error: 422 \\
+Authorization & May this principal act on this object? & fail closed before mutation \\
+Concurrency invariant & Is the submitted state still current? & stale optimistic-lock version: 409 \\
+\bottomrule
+\end{longtable}
+
+This separation is useful during review: a 422 is not an authorization decision, and successful authorization is not proof that an old browser tab still contains the latest database state.
+
+\section{Database invariants and user-friendly validation}
+
+Application validation should improve feedback, but authoritative uniqueness belongs in the database. If a slug, email, external identifier, or similar value must be unique, enforce that invariant with a database \code{UNIQUE} constraint. A preflight SELECT can still be useful for friendly feedback, but it cannot replace the constraint because two concurrent requests can both pass the preflight check.
+
+The same rule applies more generally: put presentation-oriented checks at the request boundary, domain refinement in typed/domain values, authorization before protected effects, and race-sensitive integrity in the database or another authoritative platform primitive.
+
+\section{Mutation review checklist}
+
+Before accepting a CRUD mutation, verify all of the following:
+
+\begin{itemize}
+  \item the route has an explicit access policy;
+  \item request fields are typed and bounded;
+  \item the target object is loaded before object-level authorization;
+  \item SQL values enter only through typed binds;
+  \item state changes run under the intended transaction/critical-operation contract;
+  \item concurrently edited records use optimistic locking where lost updates matter;
+  \item uniqueness and other race-sensitive invariants are enforced authoritatively;
+  \item business audit is transactional when the change must be reconstructable later;
+  \item success returns through PRG rather than rendering a mutable POST response;
+  \item cache invalidation is narrow and tied to the data actually changed.
+\end{itemize}
+
+\section{Verified companion examples}
+Use these compiler-checked repository programs as the copy/paste source of truth for this chapter:
+\begin{itemize}
+  \item \path{examples/crud/app.vrn} -- CRUD and object-authorized mutation;
+  \item \path{examples/forms/app.vrn} -- typed forms and validation;
+  \item \path{examples/optimistic-locking/main.vrn} -- stale-edit protection;
+  \item \path{examples/prg-flash/app.vrn} -- PRG and flash state.
+\end{itemize}
+
+\section{Practice: design an edit conflict}
+\paragraph{Exercise mode: supported.} Use the supported method defined in the preface.
+
+Simulate two browser sessions opening the same record. Session A saves first; session B then submits stale data. Decide where the version is carried, where the mismatch is detected, which HTTP outcome is returned, and what the user sees next.
+
+\section{Common mistake: validating only before the transaction}
+Application validation improves error messages, but race-sensitive invariants still need an authoritative enforcement point. Uniqueness, ownership-sensitive mutations, and optimistic concurrency must remain correct when two requests run at nearly the same time.
+
+\section{Running project checkpoint: Secure Notes}
+Use the compiler-checked snapshot in \path{examples/secure-notes/checkpoints/05-crud/main.vrn}. Add edit and delete operations to Secure Notes. Make ownership checks explicit, use optimistic locking for edits, keep mutation inside the intended transaction boundary, and return through PRG after success.

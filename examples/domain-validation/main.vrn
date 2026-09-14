@@ -1,0 +1,31 @@
+model Contact {
+    id: i64
+    email: Email
+}
+
+#[query]
+fn contactByEmail(db: Db, email: Email) -> Result<Contact, DbError> sql {
+    SELECT id, email
+    FROM contacts
+    WHERE email = :email
+}
+
+form ContactForm {
+    email<Email>
+    confirmEmail<Email>
+    validate confirmEmail same email
+}
+
+#[action]
+fn contactSave(
+    ctx: ActionContext,
+    email: Email,
+    confirmEmail: Email
+) -> Result<Json, PageError> {
+    return Ok(json(email));
+}
+
+route contactSave POST "/contact"
+    form ContactForm
+    auth user
+    => contactSave;

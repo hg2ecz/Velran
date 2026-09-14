@@ -1,0 +1,438 @@
+\chapter{Adatbázis mélyebben: tranzakció, migráció és konkurencia}\label{ch:db-deep-dive-hu}
+
+\noindent\textbf{Tanulási út: Gyors út: alap.} Tanuld meg a perzisztens alkalmazásokhoz szükséges séma- és query-invariánsokat.\par\medskip
+
+\rustbridgeblockhu{A függvényszignatúrák, \code{Result}, \code{Vec<T>}, typed paraméterek és a \code{?} ismerősek maradnak.}{A \code{#[query]}, compiler-owned SQL, typed bind paraméter, statikus sorbound és \code{Db}/transaction capability teszi felülvizsgálhatóvá az adatbázis-effectet.}{Ne tanuld meg a stringből épített SQL-t Velran-technikaként. Az új fogalom a verified DB-határ, nem a queryk stringes összerakása.}
+
+
+\invariantblock{Biztonsági invariáns: az adat nem SQL-szerkezet}{Az SQL szerkezete compiler-owned marad. Felhasználó által befolyásolt érték csak typed bind paraméterként kerülhet a querybe, az eredmény mérete pedig explicit bounded; a validáció nem teszi megengedetté a stringből épített SQL-t.}
+
+\diagnosticblockhu{Compiler diagnostic}{SEC-A05-001}{A forrás unsafe SQL-összeállítást próbál használni compiler-owned SQL és typed bindok helyett.}{Az SQL szerkezete maradjon statikus; a requestből érkező értékeket typed bind paraméterként add át.}
+
+Az előző fejezet bemutatta a typed SQL-t és a CRUD-ot. Itt azokra az adatbázis-szabályokra koncentrálunk, amelyek párhuzamos kérések és release-ek között védik az integritást. Első olvasáskor a query-szerződésre, typed bindokra, tranzakcióra, optimistic lockingra és migrationre figyelj; a kapacitás-, backup- és engine-választási részletek későbbi referencia.
+
+\section{Három külön felelősség}
+
+Velran alkalmazásnál érdemes három réteget szétválasztani:
+
+\begin{description}
+\item[alkalmazáskód] statikus typed SQL queryket deklarál, bindokat ad át és tranzakciót kér;
+\item[runtime] kapcsolatot pooloz, bindol, timeoutot és eredménykorlátot alkalmaz, majd a visszakapott sorokat a deklarált típushoz ellenőrzi;
+\item[operator] DB credentialt, TLS-t, adatbázis-kapacitást, backupot és migrációs folyamatot birtokol.
+\end{description}
+
+Az alkalmazás tehát nem nyit tetszőleges socketet az adatbázishoz és nem épít saját connection poolt. A \code{Db} és a \code{Transaction} capability az a felület, amelyen keresztül adatbázis-művelet történhet.
+
+A V1 data layer általános defense-in-depth korlátai között van a legfeljebb 32 poolkapcsolat, az 5 másodperces connection-acquire timeout, a 10 másodperces query timeout, a 10\,000 soros backend eredményplafon és a 16 MiB-os eredményméret-plafon. A Velran modell-lista query ennél szigorúbb: a compiler literal \code{LIMIT}-et követel, és compiler/runtime szinten 1000 sor a felső korlát. Ezek biztonsági plafonok, nem pagination design; a helyes query ettől függetlenül legyen rövid, paginált és indexelhető.
+
+Több szerverpéldánynál a DB connection budgetet az operatornak összesítve kell méreteznie:
+
+\begin{lstlisting}
+ossz DB kapcsolat ~= Velran instance-ok szama
+                    * instance-onkenti pool
+                    + admin/maintenance tartalek
+\end{lstlisting}
+
+\section{A query visszatérési típusa szerződés}
+
+Egy lekérdezés cardinalityje már a függvény típusában látszik:
+
+\begin{lstlisting}[language=Velran]
+#[query]
+fn articleById(db: Db, id: i64)
+    -> Result<Article, DbError> sql {
+    SELECT id, slug, title, body, version
+    FROM articles
+    WHERE id = :id
+}
+
+#[query]
+fn articleBySlug(db: Db, slug: Slug)
+    -> Result<Option<Article>, DbError> sql {
+    SELECT id, slug, title, body, version
+    FROM articles
+    WHERE slug = :slug
+}
+
+#[query]
+fn recentArticles(db: Db, offset: i64)
+    -> Result<Vec<Article>, DbError> sql {
+    SELECT id, slug, title, body, version
+    FROM articles
+    ORDER BY id DESC
+    LIMIT 100 OFFSET :offset
+}
+\end{lstlisting}
+
+A három forma jelentése:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}L{0.23\textwidth}YY@{}}
+\toprule
+Típus & Elvárt eredmény & Cardinality sérülése \\
+\midrule
+\code{Article} & pontosan egy sor & 0 sor: \code{404}; több sor: DB-hiba \\
+\code{Option<Article>} & nulla vagy egy sor & több sor: DB-hiba \\
+\code{Vec<Article>} & nulla vagy több sor & a runtime eredménylimitei érvényesek \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Ez több egyszerű kényelmi jelölésnél: a lekérdezés eredményének alakja része a program futás közben is kikényszerített szerződésének. Az \code{Option<Article>} nem azt jelenti, hogy ``vedd az első sort, ha van'': ha a query kettő vagy több sort ad, az invariáns sérült, ezért a runtime fail-closed DB-hibát ad. Ugyanezért egy \code{Article} query nulla sor esetén \code{404 Not Found}, több sor esetén pedig nem választ önkényesen rekordot.
+
+A \code{Vec<Model>} querynek az SQL-ben statikus literal sorlimitje is kell legyen. A bound a reusable query contract része, nem a hívó által adott \code{limit} paraméter; használj fix \code{LIMIT}-et, és bounded offsettel vagy más explicit hozzáférési mintával paginálj.
+
+\subsection*{A row shape legyen explicit}
+
+A \code{SELECT} mezőinek neve és sorrendje egyezzen a modellel. Ne használj \code{SELECT *}-ot alkalmazásqueryben.
+
+\begin{lstlisting}[language=Velran]
+model Article {
+    id: i64
+    slug: Slug
+    title: String
+    body: String
+    version: i64
+}
+
+// jo: ugyanaz az ot mezo, ugyanebben a sorrendben
+SELECT id, slug, title, body, version
+FROM articles
+\end{lstlisting}
+
+Az explicit projection két okból fontos. Először is a fordító ellenőrizni tudja a modell és a query kapcsolatát. Másodszor egy későbbi schema-bővítés nem változtatja meg észrevétlenül egy régi query result shape-jét.
+
+\section{Bindolj, ne SQL-t építs}
+
+A kliensből származó érték typed bindként kerüljön az SQL-be:
+
+\begin{lstlisting}[language=Velran]
+#[query]
+fn findByEmail(db: Db, email: String)
+    -> Result<Option<User>, DbError> sql {
+    SELECT id, email, display_name
+    FROM users
+    WHERE email = :email
+}
+\end{lstlisting}
+
+A \code{:email} nem string-helyettesítés. A runtime backend-specifikus placeholderre fordítja és paraméterként bindolja.
+
+Amit ne próbálj meg:
+
+\begin{lstlisting}
+// rossz gondolkodasmod:
+// "SELECT ... ORDER BY " + userOrder
+// "WHERE " + userFilter
+\end{lstlisting}
+
+Oszlopnév, \code{ORDER BY} irány, SQL operator vagy teljes WHERE-fragment ne érkezzen user inputból. Ha több rendezést akarsz támogatni, az alkalmazáskódban válassz néhány statikus query közül.
+
+\section{Olvasás és mutáció authority-határa}
+
+Olvasó query \code{Db} capabilityt kap. Adatmódosító query \code{Transaction}-t:
+
+\begin{lstlisting}[language=Velran]
+#[query]
+fn renameArticle(
+    tx: Transaction,
+    id: i64,
+    title: String
+) -> Result<(), DbError> mutates Article by id sql {
+    UPDATE articles
+    SET title = :title
+    WHERE id = :id
+}
+\end{lstlisting}
+
+A hívó action explicit tranzakciós blokkot nyit:
+
+\begin{lstlisting}[language=Velran]
+#[action]
+fn rename(
+    ctx: ActionContext,
+    db: Db,
+    id: i64,
+    title: String
+) -> Result<Redirect, PageError> {
+    let article = articleById(db, id)?;
+    authorize article authenticated;
+    transaction db {
+        renameArticle(tx, article.id, title)?;
+    }
+    return Ok(redirect(adminArticles()));
+}
+\end{lstlisting}
+
+Normál best-effort alkalmazáskódban a sikeres blokk commitol, ismert DB hiba rollbackel. Retry-szenzitív vagy critical műveletnél viszont ne egyszerű siker/hiba állapotra szűkítsd az eredményt. Capture-öld explicit a transaction outcome-ot:
+
+\begin{lstlisting}[language=Velran]
+let article = articleById(db, id)?;
+authorize article authenticated;
+let outcome = transaction db {
+    renameArticle(tx, article.id, title)?;
+};
+
+match outcome {
+    Committed => { return Ok(redirect(adminArticles())); }
+    RolledBack => { fail conflict; }
+    CommitUnknown => { fail conflict; }
+}
+\end{lstlisting}
+
+A \code{CommitUnknown} azt jelenti, hogy a runtime nem kapott elég bizonyítékot annak eldöntésére, megtörtént-e a commit. Ez nem válhat automatikus retry-já. Critical idempotens transactionnél a compiler kötelezővé teszi az outcome capture-t és exhaustive match-et. A \code{Transaction} továbbra sem escape-elhet a blokkból.
+
+\subsection*{Egy üzleti művelet legyen egy tranzakció}
+
+Több, összetartozó módosítást ne külön actionök vagy külön tranzakciók végezzenek:
+
+\begin{lstlisting}[language=Velran]
+transaction db {
+    Article.publishChanged(tx, article.id, version)?;
+    audit Article article.id action publish;
+        from article.status to ArticleStatus.Published
+}
+\end{lstlisting}
+
+Ebben a mintában a cikk publikálása és a business audit trail együtt commitol. Ha az audit nem írható, a publikálás is rollbackel. Így nem jön létre olyan állapot, amelyben az üzleti módosítás megtörtént, de a hozzá kötelező audit rekord hiányzik.
+
+\section{Optimistic locking: ne írd felül más munkáját}
+
+CMS-ben és wikiben gyakori helyzet, hogy két szerkesztő ugyanazt a rekordot nyitja meg. A klasszikus
+
+\begin{lstlisting}
+UPDATE articles SET title = :title WHERE id = :id
+\end{lstlisting}
+
+az utoljára mentő felhasználót teszi nyertessé, és csendben elveszhet az első szerkesztő módosítása.
+
+Ehhez használható verziómező és \code{Changed}:
+
+\begin{lstlisting}[language=Velran]
+model Article {
+    id: i64
+    title: String
+    version: i64
+}
+
+#[query]
+fn updateArticle(
+    tx: Transaction,
+    id: i64,
+    title: String,
+    version: i64
+) -> Result<Changed, DbError> mutates Article by id sql {
+    UPDATE articles
+    SET title = :title,
+        version = version + 1
+    WHERE id = :id AND version = :version
+}
+\end{lstlisting}
+
+A call site előbb töltse be és autorizálja a cikket, és a request ID helyett az \code{article.id} értéket adja át ennek a mutációnak. Az edit form elküldi azt a \code{version} értéket, amelyet a felhasználó az oldal megnyitásakor látott. A \code{Changed} szerződése szigorú: a mutációnak \textbf{pontosan egy sort} kell módosítania. Egy módosított sor siker; nulla módosított sor \code{409 Conflict}; kettő vagy több módosított sor DB-hiba, mert a query a saját invariánsát sértette meg. \code{Changed} csak mutáló query visszatérési típusa lehet, és V1-ben nem használható \code{RETURNING} klauzussal.
+
+Optimistic lockingnál, ha időközben más már mentett, a \code{WHERE id = :id AND version = :version} nulla sort talál, ezért a kérés konfliktusra fut. A helyes UX ilyenkor nem az automatikus újrapróbálás. Mutasd meg, hogy az adat közben változott, töltsd be az új verziót, és a felhasználó döntsön az összeolvasztásról.
+
+Optimistic locking tipikus helyei:
+
+\begin{itemize}
+\item wiki oldalak és CMS cikkek;
+\item ticket vagy ügyfélrekord;
+\item workflow-állapotot tartalmazó üzleti objektum;
+\item ritkán módosított admin konfiguráció.
+\end{itemize}
+
+Append-only eseményekhez vagy adatbázis-oldali atomi számlálókhoz általában nincs rá szükség.
+
+\section{Indexet a hozzáférési mintához tervezz}
+
+A jó index nem attól jó, hogy sok van belőle, hanem attól, hogy a tényleges queryt szolgálja ki.
+
+Egy CMS-ben például természetes hozzáférési minták lehetnek:
+
+\begin{lstlisting}[language=SQL]
+CREATE UNIQUE INDEX articles_slug_uq
+    ON articles(slug);
+
+CREATE INDEX articles_status_id_idx
+    ON articles(status, id);
+\end{lstlisting}
+
+Ha a publikus oldal slug alapján kér le egy cikket, a slug legyen unique/indexelt. Ha az admin lista státusz szerint szűr és azon belül azonosító szerint lapoz, ehhez illeszkedő összetett index kellhet.
+
+Néhány szabály:
+
+\begin{itemize}
+\item minden nagy listát paginálj;
+\item a rendszeresen használt lookup mező legyen indexelhető;
+\item az indexek sorrendje kövesse a WHERE/ORDER BY mintát;
+\item ne indexelj automatikusan minden oszlopot: az index írási és storage költség;
+\item teljesítményproblémát valós backend \code{EXPLAIN} tervével vizsgálj.
+\end{itemize}
+
+A Velran typed SQL-ja a query alakját védi; az adatbázis optimalizálóját nem helyettesíti.
+
+\section{Migration: a séma a release része}
+
+Productionban a server nem futtat automatikus migrációt startupkor. Ez szándékos: egy schema-változás külön operátori művelet, külön credentialdel és külön hibahatárral.
+
+Tipikus könyvtár:
+
+\begin{lstlisting}
+migrations/
+  0001_create_articles.sql
+  0002_articles_slug_index.sql
+  0003_articles_add_version.sql
+\end{lstlisting}
+
+A fájlnév alakja:
+
+\begin{lstlisting}
+NNNN_name.sql
+\end{lstlisting}
+
+Már alkalmazott migration fájlt ne módosíts. A CLI SHA-256 checksumot tárol, és eltérésnél megáll.
+
+A production parancsok a telepített CLI-val:
+
+\begin{lstlisting}
+/usr/local/bin/velran-cli migrate status \
+  --dir /srv/myapp/current/migrations \
+  --db-url-file /run/secrets/migration-db-url
+
+/usr/local/bin/velran-cli migrate verify \
+  --dir /srv/myapp/current/migrations \
+  --db-url-file /run/secrets/migration-db-url
+
+/usr/local/bin/velran-cli migrate apply \
+  --dir /srv/myapp/current/migrations \
+  --db-url-file /run/secrets/migration-db-url \
+  --lock-timeout-secs 30
+\end{lstlisting}
+
+A migration credential magasabb jogosultságú lehet, mint az alkalmazás DML credentialje. Emiatt a server process ne kapja meg.
+
+\subsection*{Mit garantál a migration CLI?}
+
+\begin{itemize}
+\item ellenőrzi az alkalmazott fájl nevét és checksumát;
+\item nem enged észrevétlenül régi verziószám alá új migrationt beszúrni;
+\item adatbázis-szintű migration lockot kér;
+\item a state csak sikeres alkalmazás után halad tovább.
+\end{itemize}
+
+Backend-specifikus különbség viszont marad. PostgreSQL migrationonként tranzakciót használ; SQLite \code{BEGIN IMMEDIATE} writer lockkal a batch-et tranzakcióban tartja; MariaDB DDL nem minden esetben tranzakcionális, ezért részleges DDL-hibánál operator repair is szükséges lehet.
+
+\section{Expand/contract: tartsd meg a rollback lehetőségét}
+
+Egy gyors application rollback csak akkor egyszerű, ha az új schema a régi programmal is kompatibilis.
+
+Ezért nagyobb változtatásnál használj expand/contract mintát:
+
+\begin{enumerate}
+\item \textbf{expand}: adj hozzá új nullable/defaultolt mezőt vagy új táblát úgy, hogy a régi app még működjön;
+\item deployold az új alkalmazást;
+\item szükség esetén végezz kontrollált backfillt;
+\item csak későbbi release-ben \textbf{contract}: töröld a régi mezőt vagy constraintet, amikor a rollback window lezárult.
+\end{enumerate}
+
+Az azonnali rename/drop, új kötelező mező vagy inkompatibilis adattípus-váltás könnyen forward-only release-t eredményez. Ezt release review során explicit döntésként kezeld.
+
+\section{Adatbázis-hiba kezelése}
+
+A \code{DbError} technikai hiba. A végfelhasználónak ne jeleníts meg driver message-et, SQL szöveget, hostnevet vagy connection stringet.
+
+Alkalmazási szinten különítsd el legalább ezeket a helyzeteket:
+
+\begin{description}
+\item[nincs ilyen rekord] normál domain-állapot, opcionális queryvel kezelhető;
+\item[409 konkurens módosítás] optimistic-locking konfliktus, a felhasználó újratöltéssel/összevetéssel oldja fel;
+\item[adatbázis nem elérhető] infrastruktúrahiba; readiness is jelezheti, a logban request ID-val kereshető;
+\item[constraint/domain hiba] inkább validációval előzd meg, de az adatbázis constraint maradjon utolsó integritási védővonal.
+\end{description}
+
+Ne építs automatikus, korlátlan retry loopot egy teljes mutáló action köré. Egy megismételt kérésnek mellékhatása lehet, és a tranzakciós konfliktus sem feltétlen átmeneti hiba.
+
+\section{SQLite, PostgreSQL vagy MariaDB?}
+
+Velran V1 mindhárom backendet támogatja, de ez nem jelenti azt, hogy minden SQL dialektusfeature hordozható.
+
+\begin{description}
+\item[SQLite] kiváló egyszerű vagy egygépes telepítéshez; az application DB fájl backupját SQLite-aware módszerrel készítsd, ne élő fájl egyszerű másolásával.
+\item[PostgreSQL] erős alap többpéldányos és nagyobb production rendszerekhez; TLS-t használj remote kapcsolathoz.
+\item[MariaDB] szintén támogatott, de különösen migrációknál számolj a DDL tranzakciós különbségeivel.
+\end{description}
+
+Portable alkalmazásnál a queryk közös SQL-részhalmazra épüljenek. Backend-specifikus funkciót csak tudatosan használj, és akkor a projekt dokumentációjában rögzítsd, hogy az alkalmazás mely backendhez kötött.
+
+\section{Backup szempont adatbázis-fejlesztőként}
+
+Adatbázis-fejlesztőként itt egy dolgot kell rögzíteni: a migráció és a backup két külön életciklus. A migration leírja, hogyan változik a séma; a backup/restore azt bizonyítja, hogy a tartós állapot visszaállítható. PostgreSQLnél, MariaDB-nél és SQLite-nál a backend saját konzisztens mentési eszközét használd, és ne tekints egy egyszerű fájlmásolást automatikusan érvényes backupnak.
+
+A teljes alkalmazásállapot -- adatbázis, AppFs, local-auth store, recovery manifest, recovery point objective (RPO), recovery time objective (RTO) és restore drill -- a \ref{ch:recovery}. fejezet témája. Itt azért utalunk rá, mert egy schema-változtatás tervezésekor már tudni kell, hogy rollbackhez vagy restore-hoz milyen állapot áll rendelkezésre.
+
+\section{Egy CMS adatbázis-rétegének mintája}
+
+Egy kisebb CMS-nél jó kiindulás:
+
+\begin{lstlisting}
+Article
+  id
+  slug          UNIQUE
+  title
+  body
+  status
+  hero_image
+  version
+  created_at
+  updated_at
+
+migrations/
+  0001_create_articles.sql
+  0002_article_indexes.sql
+  0003_add_version.sql
+\end{lstlisting}
+
+Az alkalmazási minták:
+
+\begin{itemize}
+\item publikus olvasás: \code{Option<Article>} slug alapján;
+\item admin lista: paginált \code{Vec<Article>};
+\item szerkesztés: \code{Changed} + \code{version};
+\item publish/archive: egy transactionben üzleti módosítás + audit;
+\item schema-változás: külön CLI migration;
+\item deploy előtt: migration verify + backup/restore readiness;
+\item deploy után: readiness, log, metrics és smoke test.
+\end{itemize}
+
+Ezzel a modellel a database layer nem különálló SQL-gyűjtemény lesz, hanem a webalkalmazás típus-, konkurencia-, release- és recovery-szerződésének része.
+
+\section{Fejezet végi ellenőrzőlista}
+
+Mielőtt egy adatbázisos funkciót késznek tekintesz, ellenőrizd:
+
+\begin{itemize}
+\item minden user érték typed bindként kerül SQL-be;
+\item nincs \code{SELECT *}; a projection egyezik a modellel;
+\item nagy lista paginált;
+\item a fontos lookup és rendezési minta mögött van megfelelő index;
+\item minden mutáció \code{Transaction} capabilityvel fut;
+\item több összetartozó módosítás egy tranzakcióban van;
+\item ember által párhuzamosan szerkeszthető rekordnál van optimistic locking;
+\item már alkalmazott migration immutable;
+\item a migration credential nincs az application servernél;
+\item destructive schema-változásnál ismert a rollback következménye;
+\item a DB hiba nem szivárogtat SQL-t vagy credentialt a kliensnek;
+\item a backuphoz tartozik rendszeresen bizonyított restore.
+\end{itemize}
+
+\section{Gyakorlat: kezeld a query-t interfészként}
+\paragraph{Gyakorlási mód: támogatott.} Használd az előszóban meghatározott támogatott módszert.
+
+Minden feature query-jénél írd le az inputtípusokat, a projection oszlopait, a várt kardinalitást, a rendezést és az index-feltételezést. Ezt interfész-contractként kezeld, ne SQL-be rejtett implementációs részletként.
+
+\section{Tipikus hiba: az adatbázist csak tárolónak tekintjük}
+A production adatbázis invariánsokat és concurrency-szemantikát is kikényszerít. Ha a helyesség attól függ, hogy egy feltétel párhuzamos kérések mellett is igaz maradjon, az authoritative részt az adatbázisban vagy a tranzakciós tervben rögzítsd, ne csak egy korábbi alkalmazásszintű ellenőrzésben.
+
+\section{Folyamatos mintaprojekt: Secure Notes}
+Indulj az \path{examples/secure-notes/migrations/0001_init.sql} sémából. Vizsgáld felül a cím/törzs korlátokat, a publikációs állapot constraintjét, az időbélyegeket és az owner/id indexet mint adatbázisszintű invariantokat. Ezután adj lapozást úgy, hogy a determinisztikus rendezés és a principal szerinti szűrés megmaradjon; dokumentáld, mely garancia tartozik az SQL/séma réteghez, és melyik marad handler-level policy.

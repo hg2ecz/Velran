@@ -1,0 +1,39 @@
+/target/
+
+# LaTeX build artifacts
+/docs/book/*.aux
+/docs/book/*.fdb_latexmk
+/docs/book/*.fls
+/docs/book/*.log
+/docs/book/*.out
+/docs/book/*.toc
+/docs/book/velran-for-web-application-developers.pdf
+/docs/book/hu/*.aux
+/docs/book/hu/*.fdb_latexmk
+/docs/book/hu/*.fls
+/docs/book/hu/*.log
+/docs/book/hu/*.out
+/docs/book/hu/*.toc
+/docs/book/hu/velran-webfejlesztoknek-hu.pdf
+
+# Local/editor/OS artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.tmp
+*.bak
+*.orig
+*.rej
+*~
+
+# Local environment/secrets
+.env
+.env.*
+!.env.example
+
+# Python/tool caches
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/

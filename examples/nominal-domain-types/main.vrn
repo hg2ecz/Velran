@@ -1,0 +1,23 @@
+type UserId = i64 { range 1 999999999; }
+type Username = String {
+    length 3 32;
+    pattern "^[A-Za-z0-9_]+$";
+}
+
+model User {
+    id: UserId
+    username: Username
+}
+
+#[query]
+fn userById(db: Db, id: UserId) -> Result<Option<User>, DbError> sql {
+    SELECT id, username FROM users WHERE id = :id
+}
+
+#[page]
+fn profile(ctx: PageContext, db: Db, id: UserId) -> Result<Html, PageError> {
+    let user = userById(db, id)?;
+    return Ok(html { <p>User id: {{ id }}</p> });
+}
+
+route profile GET "/users/:id<UserId>" auth user => profile;

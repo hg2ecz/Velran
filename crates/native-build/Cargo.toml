@@ -1,0 +1,12 @@
+[package]
+name = "native-build"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+authors = ["Zsolt Krüpl"]
+
+[dependencies]
+runtime-abi = { path = "../runtime-abi" }
+executable-ir = { path = "../executable-ir" }
+compiler = { path = "../compiler" }
+sha2 = { workspace = true }

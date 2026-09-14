@@ -1,0 +1,212 @@
+\chapter{Security hardening: a jelenlegi secure-by-construction modell}
+
+\noindent\textbf{Tanulási út: Gyors út: kötelező production előtt.} Fogd össze az egész alkalmazásban kötelező security-invariánsokat.\par\medskip
+
+A Velran security nem opcionális middleware: az authority a nyelv, compiler, runtime és server között oszlik meg. Amit lehet, compiler-invariánsként bizonyíts; különben legyen secure platform default vagy stabil diagnostic-kal fail closed.
+
+\noindent\textbf{Első olvasás.} Fókuszálj az authority/access control, input/browser boundary, resource safety és production security gate részekre. A többi szakasz hardening referencia.\par\medskip
+
+\section{Mit dönt el a secure modell -- és mit nem?}
+
+A Velran reprezentálhatatlanná tehet raw SQL-t, arbitrary redirect URL-t, ambient DB/network authorityt, unbounded list queryt, hamis redactiont és több más veszélyes állapotot. Azt is bizonyíthatja, hogy egy mutation authorization proofot használt. Azt viszont nem döntheti el helyetted, hogy az üzleti szabály szerint ``az Editor publikálhatja-e ezt a konkrét cikket''. Ez továbbra is az alkalmazás permission/object/tenant policyjének feladata.
+
+Hasznos review-szabály: \emph{a mechanizmus legyen compiler/runtime-owned, az üzleti intent maradjon explicit alkalmazáskód}.
+
+\section{Authority és access control}
+
+Minden route explicit access policyt kap; nincs implicit public endpoint. Az authorization réteges:
+
+\begin{enumerate}
+  \item trusted authentication létrehozza a principalt;
+  \item route policy eldönti, beléphet-e a handlerbe;
+  \item object authorization proofot ad a konkrét betöltött rekordhoz;
+  \item mutation authorization bizonyítja, hogy UPDATE/DELETE kulcsa autorizált object authorityből származik;
+  \item named permission és MFA a handler contract része lehet;
+  \item tenant-scoped adat aktív membership proofot igényel;
+  \item effect/capability metadata láthatóvá teszi a DB és outbound network authorityt.
+\end{enumerate}
+
+Validation proof soha nem authorization proof. Egy valid \code{ArticleId} nem bizonyítja, hogy a principal módosíthatja az adott cikket.
+
+\section{Critical operation, idempotency és transaction outcome}
+
+A critical contract egyetlen helyen fogja össze a security kötelezettségeket:
+
+\begin{lstlisting}[language=Velran]
+critical Payment {
+    permission BillingWrite
+    mfa
+    transaction
+    idempotency
+    audit PaymentCharged
+}
+\end{lstlisting}
+
+Az idempotency a replay key-t request fingerprinthez és principal scope-hoz köti. Ugyanaz a key más payloadhoz conflict, nem második side effect.
+
+A DB commit visszaigazolása is explicit. Captured transaction zárt \code{Committed | RolledBack | CommitUnknown} sum type-ot ad, a \code{match} exhaustive és nincs wildcard fallthrough. Idempotens critical transactionnek kötelező az outcome capture és kezelés; a \code{CommitUnknown} nem tűnhet el generic retryable DB hibában.
+
+\section{Input, injection és browser boundaryk}
+
+A fő injection felületek strukturális kontroll alatt vannak:
+
+\begin{itemize}
+  \item SQL compiler-owned statement és typed bind; string-interpolált raw SQL reject;
+  \item HTML/template output strukturált és sensitivity-aware;
+  \item redirect typed local route call, nem string URL;
+  \item response header typed név és bounded validált érték;
+  \item filename, media type és Content-Disposition typed;
+  \item outbound call named integration és relative literal path, nem arbitrary URL;
+  \item generált CSP least-privilege defaultot használ, többek között \code{connect-src 'none'};
+  \item compressed inbound HTTP body reject, amíg nincs külön bounded decompression surface.
+\end{itemize}
+
+\section{Trust, domain típusok és disclosure}
+
+A request-boundary érték untrusted állapotból indul. Domain validation refined nominal type-ot adhat, de sensitivityt nem mos le és authorizationt nem teremt.
+
+A \code{Secret<T>} és \code{Sensitive<T>} metadata hívásokon keresztül is követett. Teljes database/domain model nem generic módon serializálódik; public output explicit projection. Így egy új model field nem jelenhet meg észrevétlenül régi API-ban.
+
+Loghoz/monitoringhoz a \code{Redacted<T>} nem hamisítható type annotationnel. Csak a trusted \code{redact(...)} builtin hozza létre, amely eldobja az eredeti reprezentációt és biztonságos redacted értéket ad.
+
+\section{Authentication és session hardening}
+
+A browser session platform-owned. Login authority rotationt végez, logout invalidál, auth-generation változás pedig security-releváns account change után régi sessiont érvénytelenít. Cookie flaget az alkalmazás nem gyengíthet.
+
+Online auth abuse egyszerre három dimenzióban limitált:
+
+\begin{itemize}
+  \item source + principal;
+  \item principal több source-on keresztül;
+  \item source több principalon keresztül.
+\end{itemize}
+
+MFA/recovery külön szigorúbb stage limitet kap. Limiter-store hiba fail closed, a kliens credential hibája pedig szándékosan generic az account enumeration csökkentésére.
+
+\section{Credential, token és kriptográfia}
+
+Purpose-specific típusok zárják ki a password, token hash, session token, reset token, CSRF token és crypto key véletlen keresztfelhasználását.
+
+Jelszóhoz platform-owned Argon2id policy tartozik. Bearer token purpose-specific hashként perzisztálódik, expiry-aware verificationnel; reset grant, session revoke és session rotation atomic lifecycle contractot használ.
+
+Crypto keynek purpose és lifecycle állapota van. User-data encryption high-level primitive fix AES-256-GCM-et, platform-generált nonce-ot és versioned authenticated envelope-ot használ:
+
+\begin{lstlisting}
+Active    -> encrypt + decrypt
+Retiring  -> decrypt only
+Retired   -> neither
+\end{lstlisting}
+
+Az alkalmazás nem választhat gyengébb cipher-t és nem adhat saját nonce-ot.
+
+\section{Verified webhook és safe upload}
+
+A webhook nem autentikáció nélküli public POST. Külön webhook authority van: raw-body signature verification, timestamp/replay-window check és atomic replay claim történik a handler előtt.
+
+A file upload állapotgép:
+
+\begin{lstlisting}
+multipart bytes
+    -> private staged file
+    -> byte-authoritative inspection
+    -> verified image
+    -> handler success
+    -> atomic publish
+\end{lstlisting}
+
+Client filename és MIME metadata, nem storage vagy file-type authority. A public media endpoint csak verified image publish route által deklarált könyvtárból szolgál.
+
+\section{Resource safety mint security invariant}
+
+A Velran egyedi műveletet és teljes requestet is korlátoz:
+
+\begin{itemize}
+  \item request/parser hard limit;
+  \item route resource profile platform ceiling alatt;
+  \item instruction/allocation budget és hard request deadline;
+  \item DB list query statikus row bound + runtime row cap;
+  \item bounded request collection;
+  \item upload byte/pixel limit;
+  \item bounded outbound request/response body;
+  \item cumulative external-I/O accounting.
+\end{itemize}
+
+Unrestricted generic collection growth szándékosan nincs kitéve addig, amíg ugyanez a cardinality guarantee nem tartható meg.
+
+\section{A production konfiguráció security contract}
+
+Az alkalmazás strict production követelményt deklarálhat:
+
+\begin{lstlisting}[language=Velran]
+production {
+    https required;
+    debug disabled;
+    hsts required;
+    database tls required;
+}
+\end{lstlisting}
+
+Startup fail closed, ha a deployment nem tudja teljesíteni. Production policy tiltja az insecure development cookie-t, unsafe source reloadot, missing-Origin engedményt és insecure remote DB transportot. Reload nem változtathatja meg csendben a deployment security contractot; ehhez restart és operator review kell.
+
+\section{Supply-chain state a release része}
+
+Három artifact összetartozik:
+
+\begin{lstlisting}
+Cargo.lock
+SUPPLY-CHAIN-CAPABILITIES.txt
+VELRAN-SUPPLY-CHAIN.lock
+\end{lstlisting}
+
+A direct external dependency edge explicit security capabilityt kap, például network, filesystem, crypto vagy parser. A jelenlegi provenance policy csak checksummed crates.io package-et enged. A supply-chain envelope a Cargo lockot és capability policyt együtt sealeli, release előtt pedig kötelező a \code{cargo metadata --locked} konzisztencia.
+
+\section{Security event, redaction és alert}
+
+Critical operation typed audit eseményt ad. A platform automatikusan strukturált security eventet generál auth abuse, MFA failure, access-policy denial, CSRF/origin/CORS rejection, webhook verification failure, idempotency conflict és resource exhaustion esetén.
+
+Az event schema nem fogad arbitrary request payloadot. Principal/source emitted eventben redacted; bounded in-memory correlation használhat raw kulcsot úgy, hogy logba ne kerüljön. Platform-owned burst threshold és cooldown alertet ad anélkül, hogy az alerting maga log-flood DoS-sá válna.
+
+\section{Production security gate}
+
+Production átadás előtt legalább:
+
+\begin{enumerate}
+  \item valódi toolchain gate: format, locked metadata, check, test és \code{./verify.sh};
+  \item production policy és startup compatibility zöld;
+  \item HTTPS, HSTS, secure cookie és trusted proxy topology helyes;
+  \item runtime DB credential least privilege és remote DB TLS enforced;
+  \item auth/session/rate-limit shared state megfelel a deployment topológiának;
+  \item tenant/object/mutation authorization negatív tesztek zöldek;
+  \item critical/idempotent operation explicit kezeli a \code{CommitUnknown} állapotot;
+  \item webhook verification/replay és upload publish-state tesztek zöldek;
+  \item outbound integration csak review-zott named egress policyból oldódik fel;
+  \item resource/deadline limitek konfiguráltak és megfigyeltek;
+  \item security-event redaction és burst alert ellenőrzött;
+  \item supply-chain és release-manifest állapot aktuális és verified.
+\end{enumerate}
+
+\section{Öt review-kérdés minden új feature-höz}
+
+\begin{enumerate}
+  \item \textbf{Mi jön kívülről?} Melyik mező, fájl, identifier vagy upstream data untrusted?
+  \item \textbf{Hol válik typed/validated adattá?} Melyik boundary hozza létre a proofot?
+  \item \textbf{Ki az authority?} Session, DB record, tenant membership, trusted config vagy named capability?
+  \item \textbf{Mi történik bizonytalan hibánál?} Fail closed, rollback, cleanup vagy explicit unknown state?
+  \item \textbf{Mi korlátozza az erőforrást?} Byte, row, item, idő, rate, CPU vagy cumulative I/O?
+\end{enumerate}
+
+Ha bármelyik válasz homályos, a feature security modellje nincs kész.
+
+\section{Ellenőrzött companion példák}
+A security hardening végrehajtható fixture-ök mellett könnyebben review-zható. A canonical companion példák itt az \path{examples/resource-profile/app.vrn}, \path{examples/rate-limit/app.vrn} és \path{examples/typed-security-events/main.vrn}.
+
+\section{Gyakorlat: rendelj kontrollokat threat pathokhoz}
+\paragraph{Gyakorlási mód: önálló.} Használd az előszóban meghatározott önálló módszert.
+
+Válassz három konkrét fenyegetést, és kövesd végig, mely egymástól független kontrollok állítják meg vagy korlátozzák őket. Rétegezett választ keress: typed input + autorizáció + tranzakciós invariáns erősebb, mint egyetlen validáció, amelytől mindent várunk.
+
+\section{Tipikus hiba: a hardeninget végső deployment fázisnak tekintjük}
+Az alkalmazásstruktúrától függő hardeninget production előtt kell megtervezni. Route policy, capability boundary, object authorization, bounded input és named egress architektúra, nem release utáni konfigurációs csiszolás.
+
+\section{Folyamatos mintaprojekt: Secure Notes}
+Nézd át a Secure Notes-ot támadó szemmel: azonosítók, form mezők, publikációs átmenetek, media referenciák, JSON endpointok és kimenő integráció. Dokumentáld, mely határ utasítja el az egyes érvénytelen útvonalakat, és mely eseménynek kell operátori szinten láthatónak lennie.

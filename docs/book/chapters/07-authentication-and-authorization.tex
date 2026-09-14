@@ -1,0 +1,405 @@
+\chapter{Authentication, sessions, and authorization}
+
+\noindent\textbf{Learning path: Fast path: core.} Distinguish authentication, route policy, and object authorization.\par\medskip
+
+\rustbridgeblock{Enums, typed identifiers, \code{Result}, branching, and ordinary domain predicates remain useful for policy logic.}{The framework supplies a trusted principal, route-level auth policy, and explicit authorization boundaries for protected objects/effects.}{Do not replace domain rules with framework vocabulary. Authentication provides identity; your typed business rule still decides authority, then Velran enforces where that proof must occur.}
+
+
+\invariantblock{Security invariant: identity is not authority}{Authentication establishes the caller identity. Authorization establishes whether that caller may perform this operation on this object. Complete authorization before the protected read or mutation.}
+
+\diagnosticblock{Verifier diagnostic}{SEC-A01-022}{The route identity is authenticated, but its role/permission proof does not satisfy the handler requirement.}{Strengthen the route policy or change the handler requirement only if the business authorization contract actually permits it.}
+
+Authentication proves identity; authorization decides permitted actions. A session carries trusted identity across requests. Velran keeps application route policy in \code{.vrn}, while identity and session policy remain server configuration.
+
+\section{Where authentication and authorization sit in the lifecycle}
+
+Use the lifecycle model to keep identity questions separate from object authority:
+
+\begin{lstlisting}
+request
+  -> parse / validate
+  -> authenticate: who is calling?
+  -> authorize: may this caller act on this object?
+  -> query / transaction
+  -> response
+\end{lstlisting}
+
+Route policy answers broad admission. Object, tenant, permission, MFA, or critical-operation checks can narrow authority further: authenticated means \emph{trusted principal available}, not \emph{operation allowed}.
+
+Login establishes authentication rather than consuming it: validate the credential form and CSRF state, verify the identity backend, rotate the session, audit, then redirect. Credential policy belongs to the identity backend, not object authorization.
+
+\section{The complete login path}
+
+The built-in HTML login endpoints are:
+
+\begin{lstlisting}
+GET  /__velran/auth/login
+POST /__velran/auth/login
+POST /__velran/auth/logout
+\end{lstlisting}
+
+These are server endpoints, not routes defined by the application. The GET login page issues a CSRF token bound to the session. The POST login form expects exactly the \code{_csrf}, \code{username}, \code{password}, and \code{totp} fields.
+
+At a high level, a successful login:
+
+\begin{enumerate}
+  \item validates form structure and the CSRF token;
+  \item canonicalizes the username;
+  \item applies the login rate limit;
+  \item verifies local-auth or LDAP credentials;
+  \item if required, verifies TOTP or, for local auth, a recovery code;
+  \item rotates to a new authenticated session;
+  \item writes an audit event;
+  \item redirects to the root with \code{303 See Other}.
+\end{enumerate}
+
+Session rotation matters: after successful authentication, the anonymous session identifier is not kept. This is a basic defense against session fixation.
+
+\section{Local auth: a separate identity database}
+
+A single-node application may use the local-auth SQLite store. It is deliberately separate from the application database. Velran typed SQL queries therefore cannot access credential tables.
+
+For example, the secret file may be:
+
+\begin{lstlisting}
+/run/secrets/velran/local-auth-db-url
+\end{lstlisting}
+
+with contents:
+
+\begin{lstlisting}
+sqlite:///srv/velran/auth/users.db?mode=rwc
+\end{lstlisting}
+
+Initialize it with:
+
+\begin{lstlisting}[language=bash]
+/usr/local/bin/velran-cli auth init \
+  --db-url-file /run/secrets/velran/local-auth-db-url
+\end{lstlisting}
+
+When creating a user, do not pass the password as a command-line argument; read it from a file:
+
+\begin{lstlisting}[language=bash]
+printf '%s\n' 'a-very-long-random-password' \
+  > /run/secrets/velran/new-user-password
+chmod 600 /run/secrets/velran/new-user-password
+
+/usr/local/bin/velran-cli auth user-add \
+  --db-url-file /run/secrets/velran/local-auth-db-url \
+  --username alice \
+  --password-file /run/secrets/velran/new-user-password \
+  --role User \
+  --role Editor
+\end{lstlisting}
+
+The local store uses Argon2id password hashing with a unique random salt. The current implementation accepts passwords between 12 and 1024 characters. Do not confuse this with application-side form validation: credential policy belongs to the identity backend.
+
+\section{Account lifecycle through the operator CLI}
+
+User state does not need to be modified with direct SQL. The CLI provides explicit operations:
+
+\begin{lstlisting}[language=bash]
+velran-cli auth password-set --db-url-file ... \
+  --username alice --password-file ...
+
+velran-cli auth disable   --db-url-file ... --username alice
+velran-cli auth enable    --db-url-file ... --username alice
+velran-cli auth roles-set --db-url-file ... --username alice \
+  --role User --role Publisher
+\end{lstlisting}
+
+Disabling an account does not delete it. From the outside, failed login does not reveal whether the cause was a wrong password, nonexistent user, or disabled account, because such distinctions can become account-enumeration channels.
+
+\section{Session invalidation: auth\_generation}
+
+With local auth, credential or authorization changes increment \code{auth_generation}. Each session records its creation generation; a mismatch on a later request invalidates that session and replaces it with a fresh anonymous one.
+
+Consequently, the following operator actions affect existing sessions too, not merely the next login:
+
+\begin{itemize}
+  \item password change;
+  \item role change;
+  \item account disable/enable;
+  \item TOTP enrollment or disable.
+\end{itemize}
+
+This is particularly important for role revocation: there is no need to wait for the old session to expire naturally.
+
+\section{Session store: memory or Redis}
+
+An in-memory session store may be used for development and testing. In production, especially with multiple server instances, Redis should be the shared session backend.
+
+\begin{lstlisting}
+[redis]
+url_file = "/run/secrets/velran/redis-url"
+allow_insecure = false
+\end{lstlisting}
+
+Redis may hold several kinds of short-lived infrastructure state in Velran:
+
+\begin{itemize}
+  \item shared sessions;
+  \item TOTP replay protection;
+  \item login rate limiting;
+  \item public cache.
+\end{itemize}
+
+Redis is not a business source of truth. After disaster recovery, an empty session/cache state is acceptable: users sign in again and caches rebuild.
+
+\section{Cookie policy}
+
+In normal production mode the session cookie is named:
+
+\begin{lstlisting}
+__Host-velran_session
+\end{lstlisting}
+
+The server uses \code{Path=/}, \code{HttpOnly}, and \code{Secure}. The default is \code{SameSite=Lax}; with credentialed cross-origin configuration it becomes \code{SameSite=None; Secure}.
+
+The explicit development escape hatch \code{--insecure-dev-cookies} changes the cookie name to \code{velran_session} and omits \code{Secure}. Never use this for an Internet-facing production deployment.
+
+\section{Logout}
+
+Logout is intentionally a POST operation:
+
+\begin{lstlisting}[language=Velran]
+<form method="post" action="/__velran/auth/logout">
+    <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+    <button type="submit">Logout</button>
+</form>
+\end{lstlisting}
+
+The server verifies the CSRF token, invalidates the old session, creates a fresh anonymous session, sends a new cookie, and audits the logout event. Logout is therefore not simply a client-side cookie deletion.
+
+\section{LDAP / LDAPS for enterprise identity}
+
+For shared or enterprise identity, an LDAP backend may be used. Use an LDAPS URL in production, with service-bind credentials loaded from secret files.
+
+Example configuration:
+
+\begin{lstlisting}
+[auth]
+ldap_url = "ldaps://ldap.example.com:636"
+ldap_search_base = "ou=people,dc=example,dc=com"
+ldap_username_attribute = "uid"
+ldap_service_bind_dn_file = "/run/secrets/velran/ldap-bind-dn"
+ldap_service_bind_password_file = "/run/secrets/velran/ldap-bind-password"
+require_totp = true
+\end{lstlisting}
+
+Do not configure local auth and LDAP as simultaneous primary identity backends in one process. That avoids ambiguous backend priority and username collisions.
+
+With LDAP, role mapping should come from trusted server-side configuration. Client-supplied \code{role}, \code{username}, or similar fields are never authorization authority.
+
+\section{TOTP and recovery codes}
+
+Enroll TOTP for a local-auth user with:
+
+\begin{lstlisting}[language=bash]
+/usr/local/bin/velran-cli auth totp-enroll \
+  --db-url-file /run/secrets/velran/local-auth-db-url \
+  --username alice
+\end{lstlisting}
+
+The CLI prints the secret/URI data required for enrollment and the recovery codes. Recovery codes remain in the local-auth database only as hashes, and a successfully used code is consumed.
+
+Disable TOTP with:
+
+\begin{lstlisting}[language=bash]
+/usr/local/bin/velran-cli auth totp-disable \
+  --db-url-file /run/secrets/velran/local-auth-db-url \
+  --username alice
+\end{lstlisting}
+
+If \code{require_totp = true}, a user with a correct password still cannot sign in without a usable second factor.
+
+The login form's \code{totp} field may contain either a six-digit TOTP or, with local auth, a recovery code. With Redis, replay state is shared, so multiple server instances see the same TOTP replay protection.
+
+\section{Route authorization}
+
+Applications commonly declare three route-level policies:
+
+\begin{lstlisting}[language=Velran]
+route account GET "/account" auth user => account;
+route admin GET "/admin" auth role Admin => admin;
+route security GET "/security" auth mfa => security;
+\end{lstlisting}
+
+Their meanings are:
+
+\begin{itemize}
+  \item \code{auth user}: any authenticated principal;
+  \item \code{auth role Admin}: an authenticated principal with the trusted \code{Admin} role in the session;
+  \item \code{auth mfa}: an authenticated principal that has successfully proven a second factor.
+\end{itemize}
+
+For an HTML route, an unauthenticated request may redirect to the login page. For a JSON API, the same condition appears as \code{401 Unauthorized} rather than an HTML redirect, which is more predictable for API clients.
+
+\section{Using the principal on a page}
+
+An authenticated page receives trusted session state:
+
+\begin{lstlisting}[language=Velran]
+#[page]
+fn account(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {
+        <main>
+            <h1>Account</h1>
+            <p>Signed in as {{ authPrincipal }}</p>
+            <form method="post" action="/__velran/auth/logout">
+                <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+                <button type="submit">Logout</button>
+            </form>
+        </main>
+    });
+}
+
+route account GET "/account" auth user => account;
+\end{lstlisting}
+
+\code{authPrincipal}, session roles, and MFA state are server-side trusted state. Do not reconstruct them from hidden form fields or query parameters.
+
+\section{A route role is not always enough}
+
+A route-level role answers whether a user may enter an operation. Object-level authorization may require more.
+
+For example, an editor may be allowed to modify only their own draft. In that case \code{auth role Editor} alone is insufficient: the action must compare the owner of the record loaded from the database with the trusted session principal.
+
+The core rule is:
+
+\begin{center}
+\textbf{identity from the session, object state from the database, decision on the server}
+\end{center}
+
+Client-supplied \code{owner}, \code{actor}, or \code{role} fields are data at most, never authority.
+
+\subsection*{The typed object-authorization guard}
+
+The \code{authorize} guard may be used only on an already-loaded, \textbf{non-optional} model record. The compiler also verifies that the owner field exists and has type \code{String}. A query that returns \code{Option<Article>} must therefore be handled explicitly first; authorization does not interpret a ``no record'' state.
+
+\begin{lstlisting}[language=Velran]
+let article = loadArticle(db, id)?;
+authorize article owner authorUsername or role Publisher;
+\end{lstlisting}
+
+A handler containing this guard cannot be exposed through a public route, and public cache cannot sit in front of object authorization. The owner or one of the listed trusted roles is allowed; every other authenticated actor receives \code{403 Forbidden}.
+
+\section{Login rate limiting}
+
+Login has its own rate-limit policy. For example:
+
+\begin{lstlisting}
+[auth]
+login_max_attempts = 8
+login_principal_max_attempts = 16
+login_source_max_attempts = 64
+mfa_max_attempts = 5
+login_window_secs = 300
+\end{lstlisting}
+
+After trusted-proxy processing, the server uses the effective client IP together with the canonical username as part of the limiter key. This is why \code{trusted_proxy_cidrs} is also an authentication-security setting behind a reverse proxy.
+
+A failed credential or second factor does not produce detailed failure information for the client. Use \code{429 Too Many Requests} for rate limiting and \code{503 Service Unavailable} when the authentication backend is unavailable.
+
+The limiter tracks source+principal, principal across sources, and source across principals; MFA/recovery attempts use a stricter stage. This covers distributed guessing and credential stuffing. Shared limiter-store failure is fail closed.
+
+\section{CSRF, Origin, and Fetch Metadata}
+
+With session-cookie authentication, the browser sends the cookie automatically, so state-changing requests require CSRF protection. Velran uses defense in depth:
+
+\begin{itemize}
+  \item a session-bound CSRF token;
+  \item same-origin Origin/Referer policy;
+  \item Fetch Metadata controls;
+  \item strict request parsing;
+  \item trusted-proxy policy.
+\end{itemize}
+
+CORS does not replace CSRF protection. If you allow credentialed CORS for a separate frontend origin, that is a distinct security policy and requires HTTPS.
+
+\section{Authentication audit}
+
+Login and logout events go to the audit log. Useful fields include request ID, actor, outcome, and effective client IP. The purpose of the audit log is event reconstruction, not credential debugging.
+
+Never log:
+
+\begin{itemize}
+  \item passwords;
+  \item TOTP secrets or recovery codes;
+  \item session IDs or full Cookie headers;
+  \item CSRF tokens;
+  \item LDAP bind or DB/Redis credentials.
+\end{itemize}
+
+A login result may distinguish success, invalid credentials, invalid second factor, or rate limiting internally, while the client-facing message remains intentionally less detailed.
+
+\section{Local auth or LDAP?}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}lYY@{}}
+\toprule
+ & Local auth & LDAP/LDAPS \\
+\midrule
+Identity store & separate SQLite DB & enterprise directory \\
+Typical deployment & single-node & shared/enterprise identity \\
+User administration & Velran CLI & directory admin workflow \\
+Role source & local-auth store & trusted mapping \\
+TOTP & local enrollment + recovery & server-side TOTP policy/secrets \\
+Multi-instance identity & not the target use case & yes \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+If the application needs public self-registration, email password reset, or self-service MFA enrollment, do not bolt a thin route onto the operator CLI. Those features require token lifecycle, email security, rate limiting, and their own recovery threat model.
+
+\section{Rich text in an authenticated CMS}
+
+An authenticated CMS editor interface still does not justify storing raw HTML. Editor authorization and content sanitization are separate defenses. Store Markdown as content and render it with the safe renderer:
+
+\begin{lstlisting}[language=Velran]
+<article class="article-body">
+    @markdown(article.body)
+</article>
+\end{lstlisting}
+
+\code{@markdown} does not permit raw HTML and filters link targets through an allowlist.
+
+\section{Production checklist}
+
+Before enabling authentication in production, verify:
+
+\begin{itemize}
+  \item exactly one primary identity backend is active;
+  \item the local-auth DB is separate from the application DB;
+  \item passwords and service credentials come only from secret files;
+  \item production sessions use Redis when multiple server instances run;
+  \item cookies are Secure/HttpOnly and \code{--insecure-dev-cookies} is not enabled;
+  \item \code{trusted_proxy_cidrs} covers only the real Apache/Nginx proxy addresses;
+  \item the login limiter is configured;
+  \item state-changing forms use CSRF protection;
+  \item object-level authorization supplements route roles where necessary;
+  \item credentials and session secrets never enter logs;
+  \item account disable, role changes, and TOTP changes have been tested for session revocation.
+\end{itemize}
+
+\section{Verified companion examples}
+The canonical runnable companions are:
+\begin{itemize}
+  \item \path{examples/auth/app.vrn} -- route authentication and role policy;
+  \item \path{examples/object-authorization/app.vrn} -- object-level authority;
+  \item \path{examples/mfa-elevation/main.vrn} -- MFA elevation;
+  \item \path{examples/critical-operations/main.vrn} -- critical-operation contracts.
+\end{itemize}
+Together they keep these authority mechanisms distinct instead of collapsing them into one mechanism.
+
+\section{Practice: build an authorization matrix}
+\paragraph{Exercise mode: supported.} Use the supported method defined in the preface.
+
+Create a small table with anonymous user, authenticated owner, authenticated non-owner, privileged role, and disabled account. List what each actor may do to a note. Use the table to distinguish route-level access policy from object-level authorization.
+
+\section{Common mistake: equating authentication with authorization}
+Knowing who the caller is does not prove that the caller may access a particular record. Route policy should establish the broad admission rule; ownership, tenant, or domain-specific checks must still be evaluated against the loaded object.
+
+\section{Running project checkpoint: Secure Notes}
+Use \path{examples/secure-notes/checkpoints/07-auth/main.vrn}. Require authentication for all note operations. Enforce ownership on view, edit, and delete paths. Then test the negative case deliberately: a valid logged-in user must still be unable to access another user's note by guessing an identifier.

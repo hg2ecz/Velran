@@ -1,0 +1,16 @@
+[server]
+app = "/var/www/01_basic_examples/main.vrn"
+listen = "[::]:8080"
+insecure_dev_cookies = true
+
+[native]
+enabled = true
+required = true
+optimization = "release"
+# rustc = "/absolute/path/to/rustc"
+# cache_dir = "/var/cache/velran/native"
+
+[reload]
+enabled = true
+poll_interval_ms = 1000
+debounce_ms = 250

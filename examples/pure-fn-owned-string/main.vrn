@@ -1,0 +1,12 @@
+#[inline(never)]
+fn normalize(input: &str) -> String {
+    return input.trim().to_lowercase();
+}
+
+#[page]
+fn pureOwnedString(ctx: PageContext, text: String) -> Result<Html, PageError> {
+    let normalized = normalize(&text);
+    return Ok(html {<p>{{ normalized }}</p>});
+}
+
+route GET "/pure-fn-owned-string" -> pureOwnedString

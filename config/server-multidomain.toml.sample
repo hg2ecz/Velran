@@ -1,0 +1,91 @@
+# Velran multi-domain production configuration sample.
+# Global tables are shared defaults/hard process policies. Each domain has an
+# isolated workdir and may override the request/runtime budgets listed below.
+
+[server]
+listen = "127.0.0.1:8443"
+insecure_dev_cookies = false
+
+[tls]
+# Optional global certificate fallback. A domain-specific [domains.tls]
+# pair overrides this for the primary host and all aliases of that domain.
+cert_file = "/run/secrets/velran/tls-fullchain.pem"
+key_file = "/run/secrets/velran/tls-key.pem"
+handshake_timeout_ms = 5000
+# public_host is intentionally omitted: Host/Origin pinning is derived from
+# the configured domain hosts and aliases in multi-domain mode.
+
+[limits]
+# Shared listener/process defaults.
+max_header_bytes = 16384
+max_body_bytes = 262144
+max_connections = 4096
+max_requests_per_connection = 100
+read_timeout_ms = 5000
+request_timeout_ms = 15000
+write_timeout_ms = 5000
+max_header_count = 64
+max_form_fields = 64
+max_form_field_bytes = 8192
+max_instructions = 5000000
+max_runtime_alloc_bytes = 268435456
+session_ttl_secs = 28800
+max_sessions = 100000
+max_process_memory_bytes = 1073741824
+resource_profiles_file = "/usr/local/etc/velran/resource-profiles.toml"
+
+[storage]
+fs_mode = "rwc"
+max_upload_bytes = 16777216
+max_image_pixels = 40000000
+
+[static_assets]
+url_prefix = "/assets/"
+max_asset_bytes = 8388608
+max_age_secs = 300
+immutable_max_age_secs = 31536000
+precompressed = true
+
+[reload]
+# Automatically compile and atomically activate changed application sources.
+enabled = true
+poll_interval_ms = 1000
+debounce_ms = 250
+
+[[domains]]
+host = "example.com"
+aliases = ["www.example.com", "example.net", "www.example.net"]
+workdir = "/srv/velran/domains/example.com/current"
+app = "main.vrn"
+
+[domains.storage]
+data_root = "data"
+
+[domains.static_assets]
+root = "public"
+
+[domains.reload]
+# Optional per-domain override of the global reload policy.
+enabled = true
+poll_interval_ms = 1000
+debounce_ms = 250
+
+[domains.limits]
+max_concurrent_requests = 256
+max_queued_requests = 512
+queue_timeout_ms = 3000
+max_instructions = 3000000
+max_runtime_alloc_bytes = 134217728
+
+# Optional per-domain certificate. This certificate must cover the primary
+# host and every alias above. If omitted, the global [tls] pair is used.
+[domains.tls]
+cert_file = "/run/secrets/velran/example.com-fullchain.pem"
+key_file = "/run/secrets/velran/example.com-key.pem"
+
+[[domains]]
+host = "admin.example.com"
+config_file = "/usr/local/etc/velran/domains/admin.example.com.toml"
+# Inline values override the included file.
+[domains.limits]
+request_timeout_ms = 10000

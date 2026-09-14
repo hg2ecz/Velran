@@ -1,0 +1,34 @@
+#[query]
+fn listNotes(db: Db, ownerUsername: String) -> Result<Vec<models::Note>, DbError> sql {
+    SELECT id, ownerUsername, title, body, status, createdAt, updatedAt
+    FROM notes
+    WHERE ownerUsername = :ownerUsername
+    ORDER BY id DESC
+    LIMIT 100
+}
+
+#[query]
+fn noteById(db: Db, id: i64) -> Result<models::Note, DbError> sql {
+    SELECT id, ownerUsername, title, body, status, createdAt, updatedAt
+    FROM notes
+    WHERE id = :id
+}
+
+#[query]
+fn createNote(tx: Transaction, ownerUsername: String, title: String, body: String) -> Result<(), DbError> sql {
+    INSERT INTO notes(ownerUsername, title, body, status)
+    VALUES (:ownerUsername, :title, :body, 'Draft')
+}
+
+#[query]
+fn updateNote(tx: Transaction, id: i64, title: String, body: String) -> Result<(), DbError> mutates models::Note by id sql {
+    UPDATE notes
+    SET title = :title, body = :body, updatedAt = CURRENT_TIMESTAMP
+    WHERE id = :id
+}
+
+#[query]
+fn deleteNote(tx: Transaction, id: i64) -> Result<(), DbError> mutates models::Note by id sql {
+    DELETE FROM notes
+    WHERE id = :id
+}

@@ -1,0 +1,40 @@
+#[page]
+fn typed_data_fastpaths(ctx: PageContext) -> Result<Html, PageError> {
+    let text = "velran rust native fastpath";
+    let parts = splitBounded("vrn,velran,lang", ",", 16);
+    let headers = BTreeMap::new();
+    headers["content-type"] = "text/plain";
+    headers["x-app"] = "velran";
+
+    let runs = 10000;
+    let mut checksum = 0;
+    let started = std::time::Instant::now();
+    let mut run = 0;
+    while run < runs {
+        let normalized = text.to_lowercase();
+        if normalized.contains("rust") {
+            checksum += normalized.len();
+        }
+        checksum += parts.len();
+        let middle = parts[1];
+        if middle.contains("rust") {
+            checksum += 1;
+        }
+        if headers.contains_key("x-app") {
+            checksum += headers["x-app"].len();
+        }
+        run += 1;
+    }
+    let elapsed_ns = started.elapsed().as_nanos();
+    let average_ns = elapsed_ns / runs;
+
+    Ok(html {
+        <h1>Typed data fastpath x10000</h1>
+        <p>Runs: {{ runs }}</p>
+        <p>Total elapsed: {{ elapsed_ns }} ns</p>
+        <p>Average iteration: {{ average_ns }} ns</p>
+        <p>Checksum: {{ checksum }}</p>
+    })
+}
+
+route typed_data_fastpaths GET "/typed-data-fastpaths" public => typed_data_fastpaths;

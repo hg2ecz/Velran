@@ -1,0 +1,63 @@
+#[page]
+fn home(ctx: PageContext) -> Result<Html, PageError> {
+    let answer = 6 * 7;
+    return Ok(html {
+        <!doctype html>
+        <html lang="hu">
+            <head>
+                <meta charset="utf-8">
+                <title>Velran M6</title>
+            </head>
+            <body>
+                <h1>Velran async server M6</h1>
+                <p>Dinamikus expression: {{ answer }}</p>
+
+                <form method="post" @action(greet)>
+                    <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+                    <label>Név <input name="name"></label>
+                    <button type="submit">Küldés</button>
+                </form>
+
+                <p>Typed GET: <code>/hello/Anna</code>, <code>/items/42</code>.</p>
+            </body>
+        </html>
+    });
+}
+
+#[page]
+fn hello(ctx: PageContext, name: String) -> Result<Html, PageError> {
+    let greeting = "Szia, " + name;
+    return Ok(html {
+        <!doctype html>
+        <html lang="hu"><body><h1>{{ greeting }}</h1></body></html>
+    });
+}
+
+#[page]
+fn item(ctx: PageContext, id: i64) -> Result<Html, PageError> {
+    let doubled = id * 2;
+    return Ok(html {
+        <!doctype html>
+        <html lang="hu"><body><h1>Termék #{{ id }}</h1><p>Kétszerese: {{ doubled }}</p></body></html>
+    });
+}
+
+#[page]
+fn thanks(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {
+        <!doctype html>
+        <html lang="hu"><body><h1>Köszönöm!</h1><p>A POST action lefutott.</p></body></html>
+    });
+}
+
+#[action]
+fn greet(ctx: ActionContext, name: String) -> Result<Redirect, PageError> {
+    let submittedName = name;
+    return Ok(redirect(thanks()));
+}
+
+route home GET "/" public => home;
+route hello GET "/hello/:name<String>" public => hello;
+route item GET "/items/:id<i64>" public => item;
+route thanks GET "/thanks" public => thanks;
+route greet POST "/greet" form name<String> public => greet;

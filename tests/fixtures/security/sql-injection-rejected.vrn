@@ -1,0 +1,11 @@
+#[page]
+fn home(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html { <p>not reached</p> });
+}
+
+#[query]
+fn unsafe(db: Db, name: String) -> Result<i64, DbError> sql {
+    SELECT id FROM users WHERE name = {{ name }}
+}
+
+route home GET "/" public => home;

@@ -1,0 +1,293 @@
+\chapter{Practical applications: wiki and CMS}
+
+\noindent\textbf{Learning path: Complete path / domain example.} Use this as a richer workflow and publication-state case study.\par\medskip
+
+The wiki and CMS examples combine earlier features into domain workflows. Their compiler-checked sources are \code{examples/wiki/main.vrn} and \code{examples/news-site/}; prefer those fixtures when a listing here is shortened.
+
+\section{A simple wiki}
+
+A minimal wiki domain consists of pages: stable identifier, slug, title, and Markdown body. The following example focuses on connecting the language elements.
+
+\subsection*{Model}
+
+\begin{lstlisting}[language=Velran]
+model WikiPage {
+    id: i64
+    slug: Slug
+    title: String
+    body: String
+}
+\end{lstlisting}
+
+\subsection*{Query}
+
+\begin{lstlisting}[language=Velran]
+#[query]
+fn wikiBySlug(db: Db, slug: Slug)
+    -> Result<WikiPage, DbError> sql {
+    SELECT id, slug, title, body
+    FROM wiki_pages
+    WHERE slug = :slug
+}
+\end{lstlisting}
+
+\subsection*{Public page}
+
+\begin{lstlisting}[language=Velran]
+#[page]
+fn wikiShow(ctx: PageContext, db: Db, slug: Slug)
+    -> Result<Html, PageError> {
+    let page = wikiBySlug(db, slug)?;
+    return Ok(html {
+        @layout(Main, page.title) {
+            <article>
+                <h1>{{ page.title }}</h1>
+                @markdown(page.body)
+            </article>
+        }
+    });
+}
+
+route wikiShow GET "/wiki/:slug<Slug>" public => wikiShow;
+\end{lstlisting}
+
+\subsection*{Editor form}
+
+\begin{lstlisting}[language=Velran]
+form WikiForm {
+    title<String>
+    body<String>
+    validate title length 2 200 body length 1 300000
+}
+\end{lstlisting}
+
+The mutating route should require authentication, for example \code{auth role Editor}. The write query should receive a \code{Transaction} capability. Do not blindly regenerate and overwrite the slug from the title on every edit if preserving stable old URLs matters.
+
+\subsection*{Canonical slug and aliases}
+
+A more mature wiki can maintain old names in a separate slug-alias/history table. The runtime can produce a 301 redirect from a canonical route, so the application does not need to build arbitrary redirect URLs.
+
+\subsection*{What should a real wiki add?}
+
+\begin{itemize}
+  \item optimistic locking for concurrent edits;
+  \item a business audit trail for changes;
+  \item object-level authorization if not every page has identical access rules;
+  \item backup/restore policy for the database and any AppFs state.
+\end{itemize}
+
+\section{CMS and news site}
+
+The repository's \code{examples/news-site/} project already demonstrates a small CMS core: model, typed SQL, layout, Markdown, editor action, and public cache.
+
+\subsection*{Project structure}
+
+\begin{lstlisting}
+main.vrn
+models.vrn
+queries.vrn
+components.vrn
+pages.vrn
+actions.vrn
+\end{lstlisting}
+
+\subsection*{Article model}
+
+\begin{lstlisting}[language=Velran]
+model Article {
+    id: i64
+    slug: Slug
+    title: String
+    body: String
+}
+\end{lstlisting}
+
+Editor input gets a separate named form schema:
+
+\begin{lstlisting}[language=Velran]
+form ArticleForm {
+    title<String>
+    body<String>
+    validate title length 2 200 body length 1 300000
+}
+\end{lstlisting}
+
+\subsection*{Public article page}
+
+\begin{lstlisting}[language=Velran]
+#[page]
+fn article(ctx: PageContext, db: Db, slug: Slug)
+    -> Result<Html, PageError> {
+    let article = articleBySlug(db, slug)?;
+    return Ok(html {
+        @layout(Main, article.title) {
+            <article>
+                <h1>{{ article.title }}</h1>
+                @markdown(article.body)
+            </article>
+        }
+    });
+}
+
+route article GET "/article/:slug<Slug>"
+    public cache public ttl 60
+    => article;
+\end{lstlisting}
+
+Public cache is appropriate only for a page that does not depend on session or user state.
+
+\subsection*{Editor-side creation}
+
+\begin{lstlisting}[language=Velran]
+#[action]
+fn create(ctx: ActionContext, db: Db,
+                 title: String, body: String)
+    -> Result<Redirect, PageError> {
+    let articleSlug = slug(title);
+    transaction db {
+        insertArticle(tx, articleSlug, title, body)?;
+    }
+    return Ok(redirect(adminArticles()));
+}
+
+route articleCreate POST "/admin/articles"
+    form ArticleForm
+    auth role Editor
+    invalidate cache article
+    => create;
+\end{lstlisting}
+
+The invalidation above changes the route-level generation: it does not delete just one cache key for the new slug, but makes the previous generation of the \code{article} route unreachable. This is correct and predictable in a simple example; in a high-traffic CMS you should deliberately decide which public routes a given mutation really needs to invalidate.
+
+\subsection*{From CMS to production system}
+
+The following additions form the backbone of a practical production CMS:
+
+\begin{itemize}
+  \item separate validation for publication and domain invariants;
+  \item draft/published state as an enum;
+  \item canonical slug history;
+  \item optimistic locking during editing;
+  \item business audit trail;
+  \item media library and AppFs for images;
+  \item role-based editor/publisher policy;
+  \item rate limits and resource profiles for expensive routes;
+  \item backups, restore drills, and controlled deployment.
+\end{itemize}
+
+In a CMS, original Markdown should remain the source of truth; do not store raw rendered HTML produced by the application.
+
+
+\section{Server-side Markdown rendering and cache}
+
+For published content, prefer server-side Markdown rendering. The authoritative path is:
+
+\begin{lstlisting}
+Markdown stored in SQL
+-> typed query by stable id/slug
+-> @markdown(...)
+-> safe HTML response
+-> optional route-level public cache
+\end{lstlisting}
+
+Keep the original Markdown in the database as the source of truth. Do not persist application-generated HTML merely to avoid rendering work. The server-side renderer rejects raw HTML and applies its link-target policy, so rendering remains inside the framework's HTML security boundary instead of moving trust into browser JavaScript.
+
+A public, non-personalized document may use route caching when its freshness contract allows it. The cache stores the completed response; removing the cache clause gives the same rendering path without caching. A minimal pair looks like:
+
+\begin{lstlisting}[language=Velran]
+route markdownDocumentLive GET "/documents/:id<i64>"
+    public
+    => markdownDocument;
+
+route markdownDocumentCached GET "/documents-cached/:id<i64>"
+    public
+    cache public ttl 120
+    => markdownDocument;
+\end{lstlisting}
+
+The canonical end-to-end example is \path{examples/markdown-sql-cache/}. It includes SQLite, PostgreSQL, and MariaDB schema variants and demonstrates an ID-based typed SQL read feeding \code{@markdown}. Use browser-side Markdown rendering only for an editor preview when it improves interaction; the published representation should still be rendered by the server so the server remains authoritative for sanitization, cache policy, CSP assumptions, and no-JavaScript clients.
+
+\section{From demo CMS to editorial workflow}
+
+A production content system needs a workflow, not only CRUD. A useful boundary is to keep public rendering, editorial mutation, concurrent-edit protection, media publication, and audit as separate mechanisms that compose explicitly.
+
+\subsection*{Concurrent editing}
+
+Human editors commonly keep a form open for minutes. Add a \code{version} column and use \code{Changed} on updates so an old edit receives a conflict instead of overwriting newer work. The edit page carries the current version as typed form input; the mutation checks \code{id + version} atomically and increments the version on success.
+
+For important state changes such as publishing or archiving, put the mutation and business audit record in the same database transaction. The audit trail records the authenticated actor and the static business action; it is not a substitute for authorization.
+
+\begin{lstlisting}[language=Velran]
+transaction db {
+    Article.publishChanged(tx, id, version)?;
+    audit Article id action publish
+        from article.status to ArticleStatus::Published;
+}
+\end{lstlisting}
+
+A stale version stops before the audit statement, so a failed publication attempt cannot create a false success record.
+
+\subsection*{Media belongs to a state machine}
+
+Do not treat a browser filename or client MIME type as a trusted path/type. Raw \code{Upload} values remain private. Browser-visible images require an explicit typed \code{Image} upload with \code{publish}; the platform stages the bytes privately, inspects supported image formats and dimensions, and publishes only after successful handler execution.
+
+This creates a useful content rule: database metadata may refer to a published media object, but uninspected multipart bytes never become public merely because the form was accepted.
+
+\subsection*{Public pages and editor previews are different cache domains}
+
+A public article route may use public caching only when its response does not depend on session or user state. Editor previews, draft pages, permission-sensitive views, and personalized navigation should not share that cache contract. Keep the public route intentionally narrow, and invalidate its generation after a mutation that changes the rendered article.
+
+\section{A practical CMS layering model}
+
+As the project grows, keep responsibilities separated:
+
+\begin{enumerate}
+  \item \textbf{domain model}: article/page identifiers, status, slug and version;
+  \item \textbf{queries}: compiler-owned SQL and typed binds;
+  \item \textbf{editor boundary}: named forms, validation and authenticated routes;
+  \item \textbf{authorization}: role/permission plus object-level checks where required;
+  \item \textbf{transactional mutation}: state change, optimistic locking and business audit;
+  \item \textbf{presentation}: layouts, components and Markdown rendering;
+  \item \textbf{media}: staged inspection and explicit publication;
+  \item \textbf{public delivery}: canonical URL, public cache and narrow invalidation;
+  \item \textbf{operations}: migrations, backup/restore, monitoring and release evidence.
+\end{enumerate}
+
+The layering keeps authorization, rendering, mutation, and cache behavior reviewable as the CMS grows.
+
+\section{CMS review questions}
+
+Before calling a content feature complete, ask:
+
+\begin{itemize}
+  \item Can two editors overwrite each other silently?
+  \item Is every protected state transition authorized independently of validation?
+  \item Are publication/archive decisions reconstructable from business audit when required?
+  \item Are old slugs redirected canonically rather than accepted as arbitrary redirect input?
+  \item Can uninspected upload bytes become public?
+  \item Can a session-dependent response enter public cache?
+  \item Does a mutation invalidate the smallest correct public-cache scope?
+  \item Can the content database and AppFs/media state be restored to a known consistent point?
+\end{itemize}
+
+\section{Verified companion examples}
+Use these compiler-checked companions according to the question you are studying:
+\begin{itemize}
+  \item \path{examples/wiki/main.vrn} -- focused wiki flow;
+  \item \path{examples/news-site/main.vrn} -- multi-file CMS/editorial workflow;
+  \item \path{examples/markdown-sql-cache/} -- focused typed SQL to server-side Markdown rendering, with optional public response caching.
+\end{itemize}
+Together they validate that editorial workflow, typed SQL, Markdown rendering, authorization, caching, and module structure still compose under the current compiler.
+
+\section{Practice: define an editorial state machine}
+\paragraph{Exercise mode: independent.} Use the independent method defined in the preface.
+
+List the states of one publishable object and the actors allowed to move it between states. Include at least one rejected transition. Then decide which transitions require stronger authorization, audit evidence, or concurrency protection.
+
+\section{Common mistake: representing workflow as free-form text}
+Editorial state is business state. Model it as a closed, typed set and keep transition rules explicit. Otherwise invalid combinations gradually become data-cleanup problems instead of compile-time or verification-time design decisions.
+
+\section{Running project checkpoint: Secure Notes}
+Use the compiler-checked publication checkpoint:
+\begin{quote}\path{examples/secure-notes/checkpoints/12-publication/main.vrn}\end{quote}
+Extend Secure Notes with Draft and Published states. Keep publication as an explicit state transition, preserve ownership rules, and make the externally visible view depend on the typed state rather than on ad-hoc string comparisons.

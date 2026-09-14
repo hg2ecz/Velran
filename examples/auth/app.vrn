@@ -1,0 +1,42 @@
+#[page]
+fn home(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {
+        <main>
+            <h1>Public home</h1>
+            <a href="/__velran/auth/login">Login</a>
+        </main>
+    });
+}
+
+#[page]
+fn account(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {
+        <main>
+            <h1>Account</h1>
+            <p>Signed in as {{ authPrincipal }}</p>
+            <form method="post" action="/__velran/auth/logout">
+                <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+                <button type="submit">Logout</button>
+            </form>
+        </main>
+    });
+}
+
+#[page]
+fn security(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {
+        <main><h1>MFA protected</h1><p>{{ authPrincipal }}</p></main>
+    });
+}
+
+#[page]
+fn admin(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {
+        <main><h1>Admin</h1><p>{{ authPrincipal }}</p></main>
+    });
+}
+
+route home GET "/" public => home;
+route account GET "/account" auth user => account;
+route security GET "/security" auth mfa => security;
+route admin GET "/admin" auth role Admin => admin;

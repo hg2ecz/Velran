@@ -1,0 +1,214 @@
+\chapter{Security hardening: the current secure-by-construction model}
+
+\noindent\textbf{Learning path: Fast path: mandatory before shipping.} Consolidate the security invariants that must hold across the whole application.\par\medskip
+
+Velran security is not optional middleware: authority is divided across language, compiler, runtime and server. Make security properties compiler invariants where possible; otherwise enforce a secure platform default or fail closed with a stable diagnostic.
+
+\noindent\textbf{First read.} Focus on authority/access control, input/browser boundaries, resource safety, and the production security gate. Use the remaining sections as a hardening reference.\par\medskip
+
+\section{What the secure model does -- and does not -- decide}
+
+Velran can make raw SQL, arbitrary redirect URLs, ambient DB/network authority, unbounded list queries, forged redaction and several other unsafe states unrepresentable. It can prove that a mutation used an authorization proof. It cannot decide whether ``Editor may publish this particular article'' is the correct business rule. That decision remains in the application's permission/object/tenant policy.
+
+A useful review rule is: \emph{mechanism should be compiler/runtime-owned; business intent should remain explicit application code}.
+
+\section{Authority and access control}
+
+Every route has an explicit access policy. There is no implicit public endpoint. Authorization is layered:
+
+\begin{enumerate}
+  \item trusted authentication establishes the principal;
+  \item route policy determines whether the handler may be entered;
+  \item object authorization proves access to a loaded record;
+  \item mutation authorization proves that an UPDATE/DELETE key comes from authorized object authority;
+  \item named permissions and MFA can be part of a handler contract;
+  \item tenant-scoped data requires active-tenant membership proof;
+  \item effects/capabilities make DB and outbound-network authority visible rather than ambient.
+\end{enumerate}
+
+Validation proof is never authorization proof. A valid \code{ArticleId} still does not prove that the current principal may mutate that article.
+
+\section{Critical operations, idempotency and transaction outcome}
+
+A critical contract combines security obligations rather than scattering them through boilerplate:
+
+\begin{lstlisting}[language=Velran]
+critical Payment {
+    permission BillingWrite
+    mfa
+    transaction
+    idempotency
+    audit PaymentCharged
+}
+\end{lstlisting}
+
+Idempotency binds the replay key to both request fingerprint and principal scope. Reusing the key with a different payload becomes a conflict instead of a second side effect.
+
+Database commit acknowledgement is also explicit. A captured transaction returns the closed sum type \code{Committed | RolledBack | CommitUnknown}, and \code{match} is exhaustive with no wildcard fallthrough. An idempotent critical transaction must capture and handle the outcome; \code{CommitUnknown} cannot disappear into a generic retryable DB error.
+
+\section{Input, injection and browser boundaries}
+
+The major injection surfaces are structural rather than convention-based:
+
+\begin{itemize}
+  \item SQL uses compiler-owned statements and typed binds; string-interpolated raw SQL is rejected;
+  \item HTML/template output is structured and sensitivity-aware;
+  \item redirects use typed local route calls rather than string URLs;
+  \item response headers use typed names and bounded validated values;
+  \item filenames, media types and Content-Disposition are typed;
+  \item outbound calls use named integrations and relative literal paths, not arbitrary URLs;
+  \item generated CSP defaults to least privilege, including \code{connect-src 'none'};
+  \item compressed inbound HTTP bodies are rejected until a future bounded decompression surface is explicitly designed.
+\end{itemize}
+
+\section{Trust, domain types and disclosure}
+
+Request-boundary values begin untrusted. Domain validation can refine them to validated nominal types, but this does not erase sensitivity or create authorization.
+
+\code{Secret<T>} and \code{Sensitive<T>} metadata follows values through calls. Full database/domain models are not generically serialized; public output uses explicit projections. This prevents a newly added model field from silently appearing in an existing API.
+
+For logs and monitoring, \code{Redacted<T>} cannot be forged with a type annotation. It is produced only by the trusted \code{redact(...)} builtin, which discards the original representation and yields a safe redacted value.
+
+\section{Authentication and session hardening}
+
+The browser session is platform-owned. Login rotates session authority, logout invalidates it, and auth-generation changes revoke older sessions after security-relevant account changes. Cookies use the hardened platform policy rather than application-selected flags.
+
+Online authentication abuse is limited in three dimensions:
+
+\begin{itemize}
+  \item source + principal;
+  \item principal across sources;
+  \item source across principals.
+\end{itemize}
+
+MFA/recovery attempts have a stricter stage limit. Limiter-store failure is fail closed, and client-visible credential errors remain deliberately generic to reduce account enumeration.
+
+\section{Credentials, tokens and cryptography}
+
+Purpose-specific types prevent accidental cross-use of passwords, token hashes, session tokens, reset tokens, CSRF tokens and cryptographic keys.
+
+Passwords use platform-owned Argon2id policy. Bearer tokens are persisted as purpose-specific hashes and use expiry-aware verification; reset grants, session revocation and session rotation have atomic lifecycle contracts.
+
+Cryptographic keys have purpose and lifecycle. For user-data encryption the high-level primitive is fixed to AES-256-GCM with a platform-generated nonce and versioned authenticated envelope. The lifecycle is:
+
+\begin{lstlisting}
+Active    -> encrypt + decrypt
+Retiring  -> decrypt only
+Retired   -> neither
+\end{lstlisting}
+
+Application code cannot select a weaker cipher or supply its own nonce.
+
+\section{Verified webhooks and safe uploads}
+
+A webhook is not an unauthenticated public POST. The route has separate webhook authority: raw-body signature verification, timestamp/replay-window checking and an atomic replay claim happen before the handler runs.
+
+File upload follows a state machine:
+
+\begin{lstlisting}
+multipart bytes
+    -> private staged file
+    -> byte-authoritative inspection
+    -> verified image
+    -> handler success
+    -> atomic publish
+\end{lstlisting}
+
+Client filename and MIME are metadata, not storage or type authority. Public media serving only exposes directories declared by verified image publish routes.
+
+\section{Resource safety is a security invariant}
+
+Velran bounds both individual operations and the whole request:
+
+\begin{itemize}
+  \item request/parser hard limits;
+  \item route resource profiles under a platform ceiling;
+  \item instruction/allocation budgets and hard request deadline;
+  \item static row bounds for database list queries plus runtime row caps;
+  \item bounded request collections;
+  \item upload byte/pixel limits;
+  \item bounded outbound request and response bodies;
+  \item cumulative external-I/O accounting across request and outbound traffic.
+\end{itemize}
+
+General unrestricted collection growth is intentionally not exposed until the same cardinality guarantees can be preserved.
+
+\section{Production configuration is a security contract}
+
+An application can declare strict production requirements:
+
+\begin{lstlisting}[language=Velran]
+production {
+    https required;
+    debug disabled;
+    hsts required;
+    database tls required;
+}
+\end{lstlisting}
+
+Startup fails closed when the deployment cannot satisfy the contract. Production mode rejects insecure development cookies, unsafe source reload, missing-Origin exceptions and insecure remote database transport. Reload cannot silently change the deployment security contract; changing it requires restart and operator review.
+
+\section{Supply-chain state is part of the release}
+
+The release records more than crate versions. Three artifacts belong together:
+
+\begin{lstlisting}
+Cargo.lock
+SUPPLY-CHAIN-CAPABILITIES.txt
+VELRAN-SUPPLY-CHAIN.lock
+\end{lstlisting}
+
+Direct external dependency edges have explicit security capabilities such as network, filesystem, crypto or parser. Current provenance policy accepts checksummed crates.io packages only. The supply-chain envelope seals both the Cargo lock and capability policy, and release tooling verifies \code{cargo metadata --locked} before sealing or packaging.
+
+\section{Security events, redaction and alerts}
+
+Critical operations already emit typed audit events. The platform also emits structured security events for authentication abuse, MFA failures, access-policy denial, CSRF/origin/CORS rejection, webhook verification failure, idempotency conflict and resource exhaustion.
+
+The event schema does not accept arbitrary request payloads. Principal/source values are redacted in emitted events; bounded in-memory correlation may use raw keys without writing them to logs. Platform-owned burst thresholds and cooldowns turn repeated failures into alerts without allowing alert floods to become a new availability problem.
+
+\section{Production security gate}
+
+Before handing a release to production, verify at least:
+
+\begin{enumerate}
+  \item the real toolchain gates pass: format, locked metadata, check, tests and \code{./verify.sh};
+  \item production policy is present where required and startup compatibility is green;
+  \item HTTPS, HSTS, secure cookie and trusted-proxy topology are correct;
+  \item DB runtime credentials are least privilege and remote DB TLS is enforced;
+  \item auth/session/rate-limit shared state matches the deployment topology;
+  \item tenant, object and mutation authorization negative tests are green;
+  \item critical/idempotent operations handle \code{CommitUnknown} explicitly;
+  \item webhook verification/replay and upload publish-state tests are green;
+  \item outbound integrations resolve only through reviewed named egress policy;
+  \item resource/deadline limits are configured and observed;
+  \item security-event redaction and burst alerts are verified;
+  \item supply-chain and release-manifest state are current and verified.
+\end{enumerate}
+
+\section{Review questions for every new feature}
+
+Ask five questions:
+
+\begin{enumerate}
+  \item \textbf{What comes from outside?} Which fields, files, identifiers or upstream data are untrusted?
+  \item \textbf{Where does it become typed or validated?} Which boundary creates the proof?
+  \item \textbf{Who owns authority?} Session, database record, tenant membership, trusted config or named capability?
+  \item \textbf{What happens in ambiguous failure?} Is there a fail-closed, rollback, cleanup or explicit unknown state?
+  \item \textbf{What bounds the resource?} Bytes, rows, items, time, rate, CPU or cumulative I/O?
+\end{enumerate}
+
+If any answer is vague, the feature's security model is unfinished.
+
+\section{Verified companion examples}
+Security hardening is easier to review against executable fixtures. The canonical companions here are \path{examples/resource-profile/app.vrn}, \path{examples/rate-limit/app.vrn}, and \path{examples/typed-security-events/main.vrn}.
+
+\section{Practice: map controls to threat paths}
+\paragraph{Exercise mode: independent.} Use the independent method defined in the preface.
+
+Choose three concrete threats and trace which independent controls stop or limit each one. Prefer layered answers: typed input plus authorization plus transaction invariants is stronger than a single validation check expected to do everything.
+
+\section{Common mistake: treating hardening as a final deployment phase}
+Hardening that depends on application structure must be designed before production. Route policy, capability boundaries, object authorization, bounded inputs, and named egress are architecture, not post-release configuration polish.
+
+\section{Running project checkpoint: Secure Notes}
+Review Secure Notes as an attacker would: identifiers, form fields, publication transitions, media references, JSON endpoints, and outbound integration. Document which boundary rejects each invalid path and which event should be observable when the rejection matters operationally.

@@ -1,0 +1,5 @@
+#[action]
+fn bad(ctx: ActionContext, name: String, age: i64) -> Result<Json, PageError> {
+    return Ok(json(name));
+}
+route bad POST "/bad" form name<String> json age<i64> public => bad;

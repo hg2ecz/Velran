@@ -1,0 +1,390 @@
+\chapter{Cache, Redis, rate limiting, and multi-instance operation}
+
+\noindent\textbf{Learning path: Complete path / scale-up chapter.} Read when measurement shows that caching, Redis, or horizontal scaling is needed.\par\medskip
+
+\noindent\textbf{First read.} Learn what may be cached, how cache generations invalidate safely, and how shared sessions/rate limits fail closed. Treat backend tuning and topology details as reference.\par\medskip
+
+With multiple instances, session state, rate limits, and public cache need explicit ownership. Velran keeps Redis runtime-owned: application code declares policy but receives no general key/value API. Business source of truth remains in DB/AppFs.
+
+\section{Why not a general Redis client?}
+
+V1 has no language operation that lets a program read or write arbitrary Redis keys. Redis is compiler/runtime-owned infrastructure:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}L{0.27\textwidth}Y@{}}
+\toprule
+\textbf{Use} & \textbf{Who owns the key and rules?} \\
+\midrule
+session & runtime/auth layer \\
+TOTP replay & runtime/auth layer \\
+login rate limit & runtime/auth layer \\
+route rate limit & runtime + trusted policy config \\
+public page cache & compiler/runtime \\
+business data & not Redis; application DB/AppFs \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Do not store wiki articles, CMS workflow state, or billing records in Redis. Those are business source of truth and belong in the application DB accessed through typed SQL. After Redis loss, the system should rebuild from durable state: sessions may disappear, cache may rebuild, and rate-limit windows may restart.
+
+\section{Production Redis configuration}
+
+The Redis URL is a secret and should come from a file:
+
+\begin{lstlisting}
+[redis]
+url_file = "/run/secrets/velran/redis-url"
+allow_insecure = false
+\end{lstlisting}
+
+The file may contain a TLS URL such as:
+
+\begin{lstlisting}
+rediss://velran:SECRET@redis.internal.example/0
+\end{lstlisting}
+
+Keep \code{allow_insecure = false} as the production baseline. Network reachability to Redis is not an authorization model by itself: also restrict it with network ACL/firewall, and make credentials readable only by the Velran service user.
+
+The runtime uses separate namespaces for separate purposes. Public cache, for example, lives under an \code{velran-cache} namespace; the application does not choose arbitrary key prefixes.
+
+\section{Shared sessions across server instances}
+
+An in-memory session store is a development convenience, not a multi-instance production model:
+
+\begin{lstlisting}
+                 +--> Velran A --+
+Browser -> proxy |               |--> Redis
+                 +--> Velran B --+
+\end{lstlisting}
+
+If the session lived only in A, a request routed to B would lose authentication. Use a shared session backend; sticky sessions are not a failover or rollout strategy.
+
+In production, Redis shares auth state including:
+
+\begin{itemize}
+  \item sessions;
+  \item TOTP replay protection;
+  \item login rate-limit state.
+\end{itemize}
+
+The same browser therefore does not need to hit the same server instance every time.
+
+\subsection*{The important local-auth exception}
+
+Sessions can be shared, but the V1 local-auth identity store is SQLite and targets single-node identity. For multiple application instances, the current shared identity backend is LDAP/LDAPS. Do not confuse these two layers:
+
+\begin{description}
+  \item[Redis session] tells the server which trusted principal and auth state an already-authenticated request belongs to;
+  \item[identity backend] verifies credentials and account/role state during login.
+\end{description}
+
+Multiple instances still need a common identity source even with shared Redis sessions; in V1, LDAP is the production path for that.
+
+\section{Public page cache}
+
+Public cache avoids repeating the same query and HTML render for every request to a public, user-independent GET page.
+
+Declaration:
+
+\begin{lstlisting}[language=Velran]
+route frontPage GET "/"
+    public cache public ttl 60
+    => frontPage;
+\end{lstlisting}
+
+The developer declares only the caching intent and route TTL. The runtime constructs a canonical hashed key from, among other things, the route name, route generation, path, sorted typed query input, and representation.
+
+Application code therefore cannot do this:
+
+\begin{lstlisting}
+cache.set("homepage:" + userInput, rendered)
+\end{lstlisting}
+
+There is no general cache API. This prevents key-naming drift, accidental PII in keys, and a proliferation of incompatible invalidation strategies.
+
+\section{What may go into public cache?}
+
+The name \code{cache public} is literal. Only GET routes whose responses do not depend on user session or request-specific security state should be cached.
+
+The compiler forbids dependencies such as:
+
+\begin{lstlisting}
+csrfToken
+authPrincipal
+authMfaVerified
+\end{lstlisting}
+
+This is critical because a successful cached response may also be public-cacheable at the HTTP layer:
+
+\begin{lstlisting}
+Cache-Control: public, max-age=<ttl>
+\end{lstlisting}
+
+Account pages, admin interfaces, personalized navigation, and pages consuming flash messages therefore do not belong in public cache.
+
+\section{Operator-controlled cache boundaries}
+
+A route cannot request an arbitrarily large TTL. Trusted server configuration sets hard ceilings:
+
+\begin{lstlisting}
+[cache]
+max_ttl_secs = 3600
+max_entries = 10000
+max_bytes = 67108864
+allow_memory = false
+\end{lstlisting}
+
+\code{max_ttl_secs} caps any route-requested TTL. Entry and byte limits bound the in-memory development fallback; memory cache is not a production scaling strategy.
+
+If the application uses public cache but Redis is not configured, the server does not start under the production default. Memory cache can be enabled explicitly for development, but do not let that escape into production unnoticed.
+
+\section{Cache invalidation: generations, not key search}
+
+A state-changing route can declare which cached routes become invalid:
+
+\begin{lstlisting}[language=Velran]
+route publish POST "/publish"
+    public invalidate cache frontPage article
+    => publish;
+\end{lstlisting}
+
+Invalidation does not run Redis \code{SCAN} and does not delete a discovered key list. The runtime increments a route generation. New requests then build keys from the new generation, making old entries unreachable to new traffic.
+
+This has two important consequences:
+
+\begin{itemize}
+  \item invalidation is effectively O(1), independent of how many old cache keys exist;
+  \item with shared Redis, every instance observes the same new generation, so invalidation is cluster-safe.
+\end{itemize}
+
+Old entries may remain physically in Redis until TTL expiry, but logically they are no longer part of the active cache namespace.
+
+\section{Stampede protection and its limits}
+
+After a cache miss, many identical requests may arrive at once. On a single instance, Velran uses single-flight-like behavior so only one request rebuilds a given cache key; others wait and then read cache again.
+
+The boundary matters: V1 has no distributed single-flight lease. Two different Velran instances may rebuild the same expired key concurrently. Therefore a cacheable page query must still be reasonably cheap and well indexed. Cache is not an excuse for an uncontrolled expensive database operation.
+
+\section{Redis failure during cached requests}
+
+A public-cache backend failure must not silently switch the application to a different consistency model. When the cache backend is unavailable, Velran may return a service failure such as \code{cache_unavailable} for cached routes instead of implicitly allowing every request to fall through to the database without bound.
+
+This fail-closed production behavior is useful: a Redis outage should not silently trigger a DB thundering herd. Readiness can return 503 for DB/Redis dependency failures so the load balancer can remove the instance from traffic.
+
+\section{Route rate limiting}
+
+A route does not embed numeric limits in source; it requests a trusted policy by name:
+
+\begin{lstlisting}[language=Velran]
+route api GET "/api/status"
+    public rate publicApi
+    => api;
+\end{lstlisting}
+
+Concrete numbers live in operator configuration:
+
+\begin{lstlisting}
+[policy.publicApi]
+limit = 120
+window_secs = 60
+scope = "ip_route"
+\end{lstlisting}
+
+This is a deliberate separation. The application can say that an endpoint needs the \code{publicApi} policy, but cannot arbitrarily override production resource and abuse policy.
+
+\section{Rate-limit scopes}
+
+V1 scopes are:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}L{0.22\textwidth}Y@{}}
+\toprule
+\textbf{Scope} & \textbf{Bucket subject} \\
+\midrule
+\code{ip} & effective client IP \\
+\code{route} & one shared route bucket for all clients \\
+\code{ip_route} & effective client IP + route \\
+\code{user} & authenticated canonical principal \\
+\code{user_route} & canonical principal + route \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\code{user} and \code{user_route} on a public route are startup errors because there is no trusted authenticated principal from which to derive the bucket.
+
+For IP scopes, Velran does not blindly trust \code{X-Forwarded-For}. It first determines the effective client IP using trusted-proxy policy. Correct proxy-CIDR configuration is therefore also a rate-limit security concern behind Apache/Nginx.
+
+\section{Fixed-window model across instances}
+
+The route limiter uses fixed-window buckets. In Redis, all instances atomically increment the same bucket, so the limit is global rather than per instance.
+
+For example with two servers:
+
+\begin{lstlisting}
+limit = 120 / 60 sec
+
+not: 120 requests on A + 120 requests on B
+but: 120 requests in the shared bucket
+\end{lstlisting}
+
+The subject appears in the Redis key only as a stable hash, so raw usernames or IP addresses are not embedded directly as keys.
+
+When the limit is exceeded:
+
+\begin{lstlisting}
+HTTP/1.1 429 Too Many Requests
+Retry-After: 60
+\end{lstlisting}
+
+If the Redis limiter fails, policy fails closed:
+
+\begin{lstlisting}
+503 rate_limiter_unavailable
+\end{lstlisting}
+
+This is safer than automatically opening the endpoint without limits during a Redis failure.
+
+\section{Memory backends are development exceptions}
+
+The trusted production baseline is:
+
+\begin{lstlisting}
+[rate_limit]
+policies_file = "/usr/local/etc/velran/rate-limits.toml"
+allow_memory = false
+
+[cache]
+allow_memory = false
+\end{lstlisting}
+
+Memory rate limiting and memory cache are explicit development escape hatches. With multiple processes or hosts, each instance would see separate memory and neither limits nor cache invalidation would have the same global semantics as Redis.
+
+If you test locally with memory backends, always validate the production configuration before deployment:
+
+\begin{lstlisting}
+velran-server --config /usr/local/etc/velran/server.toml --check-config
+\end{lstlisting}
+
+\section{A typical multi-instance topology}
+
+\begin{lstlisting}
+                    +--> Velran A --+--> application DB
+Internet -> proxy --|               |
+                    +--> Velran B --+--> Redis
+                            |
+                            +----------> shared AppFs (*)
+\end{lstlisting}
+
+The asterisk matters: if the application uses uploaded files/AppFs as business state, multi-instance infrastructure must make that data root consistently available to every instance. The V1 AppFs API provides confinement and safe file operations; infrastructure still decides how the data root is shared correctly.
+
+Component roles are:
+
+\begin{itemize}
+  \item \textbf{reverse proxy/load balancer}: TLS, routing, instance selection;
+  \item \textbf{Velran instance}: near-stateless application process with bounded local runtime state;
+  \item \textbf{application DB}: durable structured business source of truth;
+  \item \textbf{AppFs}: durable file/media business state when used;
+  \item \textbf{Redis}: rebuildable shared session/cache/rate-limit/replay infrastructure.
+\end{itemize}
+
+\section{Rolling restart and cache generation}
+
+A new release rollout does not require manually deleting old cache keys. Route generation is part of the cache key, so a new release/compiler generation creates a new namespace. Explicit business invalidation still comes from state-changing route declarations.
+
+During a rolling restart, the proxy should send traffic only to ready instances. Use SIGTERM graceful drain. The orchestrator's termination grace period should exceed the server's configured shutdown grace period.
+
+Sticky sessions are not required when the shared session backend is configured correctly.
+
+\section{What should you monitor?}
+
+Cache and rate limiting are not invisible optimizations. Minimum production monitoring includes:
+
+\begin{itemize}
+  \item \code{velran_cache_hits_total} and \code{velran_cache_misses_total};
+  \item 429 responses and \code{velran_rate_limit_denials_total};
+  \item \code{rate_limiter_unavailable} events;
+  \item readiness 503 events on Redis/DB dependency failures;
+  \item Redis latency, connection, and memory state in infrastructure monitoring;
+  \item application DB latency during cache-miss periods.
+\end{itemize}
+
+Do not use raw IP, username, session ID, tenant, request ID, or full URL as metric labels. The bounded-cardinality rule from the observability chapter applies here too: metric labels must not grow without bound per user or request.
+
+\section{Redis in recovery}
+
+Redis is runtime state in this architecture: sessions, cache, rate-limit, and replay-protection state may live there, but it is not business source of truth. Recovery therefore focuses not on restoring cache, but on ensuring that the system rebuilds this state safely and predictably after Redis loss.
+
+The full backup/restore order and which state must actually be backed up are covered in Chapter~\ref{ch:recovery}.
+
+\section{Practical example: cached news front page with publishing}
+
+The public front page is user-independent and can be cached:
+
+\begin{lstlisting}[language=Velran]
+#[page]
+fn frontPage(ctx: PageContext, db: Db)
+    -> Result<Html, PageError> {
+    let articles = latestArticles(db)?;
+    return Ok(html {
+        <main>
+            @for article in articles {
+                <a @href(article, article.slug)>
+                    {{ article.title }}
+                </a>
+            }
+        </main>
+    });
+}
+
+route frontPage GET "/"
+    public cache public ttl 60
+    => frontPage;
+\end{lstlisting}
+
+Publishing is an authenticated state change and is not cacheable, but it invalidates the front page:
+
+\begin{lstlisting}[language=Velran]
+route publish POST "/admin/publish/:id<i64>"
+    auth role Publisher
+    invalidate cache frontPage
+    => publish;
+\end{lstlisting}
+
+The mental model remains simple:
+
+\begin{enumerate}
+  \item the database is the source of truth for articles;
+  \item the public HTML cache is only a fast copy;
+  \item after the publish transaction, the new generation causes the next GET to build a fresh page;
+  \item any Velran instance may perform that rebuild;
+  \item the resulting response goes into shared Redis cache.
+\end{enumerate}
+
+\section{Checklist}
+
+Before a multi-instance production deployment, verify:
+
+\begin{itemize}
+  \item Redis URL comes from a secret file and TLS/security policy is appropriate;
+  \item shared sessions eliminate the need for sticky sessions;
+  \item local-auth SQLite is not treated as a shared multi-instance identity store;
+  \item public cache exists only on truly user-independent GET routes;
+  \item every relevant state-changing route declares explicit cache invalidation;
+  \item cache TTL does not exceed the operator maximum;
+  \item production uses \code{allow_memory = false} for cache and rate limiter;
+  \item rate-limit scope derives from trusted identity/effective client IP;
+  \item 503/readiness behavior has been tested for Redis outage;
+  \item cache hit/miss and rate-limit denial metrics are monitored;
+  \item Redis state is not treated as a required business backup component.
+\end{itemize}
+
+\section{Practice: classify cacheable data}
+\paragraph{Exercise mode: independent.} Use the independent method defined in the preface.
+
+For each candidate cache entry, name the authoritative source, key scope, lifetime, invalidation trigger, and authorization context. If any of these is unclear, delay caching until the contract is explicit.
+
+\section{Common mistake: caching before defining consistency}
+A cache can make stale or cross-user data much faster. Performance work must preserve the same ownership and visibility rules as the uncached path, with invalidation tied narrowly to authoritative state changes.
+
+\section{Running project checkpoint: Secure Notes}
+Cache only a read path whose visibility rules are already stable. Prove that publishing, editing, deleting, or changing authorization cannot leave another user seeing a stale or incorrectly scoped representation.

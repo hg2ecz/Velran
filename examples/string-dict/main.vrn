@@ -1,0 +1,17 @@
+#[page]
+fn dict_demo(ctx: PageContext, key: String) -> Result<Json, PageError> {
+    let headers = BTreeMap::new();
+    headers["Content-Type"] = "text/plain";
+    headers["X-App"] = "velran";
+
+    if headers.contains_key(key) {
+        let value = headers[key];
+        return Ok(json(value));
+    }
+
+    return Ok(json("missing"));
+}
+
+route dict_demo GET "/dict"
+    query key<String>
+    public => dict_demo;

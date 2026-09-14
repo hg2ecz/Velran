@@ -1,0 +1,38 @@
+#[page]
+fn numeric_operators(ctx: PageContext) -> Result<Html, PageError> {
+    let remainder = 17 % 5;
+    let shifted_left = 3 << 2;
+    let shifted_right = 24 >> 2;
+    let masked = 12 & 10;
+    let toggled = 12 ^ 10;
+    let combined = 12 | 3;
+    let logical = remainder == 2 && shifted_left == 12 && !(shifted_right == 5);
+
+    let natural_log = 2.0f32.ln();
+    let decimal_log = 1000.0f32.log10();
+    let base_log = 8.0f32.log(2.0f32);
+    let exponential = 1.0f32.exp();
+    let powered = 2.0f32.powf(8.0f32);
+    let rounded = 2.6f32.round();
+    let floored = 2.6f32.floor();
+    let ceiled = 2.1f32.ceil();
+
+    return Ok(html {
+        <h1>Numeric operators</h1>
+        <p>17 % 5 = {{ remainder }}</p>
+        <p>3 &lt;&lt; 2 = {{ shifted_left }}</p>
+        <p>24 &gt;&gt; 2 = {{ shifted_right }}</p>
+        <p>12 &amp; 10 = {{ masked }}</p>
+        <p>12 ^ 10 = {{ toggled }}</p>
+        <p>12 | 3 = {{ combined }}</p>
+        <p>Logical check = {{ logical }}</p>
+        <p>ln(2) = {{ natural_log }}</p>
+        <p>log10(1000) = {{ decimal_log }}</p>
+        <p>log base 2 of 8 = {{ base_log }}</p>
+        <p>exp(1) = {{ exponential }}</p>
+        <p>2^8 = {{ powered }}</p>
+        <p>round/floor/ceil = {{ rounded }} / {{ floored }} / {{ ceiled }}</p>
+    });
+}
+
+route numeric_operators GET "/numeric-operators" public => numeric_operators;

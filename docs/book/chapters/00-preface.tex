@@ -1,0 +1,255 @@
+\chapter*{Preface}
+
+\paragraph{Project identity.} The canonical full project name is \textbf{Velran --- a security-first web application language and server with Rust syntax.} The shorter phrase ``Rust Web'' may be used descriptively, but it is not a separate project name.
+
+\addcontentsline{toc}{chapter}{Preface}
+
+This book is for web developers meeting \velran{} for the first time. It starts from the application itself---business data, allowed operations, and HTTP boundaries---rather than from syntax.
+
+The learning order is deliberate: establish the mental model, install the toolchain, build one small end-to-end application, then deepen language, data, authentication, files, APIs, security, and production operations. CLI and \code{server.toml} material stays near the end as reference, not prerequisite.
+
+
+\section*{Edition and verification status}
+
+This edition records a \textbf{Verified Development Milestone} for the current Velran implementation. On the current source tree, the trusted development environment has completed \code{cargo fmt}, the full workspace test suite, \code{./verify.sh}, and local test serving successfully. The language/package/security descriptions in this book are intended to match that verified tree.
+
+This milestone is deliberately narrower than a production-release claim. Environment-specific deployment, recovery, performance evidence outside the repository gate, secret provisioning, TLS/reverse-proxy setup, and operator acceptance remain responsibilities of the target production environment. Documentation records the verified repository baseline; it does not replace production change control or environment-specific evidence.
+
+\section*{Core terms}
+
+The book uses a few technical terms consistently. It is useful to establish the same meaning for them from the beginning:
+
+\begin{description}
+  \item[\code{model}] a named typed data shape known to the compiler; it does not automatically become a database table or schema;
+  \item[typed] the shape and type of the data are known to the compiler instead of being discovered only at runtime;
+  \item[capability] an explicit ability to access a resource or perform a sensitive operation, such as \code{Db}, \code{Transaction}, or \code{AppFs};
+  \item[policy] a rule enforced at an external boundary, such as authentication, rate limiting, CORS, or trusted-proxy policy;
+  \item[runtime] the server-side environment that executes compiled Velran programs and enforces limits and capability boundaries.
+\end{description}
+
+Later chapters refine these definitions, but these meanings are enough for a first reading.
+
+
+\section*{How to read this book}
+
+On a first pass, do not try to memorize every configuration key or production limit. The first goal is to be able to answer three questions consistently:
+
+\begin{enumerate}
+  \item \emph{What typed data does this feature operate on?}
+  \item \emph{What operation reads or modifies that data?}
+  \item \emph{What authority or capability permits that operation?}
+\end{enumerate}
+
+Once those three questions are clear, the route, form, SQL, authentication, and configuration become different boundaries of the same model rather than unrelated tricks.
+
+A useful discipline throughout the book is to separate what Velran proves from what the application designer must still decide:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}Y Y@{}}
+\toprule
+\textbf{Velran/platform responsibility} & \textbf{Application/operator responsibility} \\
+\midrule
+Typed boundaries, escaping, capability checks, bounded resources, secure session mechanics & Business rules, who may act on which object, retention and recovery objectives \\
+Fail-closed compiler/runtime invariants & Choosing the correct access policy and production topology \\
+Safe SQL, redirect, upload, egress and cryptographic primitives & Deciding when a business operation is allowed and how domain-specific conflicts are resolved \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The model removes security plumbing; it does not invent the application's business authorization rules.
+
+\subsection*{Choose a learning path}
+
+Do not read every chapter with the same priority. Choose one of these two paths and change paths later if your role changes.
+
+\paragraph{Fast web-developer path.}
+Use this when your immediate goal is to build and ship a conventional authenticated Velran application. Read the chapters in this order:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}L{0.23\textwidth} Y@{}}
+\toprule
+\textbf{Stage} & \textbf{Chapters and outcome} \\
+\midrule
+Mental model and first vertical slice & 1--4: understand boundaries, install/run the toolchain, build one complete request-to-response path, and learn the Rust-like language/HTTP surface. \\
+Persistent application & 5--7: forms/CRUD, database invariants, authentication and object authorization. \\
+Choose the web surface you need & 8 if you handle files/media; 9 for JSON/API work; 10 for static assets and browser enhancement. These are branches, not mandatory prerequisites for each other. \\
+Make it trustworthy & 14--15: testing/error diagnosis, then the consolidated security-hardening model. \\
+Ship and operate & 18--20: production deployment, recovery, and the CLI workflow. Finish with Chapter 23's release-readiness checklist. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+You may postpone Chapters 11--13 and 16--17 until the application actually needs larger module structure, external integrations, caching/scaling, or deeper observability. Do not postpone Chapter 15 before shipping.
+
+\paragraph{Complete Velran path.}
+Read Chapters 1--23 in order. This path is intended for developers who will also own architecture, security review, platform integration, scaling, observability, or production operations. The full path keeps optional web features and operator material in context instead of treating them as isolated recipes.
+
+\paragraph{How to switch paths.}
+The fast path is not a lesser security mode. It skips breadth, not invariants. If a skipped capability becomes part of your application, read that chapter before implementing it, complete its exercise, and use its canonical companion example. At any point you can continue sequentially on the complete path without relearning earlier material.
+
+\section*{Reuse your Rust knowledge}
+
+Velran is deliberately not a second general-purpose language that you must learn beside Rust. For ordinary computation, keep the Rust mental model wherever the web-security contract does not require a framework-owned construct. The recurring \textbf{Rust $\rightarrow$ Velran} blocks show three things: what transfers unchanged, what the framework adds at a boundary, and what you should avoid relearning as a separate Velran concept.
+
+If you already understand \code{let}, \code{let mut}, structs, enums, \code{Vec<T>}, \code{Option<T>}, \code{Result<T,E>}, \code{match}, method calls, modules, and \code{?} error propagation, keep using those ideas. Spend your new-learning budget on routes, typed request boundaries, queries, capabilities, authorization, and production policy. Advanced Rust topics such as unsafe code, manual FFI, allocator internals, proc-macro authoring, and low-level async-runtime machinery are not prerequisites for ordinary Velran web development.
+
+
+\section*{Minimum Rust for Velran}
+
+You do not need broad Rust mastery before you start building Velran applications. For the fast web-developer path, the useful minimum is a small set of everyday Rust ideas. The goal of this refresher is not to teach Rust in parallel with Velran; it is to tell you when your existing Rust intuition is already enough.
+
+\subsection*{1. Bindings and ordinary values}
+
+Be comfortable reading immutable bindings and the occasional mutable local. Prefer immutable data flow unless a local computation genuinely changes state.
+
+\begin{lstlisting}[language=Velran]
+let title = "Release notes";
+let mut retries = 0;
+retries = retries + 1;
+\end{lstlisting}
+
+For Velran web work, this is enough to understand most local computation. You do not need to study ownership edge cases before writing your first page or action.
+
+\subsection*{2. The core data shapes: String, Vec, Option, Result}
+
+Four types carry a large part of ordinary application code:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}L{0.20\textwidth} Y@{}}
+\toprule
+\textbf{Rust idea} & \textbf{What it means in Velran application code} \\
+\midrule
+\code{String} & owned text that can cross normal application boundaries; use the framework's typed request types at HTTP boundaries. \\
+\code{Vec<T>} & zero or more typed values, for example query results or rendered items. \\
+\code{Option<T>} & a value may be present or absent; absence remains explicit instead of becoming a magic sentinel. \\
+\code{Result<T,E>} & an operation may succeed or fail; propagate or handle the failure deliberately. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The \code{?} operator is especially useful: read it as ``return this error now; otherwise continue with the successful value.''
+
+\begin{lstlisting}[language=Velran]
+let note = queries::loadNote(db, id)?;
+let owner = note.ownerUsername;
+\end{lstlisting}
+
+You do not need advanced error-type design to use this pattern effectively in early Velran code.
+
+\subsection*{3. Structs and enums are the domain vocabulary}
+
+Use a struct when several named fields belong together. Use an enum when the domain permits one of a known set of states.
+
+\begin{lstlisting}[language=Velran]
+struct NoteSummary {
+    id: i64,
+    title: String,
+}
+
+enum PublicationState {
+    Draft,
+    Published,
+}
+\end{lstlisting}
+
+This is the right level of Rust knowledge for modeling most web-domain data. The important Velran addition is what happens when those types cross a request, query, authorization, JSON, or persistence boundary.
+
+\subsection*{4. Match, method calls, modules, and \code{?}}
+
+You should be able to read a small \code{match}, call methods with \code{value.method()}, use qualified module names such as \code{queries::loadNote}, and follow \code{?} propagation. Those four skills cover a large fraction of the computation between framework-owned boundaries.
+
+\begin{lstlisting}[language=Velran]
+let label = match state {
+    PublicationState::Draft => "draft",
+    PublicationState::Published => "published",
+};
+
+let count = title.chars().count();
+let note = queries::loadNote(db, id)?;
+\end{lstlisting}
+
+\subsection*{5. Borrowing: learn only the boundary you actually meet}
+
+For the first part of this book, it is enough to understand the practical distinction that an owned value such as \code{String} owns its data, while a borrowed reference such as \texttt{\&str} temporarily views data owned elsewhere. If the compiler asks you to clarify a borrow in ordinary compute code, fix that local relationship; do not stop the web-learning path to master lifetime theory first.
+
+In framework-owned web surfaces, prefer the documented Velran types and signatures. Do not invent reference-heavy handler APIs merely because Rust permits them.
+
+\subsection*{6. What you can postpone}
+
+You can become productive in Velran before learning unsafe Rust, manual lifetime design, custom allocators, pinning, advanced trait machinery, procedural macros, FFI internals, or async-runtime implementation details. These topics can matter when contributing to the Velran compiler/runtime itself, but they are not prerequisites for application development.
+
+\paragraph{Ready-to-start test.}
+You know enough Rust to begin the fast path if you can read the four listings above, explain the difference between \code{Option} and \code{Result}, recognize a struct and enum, follow a small \code{match}, and understand that \code{?} propagates failure. Everything else can be learned when the book actually needs it.
+
+\section*{Velran in 60 minutes}
+
+Use this as a first-session vertical slice, not as a substitute for the rest of the book. The goal is to connect the pieces once before studying them separately. Work against the verified Secure Notes baseline at \path{examples/secure-notes/checkpoints/01-baseline/main.vrn}; inspect the surrounding module files whenever a step mentions code that is not in \code{main.vrn} itself.
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}L{0.15\textwidth} L{0.22\textwidth} Y@{}}
+\toprule
+\textbf{Pass} & \textbf{Focus} & \textbf{What to notice} \\
+\midrule
+1 & Page and route & Find the page handler and the route that exposes it. Confirm that access is explicit rather than implicit. \\
+2 & Typed input and form & Follow one form value from the request boundary into typed application code. Identify its length/resource bound. \\
+3 & Database read/write & Follow one query and one mutation. Notice typed bind values, transaction scope, and the separation between SQL structure and user data. \\
+4 & Authentication and authorization & Locate the trusted principal, then find the separate ownership/authorization check before a protected read or mutation. \\
+5 & Response & Follow the successful path back to HTML or a typed redirect. Relate this to the request lifecycle: parse, validate, authenticate, authorize, effect, response. \\
+6 & Check and explain & Run \code{velran-cli check} on \path{examples/secure-notes/checkpoints/01-baseline/main.vrn}. Then explain which boundary would reject an unsafe variant before trying to add a feature. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\paragraph{The one-hour success criterion.}
+Do not measure success by how much syntax you memorized. You are ready to continue when you can trace one request end to end, identify where trust changes, make one small safe edit, and use the compiler/verifier result to decide what to fix next. If a step is unfamiliar, continue with Chapters 1--7 rather than detouring into advanced Rust.
+
+\section*{Ten security invariants to memorize}
+
+The book repeats the following rules on purpose. Treat them as a compact mental checklist at every external boundary:
+
+\begin{enumerate}
+  \item every route has an explicit access policy;
+  \item external input is parsed, normalized, validated, and bounded before it reaches a protected effect;
+  \item SQL structure is compiler-owned and user data enters only through typed bind parameters;
+  \item authentication proves who the caller is; authorization proves what that caller may do, and must happen before the protected effect;
+  \item client file names and MIME declarations are metadata, not trust evidence;
+  \item CORS is a browser-origin policy, not authentication or authorization;
+  \item outbound network access exists only through an explicit named/configured capability;
+  \item a security rule needs negative evidence too: forbidden variants must fail closed;
+  \item logs and traces must not become a second copy of secrets or request bodies;
+  \item a production candidate is compiled and validated before activation; failure preserves the known-good generation.
+\end{enumerate}
+
+When one of these rules appears again in a chapter, it is shown as a \textbf{Security invariant} block. Repetition is intentional: the goal is recall under implementation pressure, not novelty.
+
+\section*{Book conventions}
+
+\begin{itemize}
+  \item \code{main.vrn} is the application entry point.
+  \item The trusted TOML file is the primary production configuration surface.
+  \item Secret values do not go on the command line or in plaintext TOML fields; configuration uses \code{*_file} references.
+  \item SQL text is compiler-owned; user values may enter queries only as typed bind parameters.
+  \item In HTML, \code{{ ... }} interpolation is escaped; there is no raw-HTML escape hatch.
+  \item Business mutations run inside transactions.
+\end{itemize}
+
+The book targets the V1 surface. If a capability is not part of that surface, it should not be implemented through an ad-hoc bypass; it should become an explicit language/runtime feature.
+
+\section*{Edition scope and source of truth}
+
+This edition describes the current Rust-first, native-only Velran surface. Ordinary compute syntax intentionally follows Rust wherever the web security model does not require a framework-owned construct: attributed callables use \callable{page}, \callable{action}, and \callable{query}; collections use Rust-like \code{Vec<T>} and \code{Option<T>}; mutable compute locals use \code{let mut} and direct assignment; floating-point code uses \code{f32} and method syntax such as \code{x.sin()}. Unsupported native lowering fails closed; there is no bytecode/VM execution fallback for application code.
+
+The runnable files under \path{examples/} and the focused documents under \path{docs/} are the copy/paste and feature-level source of truth. Listings in this book are teaching material and may omit surrounding setup, but they must use the same accepted language surface. The repository intentionally separates learner-facing programs from verification-only material: \path{examples/} contains applications worth reading and adapting, while \path{tests/fixtures/} contains rejection/security cases that exist to prove fail-closed behavior and \path{tests/manifests/} contains verification metadata. When a release changes syntax or a security invariant, update those canonical examples, fixtures where relevant, and this English/Hungarian book together.
+
+
+\section*{Progressive exercise curve}
+The exercises remove guidance in four stages. The later \emph{Exercise mode} labels refer to these definitions:
+
+\begin{description}
+  \item[Guided, Chapters 1--4.] Identify the boundary or invariant, make the smallest change, then compare with the verified companion. Done when you can explain the change, its protecting boundary, and one rejected failure.
+  \item[Supported, Chapters 5--10.] Try first without the companion; if blocked, inspect only the interface, policy, or data shape before the implementation. Done when the feature works, its security invariant is explicit, and one negative variant is rejected.
+  \item[Independent, Chapters 11--17.] Treat the task as a requirement, design and implement it yourself, then review against the canonical example. Done when you can defend the design and both success and failure paths.
+  \item[Operational, Chapters 18--23.] State the invariant at risk, collect evidence, choose the smallest safe action, and define rollback or recovery first. Done when another operator could follow your evidence and post-action record.
+\end{description}
+
+Optimize for needing less help on the next exercise, not for finishing the current one fastest.

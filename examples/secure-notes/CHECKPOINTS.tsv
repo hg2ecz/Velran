@@ -1,0 +1,8 @@
+# chapter	checkpoint	compiler entry	verified companions
+01	01-baseline	examples/secure-notes/checkpoints/01-baseline/main.vrn	
+05	05-crud	examples/secure-notes/checkpoints/05-crud/main.vrn	examples/optimistic-locking/main.vrn;examples/prg-flash/app.vrn
+07	07-auth	examples/secure-notes/checkpoints/07-auth/main.vrn	examples/auth/app.vrn;examples/object-authorization/app.vrn;examples/mfa-elevation/main.vrn
+09	09-json-api	examples/secure-notes/checkpoints/09-json-api/main.vrn	examples/json-api/app.vrn;examples/typed-query-form/main.vrn;examples/json-typed-response/app.vrn
+12	12-publication	examples/secure-notes/checkpoints/12-publication/main.vrn	examples/wiki/main.vrn;examples/news-site/main.vrn
+18	18-production	examples/secure-notes/checkpoints/18-production/main.vrn	
+23	23-release-readiness	examples/secure-notes/checkpoints/23-release-readiness/main.vrn	

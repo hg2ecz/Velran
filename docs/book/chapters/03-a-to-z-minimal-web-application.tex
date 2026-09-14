@@ -1,0 +1,346 @@
+\chapter{A to Z: a minimal web application}
+
+\noindent\textbf{Learning path: Fast path: core.} Complete the first end-to-end vertical slice.\par\medskip
+
+\rustbridgeblock{Functions, \code{Result}, \code{?} propagation, local bindings, and ordinary control flow work with the same intent as in Rust.}{Callable attributes, routes, typed request fields, HTML construction, contexts, and capabilities connect that computation to HTTP.}{Do not invent a separate error-propagation or local-variable style for Velran; concentrate on the web boundary around the Rust-like core.}
+
+
+\invariantblock{Security invariant: explicit route policy}{A route is never implicitly public. Every HTTP entry point declares the authority required to reach it; missing policy is an error, not a default.}
+
+\diagnosticblock{Compiler diagnostic}{SEC-A01-001}{A route has no explicit access policy. Velran refuses to guess whether the endpoint should be public or authenticated.}{Declare the intended policy on the route, for example \code{public} or \code{auth user}; choose from the application contract, not merely to silence the diagnostic.}
+
+Now build one complete but intentionally small application before studying each language feature separately. It uses only minimal development configuration and shows the path from source through database and HTTP to deployment; it is not a finished webshop.
+
+The example is a miniature product list. The home page lists products from the database and contains a form for adding a new product. In one small program we therefore see a model, typed SQL, GET page, POST action, form validation, CSRF protection, transaction, migration, configuration, and deployment behind a reverse proxy.
+
+The finished example is available in the repository at:
+
+\begin{lstlisting}
+examples/a-z-products/
+  main.vrn
+  migrations/0001_create_products.sql
+  server.toml.example
+  README.md
+\end{lstlisting}
+
+\section{The request lifecycle: one mental model for most web work}
+
+Most application code in this book can be reviewed with the same seven-stage model:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}lY@{}}
+\toprule
+Stage & Question to ask \\
+\midrule
+Request & Which route and HTTP method received the request? \\
+Parse & Which declared query, form, JSON, upload, or path values become typed inputs? \\
+Validate & Which bounds, refinements, or cross-field rules must hold? \\
+Authenticate & Who is the caller, and is a session or machine identity required? \\
+Authorize & May this caller perform this operation on this specific object or tenant? \\
+Query/transaction & Which read or state-changing effect is allowed after the previous gates passed? \\
+Response & Which typed HTML, JSON, redirect, status, or error leaves the application? \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The stages are a reasoning order, not a promise that every request executes seven runtime functions. A public GET may not need authentication; a read-only page may not open a transaction. The discipline is to ask every question explicitly and skip a stage only because the contract says it is unnecessary.
+
+For state-changing requests, preserve the security order: parse and validate before protected work, authenticate before identity-dependent decisions, authorize before the protected effect, then mutate under the intended transaction or critical-operation contract. Construct the response only from data that survived those boundaries.
+
+When debugging, walk the same chain from left to right. Ask where the observed behavior first differs from the declared contract instead of treating ``the handler'' as one opaque step.
+
+\section{Create the project directory}
+
+Create a separate application directory for development:
+
+\begin{lstlisting}
+mkdir -p my-products/migrations
+cd my-products
+\end{lstlisting}
+
+For this example all Velran code stays in a single \code{main.vrn}. Larger applications will later be split into \code{mod} files.
+
+\section{The database schema}
+
+For SQLite, \code{migrations/0001_create_products.sql} contains:
+
+\begin{lstlisting}[language=SQL]
+CREATE TABLE products (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    price INTEGER NOT NULL CHECK (price >= 0)
+);
+\end{lstlisting}
+
+This migration creates the table used by the application's typed SQL queries. In production, migration is a separate deployment step; the server does not modify the schema automatically at startup.
+
+\section{The model and queries}
+
+At the top of \code{main.vrn}, following the model-centered approach from Chapter 1, define the typed business data shape first:
+
+\begin{lstlisting}[language=Velran]
+model Product {
+    id: i64
+    name: String
+    price: i64
+}
+\end{lstlisting}
+
+The list query is:
+
+\begin{lstlisting}[language=Velran]
+#[query]
+fn listProducts(db: Db) -> Result<Vec<Product>, DbError> sql {
+    SELECT id, name, price
+    FROM products
+    ORDER BY id DESC
+    LIMIT 50
+}
+\end{lstlisting}
+
+\code{Vec<Product>} states that the query may return zero or more \code{Product} rows. The selected columns exactly follow the model field names and order.
+
+The INSERT receives a transaction capability:
+
+\begin{lstlisting}[language=Velran]
+#[query]
+fn createProduct(
+    tx: Transaction,
+    name: String,
+    price: i64
+) -> Result<(), DbError> sql {
+    INSERT INTO products(name, price)
+    VALUES (:name, :price)
+}
+\end{lstlisting}
+
+\code{:name} and \code{:price} are bind parameters. We do not construct SQL from user input with string concatenation.
+
+\section{The GET page}
+
+The home page fetches the products, displays a form, and renders the result list:
+
+\begin{lstlisting}[language=Velran]
+#[page]
+fn home(ctx: PageContext, db: Db) -> Result<Html, PageError> {
+    let products = listProducts(db)?;
+
+    return Ok(html {
+        <main>
+            <h1>Mini product list</h1>
+
+            <form method="post" @action(create)>
+                <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+                <label>
+                    Name
+                    <input name="name" maxlength="100">
+                </label>
+                <label>
+                    Price
+                    <input name="price">
+                </label>
+                <button type="submit">Add</button>
+            </form>
+
+            <ul>
+                @for product in products {
+                    <li>
+                        #{{ product.id }} - {{ product.name }} - {{ product.price }}
+                    </li>
+                }
+            </ul>
+        </main>
+    });
+}
+\end{lstlisting}
+
+Dynamic text is HTML-escaped before it enters the response. The form action is not a hand-written URL; it is generated by the \code{@action(create)} helper. The hidden \code{_csrf} field protects the POST request against CSRF.
+
+\section{The POST action}
+
+A successful form submission writes to the database in a transaction, then redirects to the home page:
+
+\begin{lstlisting}[language=Velran]
+#[action]
+fn create(
+    ctx: ActionContext,
+    db: Db,
+    name: String,
+    price: i64
+) -> Result<Redirect, PageError> {
+    transaction db {
+        createProduct(tx, name, price)?;
+    }
+    return Ok(redirect(home()));
+}
+\end{lstlisting}
+
+The redirect target is the typed GET route helper \code{home()}, not a string URL. This is the Post/Redirect/Get pattern: if the user refreshes the resulting page, the browser does not automatically repeat the INSERT.
+
+\section{Routes and validation}
+
+Two routes at the end of the file connect HTTP to the handlers:
+
+\begin{lstlisting}[language=Velran]
+route home GET "/" public => home;
+
+route create POST "/products"
+    form name<String> price<i64>
+    validate name length 1 100 price range 0 100000000
+    public => create;
+\end{lstlisting}
+
+The POST route turns both fields into typed input before the handler runs. An empty or over-100-character name, a negative or excessively large price, or a non-integer value never reaches the INSERT as a valid business operation.
+
+The public write is deliberate for this tiny teaching example. In a real public submission endpoint, decide explicitly whether authentication, route rate limiting, abuse monitoring, or a stronger business permission is required. Do not copy \code{public} merely because the example uses it.
+
+\section{The complete application in one place}
+
+The preceding pieces form the complete application: one \code{model}, two \callable{query} declarations, one \callable{page}, one \callable{action}, and two \code{route} declarations. We do not repeat the entire long listing here; the exact single-file version is available directly in the repository:
+
+\begin{lstlisting}
+examples/a-z-products/main.vrn
+\end{lstlisting}
+
+This is also a deliberate editorial choice. Later chapters examine the individual language features in depth; here the goal is to follow the entire application path once.
+
+\section{SQLite connection for development}
+
+Do not put the database URL into source code. Create a separate file containing an absolute SQLite path:
+
+\begin{lstlisting}
+printf '%s\n' 'sqlite:///tmp/velran-a-z-products.db' > dev-db-url
+chmod 600 dev-db-url
+\end{lstlisting}
+
+This file does not contain a real secret in this example, but it uses the same \code{*_file} pattern that production uses for password-bearing database URLs.
+
+\section{Source validation and migration}
+
+If the release binaries are already installed under \code{/usr/local/bin}, for example:
+
+\begin{lstlisting}
+/usr/local/bin/velran-cli check main.vrn
+
+/usr/local/bin/velran-cli migrate verify \
+  --dir migrations \
+  --db-url-file "$PWD/dev-db-url"
+
+/usr/local/bin/velran-cli migrate apply \
+  --dir migrations \
+  --db-url-file "$PWD/dev-db-url"
+\end{lstlisting}
+
+\code{check} verifies the language and static contracts. The migration CLI is a separate process; the application server is still not running.
+
+\section{Minimal development configuration}
+
+For example, \code{server.toml} may be:
+
+\begin{lstlisting}
+[server]
+app = "/ABS/PATH/my-products/main.vrn"
+listen = "127.0.0.1:8080"
+insecure_dev_cookies = true
+
+[database]
+url_file = "/ABS/PATH/my-products/dev-db-url"
+\end{lstlisting}
+
+Replace both \code{/ABS/PATH} values with real absolute paths. \code{insecure_dev_cookies} is acceptable only for loopback development; never enable it in production.
+
+Validate the configuration first:
+
+\begin{lstlisting}
+/usr/local/bin/velran-server --config "$PWD/server.toml" --check-config
+\end{lstlisting}
+
+Then start the server:
+
+\begin{lstlisting}
+/usr/local/bin/velran-server --config "$PWD/server.toml"
+\end{lstlisting}
+
+\section{The first HTTP request}
+
+From another terminal:
+
+\begin{lstlisting}
+curl -i http://127.0.0.1:8080/
+\end{lstlisting}
+
+Open the same URL in a browser. After the form is submitted, the flow is:
+
+\begin{enumerate}
+  \item the browser sends POST to the \code{/products} route;
+  \item the runtime validates the request schema, typed fields, validation rules, and CSRF token;
+  \item the \code{create} action opens a transaction;
+  \item \code{createProduct} runs an INSERT with bind parameters;
+  \item success commits the transaction;
+  \item the handler redirects to \code{/};
+  \item the new GET renders the row read back from the database.
+\end{enumerate}
+
+The same basic chain appears later in the wiki and CMS examples; they simply add more models, queries, routes, authorization, and components around it.
+
+\section{What happens with invalid input?}
+
+Try a negative price or a non-numeric value. The important rule is that browser-side HTML attributes are only a usability aid; the real contract is the server-side route schema and validation. The SQL query receives only already-typed values.
+
+It is also useful to try the following:
+
+\begin{itemize}
+  \item submit a request without the \code{name} field;
+  \item submit an unknown extra form field;
+  \item modify the migration after applying it, then run \code{migrate verify} again;
+  \item make the database unavailable and observe readiness and server-log behavior.
+\end{itemize}
+
+\section{From development toward production}
+
+The application code stays the same in a release environment; it does not need to be rewritten merely because the server now runs from installed binaries. After the build and installation described in Chapter~\ref{ch:installation}, the server typically starts as:
+
+\begin{lstlisting}
+/usr/local/bin/velran-server \
+  --config /usr/local/etc/velran/server.toml
+\end{lstlisting}
+
+The application entry point may be \code{/srv/velran/current/main.vrn}. With Apache or Nginx, the public TLS connection terminates at the proxy and Velran listens on loopback. The full Apache/Nginx configuration is not repeated here: the installation chapter explains the trust boundary, while the appendix provides near-copy/paste production configurations.
+
+\section{What did this one example teach us?}
+
+A few dozen lines already show the entire basic Velran path:
+
+\begin{lstlisting}
+HTTP GET
+  -> route
+  -> page
+  -> typed query
+  -> database
+  -> escaped HTML
+
+HTTP POST
+  -> route schema + validation + CSRF
+  -> action
+  -> transaction
+  -> typed SQL bind
+  -> commit
+  -> redirect
+  -> GET
+\end{lstlisting}
+
+The next chapters decompose this picture. Whenever a language or runtime detail seems overly technical, return to two questions: \emph{where does data enter the system, and through what typed/capability boundaries does it pass before becoming persistent state or an HTTP response?}
+
+\section{Verified companion example}
+The complete, compiler-checked companion for this chapter is \path{examples/a-z-products/main.vrn}. Treat the in-book listings as guided excerpts; when copying a full program, prefer the repository file because \code{./verify.sh} checks that exact source.
+
+\section{Practice: trace one request end to end}
+\paragraph{Exercise mode: guided.} Use the guided method defined in the preface.
+
+Take one GET and one POST from the example application and narrate every boundary they cross: route matching, typed input decoding, authorization, query or transaction execution, response construction, and redirect. If you cannot name a boundary, revisit that part of the example until the data flow is explicit.
+
+\section{Common mistake: mixing read and mutation flows}
+A GET page and a POST action may touch the same domain object, but they have different security and lifecycle semantics. Reads should remain side-effect free; mutations should pass through validation, authorization, transactional state change, and Post/Redirect/Get (PRG) where appropriate.
+
+\section{Running project checkpoint: Secure Notes}
+Implement the smallest useful vertical slice: list the current user's notes and add one note. Do not add editing, sharing, search, uploads, or caching yet. The objective is to prove the complete request-to-storage-to-response path with the fewest moving parts.

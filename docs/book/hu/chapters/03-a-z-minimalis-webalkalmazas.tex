@@ -1,0 +1,346 @@
+\chapter{A-tól Z-ig: egy minimális webalkalmazás}
+
+\noindent\textbf{Tanulási út: Gyors út: alap.} Készítsd el az első teljes, végponttól végpontig tartó vertikális szeletet.\par\medskip
+
+\rustbridgeblockhu{A függvények, \code{Result}, \code{?} hibaterjesztés, lokális változók és hétköznapi vezérlési szerkezetek ugyanazt a szerepet töltik be, mint Rustban.}{A callable attribútumok, route-ok, typed request mezők, HTML-építés, context és capability köti ezt a számítást a HTTP-hez.}{Ne találj ki külön Velran-specifikus hibaterjesztési vagy lokálisváltozó-stílust; a Rust-szerű mag körüli webes határra koncentrálj.}
+
+
+\invariantblock{Biztonsági invariáns: explicit route policy}{Route soha nem lesz implicit public. Minden HTTP belépési pont deklarálja a hozzáféréshez szükséges authorityt; a hiányzó policy hiba, nem alapértelmezés.}
+
+\diagnosticblockhu{Compiler diagnostic}{SEC-A01-001}{Egy route nem kapott explicit hozzáférési policyt. A Velran nem találgatja, hogy a végpont public vagy authenticated legyen.}{Deklaráld a szándékolt policyt a route-on, például \code{public} vagy \code{auth user}; az alkalmazás contractja alapján válassz, ne csak a diagnostic elnémítására.}
+
+Mielőtt a nyelvi részleteket külön tanulnánk, építsünk egy teljes, szándékosan kicsi alkalmazást. Csak minimális development konfigurációt használ, és megmutatja az utat a forrástól az adatbázison és HTTP-n át a telepítésig; nem kész webshop.
+
+A példa egy mini terméklista. A kezdőoldal kilistázza az adatbázisban lévő termékeket, és ugyanott egy formmal új terméket is fel lehet venni. Ezzel egyetlen példában megjelenik a model, typed SQL, GET page, POST action, form validation, CSRF, transaction, migration, konfiguráció és a reverse proxy mögötti futtatás.
+
+A repositoryban a kész példa itt található:
+
+\begin{lstlisting}
+examples/a-z-products/
+  main.vrn
+  migrations/0001_create_products.sql
+  server.toml.example
+  README.md
+\end{lstlisting}
+
+\section{A request életciklusa: egyetlen mentális modell a legtöbb webes feladathoz}
+
+A könyv alkalmazáskódjának nagy része ugyanazzal a hétlépcsős modellel ellenőrizhető:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}lY@{}}
+\toprule
+Lépés & Kérdés \\
+\midrule
+Request & Melyik route és HTTP metódus fogadta a kérést? \\
+Parse & Mely deklarált query, form, JSON, upload vagy path értékből lesz típusos input? \\
+Validate & Milyen bound, refinement vagy több mezőt érintő szabály kötelező? \\
+Authenticate & Ki a hívó, és szükséges-e session vagy gépi identity? \\
+Authorize & A hívó végrehajthatja-e ezt a műveletet ezen a konkrét objektumon vagy tenanton? \\
+Query/tranzakció & Milyen olvasás vagy állapotmódosítás engedett az előző kapuk után? \\
+Response & Milyen típusos HTML, JSON, redirect, státusz vagy hiba hagyja el az alkalmazást? \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+A lépések gondolkodási sorrendet jelentenek, nem azt, hogy minden request hét külön runtime függvényt futtat. Egy publikus GET-hez nem feltétlenül kell autentikáció; egy read-only oldal nem feltétlenül nyit tranzakciót. A fegyelem lényege, hogy minden kérdést explicit felteszünk, és csak akkor hagyunk ki egy lépést, ha a contract szerint valóban nincs rá szükség.
+
+Állapotmódosító kérésnél őrizd meg a security sorrendet: protected munka előtt parse és validate, identityfüggő döntés előtt authenticate, protected effect előtt authorize, majd a módosítás a megfelelő tranzakciós vagy critical-operation contract alatt történjen. A response csak ezeken a határokon átjutott adatból épüljön fel.
+
+Hibakereséskor ugyanezen a láncon haladj balról jobbra. Azt keresd, hol tér el először a tényleges viselkedés a deklarált contracttól, ahelyett hogy a ``handlert'' egyetlen átláthatatlan lépésként kezelnéd.
+
+\section{A könyvtár létrehozása}
+
+Fejlesztéshez legyen egy külön alkalmazáskönyvtárunk:
+
+\begin{lstlisting}
+mkdir -p my-products/migrations
+cd my-products
+\end{lstlisting}
+
+Ebben a példában minden Velran kód egyetlen \code{main.vrn} fájlban marad. Nagyobb alkalmazásnál később \code{mod} fájlokra bontjuk.
+
+\section{Az adatbázis-séma}
+
+A \code{migrations/0001_create_products.sql} tartalma SQLite esetén:
+
+\begin{lstlisting}[language=SQL]
+CREATE TABLE products (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    price INTEGER NOT NULL CHECK (price >= 0)
+);
+\end{lstlisting}
+
+Ez a migration hozza létre azt a táblát, amelyet az alkalmazás typed SQL lekérdezései használnak. Productionban a migráció külön deploy lépés; a server nem módosítja automatikusan a sémát induláskor.
+
+\section{A model és a lekérdezések}
+
+A \code{main.vrn} elején a modellközpontú fejezetben megismert módon először a typed üzleti adatalakot írjuk le:
+
+\begin{lstlisting}[language=Velran]
+model Product {
+    id: i64
+    name: String
+    price: i64
+}
+\end{lstlisting}
+
+A lista lekérdezése:
+
+\begin{lstlisting}[language=Velran]
+#[query]
+fn listProducts(db: Db) -> Result<Vec<Product>, DbError> sql {
+    SELECT id, name, price
+    FROM products
+    ORDER BY id DESC
+    LIMIT 50
+}
+\end{lstlisting}
+
+A \code{Vec<Product>} azt mondja ki, hogy a query nulla vagy több \code{Product} sort adhat vissza. A \code{SELECT} oszlopai pontosan a model mezőinek nevét és sorrendjét követik.
+
+Az INSERT transaction capabilityt kap:
+
+\begin{lstlisting}[language=Velran]
+#[query]
+fn createProduct(
+    tx: Transaction,
+    name: String,
+    price: i64
+) -> Result<(), DbError> sql {
+    INSERT INTO products(name, price)
+    VALUES (:name, :price)
+}
+\end{lstlisting}
+
+A \code{:name} és \code{:price} bind paraméter. Nem szövegkonkatenációval építünk SQL-t felhasználói inputból.
+
+\section{A GET oldal}
+
+A kezdőoldal lekéri a termékeket, megjelenít egy formot és kilistázza az eredményt:
+
+\begin{lstlisting}[language=Velran]
+#[page]
+fn home(ctx: PageContext, db: Db) -> Result<Html, PageError> {
+    let products = listProducts(db)?;
+
+    return Ok(html {
+        <main>
+            <h1>Mini termeklista</h1>
+
+            <form method="post" @action(create)>
+                <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+                <label>
+                    Nev
+                    <input name="name" maxlength="100">
+                </label>
+                <label>
+                    Ar
+                    <input name="price">
+                </label>
+                <button type="submit">Hozzaadas</button>
+            </form>
+
+            <ul>
+                @for product in products {
+                    <li>
+                        #{{ product.id }} - {{ product.name }} - {{ product.price }}
+                    </li>
+                }
+            </ul>
+        </main>
+    });
+}
+\end{lstlisting}
+
+A dinamikus szövegek HTML-escape-elve kerülnek a válaszba. A form action nem kézzel írt URL, hanem az \code{@action(create)} helperből származik. A rejtett \code{_csrf} mező a POST kérés CSRF-védelméhez kell.
+
+\section{A POST action}
+
+A form sikeres beküldése transactionben ír az adatbázisba, majd redirectel vissza a kezdőoldalra:
+
+\begin{lstlisting}[language=Velran]
+#[action]
+fn create(
+    ctx: ActionContext,
+    db: Db,
+    name: String,
+    price: i64
+) -> Result<Redirect, PageError> {
+    transaction db {
+        createProduct(tx, name, price)?;
+    }
+    return Ok(redirect(home()));
+}
+\end{lstlisting}
+
+A redirect célja a typed GET route helper, \code{home()}, nem string URL. Ez a Post/Redirect/Get minta: ha a felhasználó frissíti a visszakapott oldalt, a böngésző nem küldi be újra automatikusan az INSERT-et.
+
+\section{A route-ok és a validáció}
+
+A fájl végén két route köti össze a HTTP felületet a handlerekkel:
+
+\begin{lstlisting}[language=Velran]
+route home GET "/" public => home;
+
+route create POST "/products"
+    form name<String> price<i64>
+    validate name length 1 100 price range 0 100000000
+    public => create;
+\end{lstlisting}
+
+A POST route már a handler előtt typed inputtá alakítja a két mezőt. Üres vagy 100 karakternél hosszabb név, negatív ár, túl nagy ár vagy nem egész szám esetén a kérés nem jut el érvényes üzleti műveletként az INSERT-ig.
+
+A publikus írás ebben a kicsi tanpéldában szándékos egyszerűsítés. Valódi public submission endpointnál explicit döntsd el, kell-e authentication, route rate limit, abuse monitoring vagy erősebb business permission. Ne másold át a \code{public} policyt csak azért, mert a példa ezt használja.
+
+\section{A teljes alkalmazás egy helyen}
+
+Az előző részek együtt alkotják a teljes alkalmazást: \code{model} + két \callable{query} + \callable{page} + \callable{action} + két \code{route}. Nem ismételjük meg még egyszer ugyanazt a hosszú listinget; a repositoryban a pontos, egyfájlos változat közvetlenül megnyitható:
+
+\begin{lstlisting}
+examples/a-z-products/main.vrn
+\end{lstlisting}
+
+Ez szándékos könyvszerkesztési döntés is: a következő fejezetekben az egyes nyelvi elemeket már részletesen tárgyaljuk, itt viszont az alkalmazás teljes útvonalán akarunk végigmenni.
+
+\section{SQLite kapcsolat developmenthez}
+
+A database URL-t ne írjuk a forrásba. Készítsünk külön fájlt, abszolút SQLite pathszal:
+
+\begin{lstlisting}
+printf '%s\n' 'sqlite:///tmp/velran-a-z-products.db' > dev-db-url
+chmod 600 dev-db-url
+\end{lstlisting}
+
+A fájl itt nem valódi titkot tartalmaz, de ugyanazt a \code{*_file} mintát használjuk, mint productionben a jelszavas database URL esetén.
+
+\section{Forrásellenőrzés és migration}
+
+Ha a release binárisokat már telepítettük például \code{/usr/local/bin} alá:
+
+\begin{lstlisting}
+/usr/local/bin/velran-cli check main.vrn
+
+/usr/local/bin/velran-cli migrate verify \
+  --dir migrations \
+  --db-url-file "$PWD/dev-db-url"
+
+/usr/local/bin/velran-cli migrate apply \
+  --dir migrations \
+  --db-url-file "$PWD/dev-db-url"
+\end{lstlisting}
+
+A \code{check} a nyelvi és statikus szerződést ellenőrzi. A migration CLI külön folyamat; ettől még az alkalmazásszerver nem indult el.
+
+\section{Minimális development konfiguráció}
+
+A \code{server.toml} legyen például:
+
+\begin{lstlisting}
+[server]
+app = "/ABS/PATH/my-products/main.vrn"
+listen = "127.0.0.1:8080"
+insecure_dev_cookies = true
+
+[database]
+url_file = "/ABS/PATH/my-products/dev-db-url"
+\end{lstlisting}
+
+A két \code{/ABS/PATH} helyére valódi abszolút útvonal kell. Az \code{insecure_dev_cookies} csak loopback developmenthez elfogadható; productionben ne kapcsold be.
+
+Először ellenőrizzük a konfigurációt:
+
+\begin{lstlisting}
+/usr/local/bin/velran-server --config "$PWD/server.toml" --check-config
+\end{lstlisting}
+
+Majd indulhat a szerver:
+
+\begin{lstlisting}
+/usr/local/bin/velran-server --config "$PWD/server.toml"
+\end{lstlisting}
+
+\section{Az első HTTP kérés}
+
+Másik terminálból:
+
+\begin{lstlisting}
+curl -i http://127.0.0.1:8080/
+\end{lstlisting}
+
+Böngészőben nyisd meg ugyanazt az URL-t. A form beküldése után a folyamat:
+
+\begin{enumerate}
+  \item a böngésző POST-ot küld a \code{/products} route-ra;
+  \item a runtime ellenőrzi a request schema-t, a typed mezőket, a validációt és a CSRF tokent;
+  \item a \code{create} action transactiont nyit;
+  \item a \code{createProduct} bind paraméterekkel INSERT-et futtat;
+  \item siker esetén commit történik;
+  \item a handler redirectet ad a \code{/} URL-re;
+  \item az új GET már az adatbázisból visszaolvasott sort rendereli.
+\end{enumerate}
+
+Ez az egyszerű lánc a későbbi wiki és CMS alkalmazásban is ugyanaz marad; csak több model, query, route, jogosultság és komponens kerül köré.
+
+\section{Mit történik hibás inputnál?}
+
+Próbálj negatív árat vagy nem numerikus értéket megadni. A fontos elv az, hogy a böngésző HTML attribútumai csak felhasználói kényelmet adnak; a valódi szerződést a szerveroldali route schema és validation adja. Az SQL query csak már typed értéket kap.
+
+Érdemes még a következőket kipróbálni:
+
+\begin{itemize}
+  \item küldj hiányzó \code{name} mezőt;
+  \item küldj ismeretlen extra form mezőt;
+  \item módosítsd a migrationt alkalmazás után, majd futtasd újra a \code{migrate verify} parancsot;
+  \item állítsd le az adatbázis elérését, és figyeld meg a readiness illetve a szerverlog viselkedését.
+\end{itemize}
+
+\section{Developmentből production felé}
+
+A példa alkalmazáskódja ugyanaz marad release környezetben is; nem kell újraírni csak azért, mert a szervert már telepített binárissal futtatjuk. A \ref{ch:telepites}. fejezetben bemutatott build és telepítés után a szerver tipikusan így indul:
+
+\begin{lstlisting}
+/usr/local/bin/velran-server \\
+  --config /usr/local/etc/velran/server.toml
+\end{lstlisting}
+
+Az alkalmazás entrypointja lehet például \code{/srv/velran/current/main.vrn}. Apache vagy Nginx esetén a publikus TLS kapcsolatot a proxy terminálja, a Velran pedig loopbacken hallgat. A teljes Apache/Nginx mintát nem ismételjük meg itt: a telepítési fejezet mutatja be a trust boundaryt, a könyv végi függelék pedig copy/paste-közeli production konfigurációt ad.
+
+\section{Mit tanultunk ebből az egy példából?}
+
+Egy mindössze néhány tucat soros alkalmazásban már láttuk a Velran teljes alap útvonalát:
+
+\begin{lstlisting}
+HTTP GET
+  -> route
+  -> page
+  -> typed query
+  -> database
+  -> escaped HTML
+
+HTTP POST
+  -> route schema + validation + CSRF
+  -> action
+  -> transaction
+  -> typed SQL bind
+  -> commit
+  -> redirect
+  -> GET
+\end{lstlisting}
+
+A következő fejezetek ezt a képet bontják szét. Amikor egy-egy nyelvi vagy runtime részlet technikainak tűnik, érdemes visszagondolni erre a két kérésre: \emph{hol lép be az adat a rendszerbe, és milyen typed/capability határokon halad át, mielőtt tartós állapot vagy HTTP válasz lesz belőle?}
+
+\section{Ellenőrzött companion példa}
+A fejezet teljes, compilerrel ellenőrzött companion példája az \path{examples/a-z-products/main.vrn}. A könyv kódblokkjai vezetett részletek; teljes program másolásakor a repository fájlt tekintsd elsődlegesnek, mert a \code{./verify.sh} pontosan ezt a forrást ellenőrzi.
+
+\section{Gyakorlat: kövess végig egy kérést}
+\paragraph{Gyakorlási mód: vezetett.} Használd az előszóban meghatározott vezetett módszert.
+
+Válassz egy GET és egy POST kérést a példaalkalmazásból, és mondd végig az összes határt: route-illesztés, típusos input-dekódolás, autorizáció, query vagy tranzakció végrehajtása, válaszépítés és redirect. Ha egy határt nem tudsz megnevezni, térj vissza ahhoz a részhez, amíg az adatfolyam egyértelmű nem lesz.
+
+\section{Tipikus hiba: összekeverjük az olvasási és módosítási folyamatot}
+Egy GET page és egy POST action érintheti ugyanazt a domain objektumot, de más biztonsági és életciklus-szemantikájuk van. Az olvasás maradjon mellékhatásmentes; a módosítás menjen validáción, autorizáción, tranzakciós állapotváltozáson és ahol szükséges Post/Redirect/Get (PRG) mintával.
+
+\section{Folyamatos mintaprojekt: Secure Notes}
+Valósítsd meg a legkisebb hasznos vertikális szeletet: a jelenlegi felhasználó jegyzeteinek listázását és egy új jegyzet létrehozását. Még ne adj hozzá szerkesztést, megosztást, keresést, feltöltést vagy cache-t. A cél a teljes request--storage--response útvonal bizonyítása a lehető legkevesebb mozgó résszel.

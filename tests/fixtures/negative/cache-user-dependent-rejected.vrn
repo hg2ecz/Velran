@@ -1,0 +1,5 @@
+#[page]
+fn account(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {<p>{{ authPrincipal }}</p>});
+}
+route account GET "/account" public cache public ttl 60 => account;

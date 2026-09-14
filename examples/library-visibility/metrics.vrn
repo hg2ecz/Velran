@@ -1,0 +1,21 @@
+pub struct Summary {
+    pub length: i64,
+    hidden: i64,
+}
+
+pub fn build_summary() -> Summary {
+    return Summary {
+        length: 7,
+        hidden: 9,
+    };
+}
+
+impl Summary {
+    pub fn length_value(&self) -> i64 {
+        return self.length;
+    }
+
+    fn hidden_value(&self) -> i64 {
+        return self.hidden;
+    }
+}

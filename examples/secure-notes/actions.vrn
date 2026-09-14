@@ -1,0 +1,34 @@
+#[action]
+fn createNote(ctx: ActionContext, db: Db, title: String, body: String) -> Result<Redirect, PageError> {
+    transaction db {
+        queries::createNote(tx, authPrincipal, title, body)?;
+    }
+    flash success "Note created";
+    return Ok(redirect(notes()));
+}
+
+#[action]
+fn updateNote(ctx: ActionContext, db: Db, id: i64, title: String, body: String) -> Result<Redirect, PageError> {
+    let note = queries::noteById(db, id)?;
+    authorize note owner ownerUsername;
+    transaction db {
+        queries::updateNote(tx, note.id, title, body)?;
+    }
+    flash success "Note saved";
+    return Ok(redirect(note(note.id)));
+}
+
+#[action]
+fn deleteNote(ctx: ActionContext, db: Db, id: i64) -> Result<Redirect, PageError> {
+    let note = queries::noteById(db, id)?;
+    authorize note owner ownerUsername;
+    transaction db {
+        queries::deleteNote(tx, note.id)?;
+    }
+    flash success "Note deleted";
+    return Ok(redirect(notes()));
+}
+
+route createNote POST "/notes" form title<String> body<String> validate title length 1 120 body length 1 4000 auth user => actions::createNote;
+route updateNote POST "/notes/:id<i64>" form title<String> body<String> validate title length 1 120 body length 1 4000 auth user => actions::updateNote;
+route deleteNote POST "/notes/:id<i64>/delete" auth user => actions::deleteNote;

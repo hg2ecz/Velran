@@ -1,0 +1,1 @@
+rediss://velran:SECRET@redis.example/0

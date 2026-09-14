@@ -1,0 +1,180 @@
+# Midnight Commander editor syntax for Velran (*.vrn)
+# Keep public language tokens in sync with language-core/compiler source syntax.
+context default
+    keyword whole mod brightcyan
+    keyword whole model brightcyan
+    keyword whole enum brightcyan
+    keyword whole object brightcyan
+    keyword whole form brightcyan
+    keyword whole route brightcyan
+    keyword whole type brightcyan
+    keyword whole permission brightcyan
+    keyword whole critical brightcyan
+    keyword whole webhook brightcyan
+    keyword whole integration brightcyan
+    keyword whole security brightcyan
+    keyword whole event brightcyan
+
+    keyword whole page yellow
+    keyword whole action yellow
+    keyword whole query yellow
+    keyword whole component yellow
+    keyword whole layout yellow
+    keyword whole fn yellow
+    keyword whole let yellow
+    keyword whole set yellow
+    keyword whole while yellow
+    keyword whole if yellow
+    keyword whole return yellow
+    keyword whole with yellow
+    keyword whole resource yellow
+    keyword whole transaction yellow
+    keyword whole authorize yellow
+    keyword whole canonical yellow
+    keyword whole for yellow
+
+    keyword whole GET brightgreen
+    keyword whole POST brightgreen
+    keyword whole PUT brightgreen
+    keyword whole PATCH brightgreen
+    keyword whole DELETE brightgreen
+    keyword whole json brightmagenta
+    keyword whole upload brightmagenta
+    keyword whole validate brightmagenta
+    keyword whole auth brightmagenta
+    keyword whole rate brightmagenta
+    keyword whole cache brightmagenta
+    keyword whole invalidate brightmagenta
+    keyword whole owner brightmagenta
+    keyword whole role brightmagenta
+    keyword whole public brightmagenta
+    keyword whole user brightmagenta
+    keyword whole mfa brightmagenta
+    keyword whole ttl brightmagenta
+    keyword whole to brightmagenta
+    keyword whole uses brightmagenta
+    keyword whole audit brightmagenta
+    keyword whole idempotency brightmagenta
+    keyword whole egress brightmagenta
+    keyword whole verified brightmagenta
+    keyword whole by brightmagenta
+    keyword whole signatureHeader brightmagenta
+    keyword whole timestampHeader brightmagenta
+    keyword whole replayWindow brightmagenta
+    keyword whole mutates brightmagenta
+    keyword whole scoped brightmagenta
+    keyword whole before brightmagenta
+    keyword whole until brightmagenta
+    keyword whole fail brightmagenta
+    keyword whole flash brightmagenta
+
+    keyword whole length brightmagenta
+    keyword whole range brightmagenta
+    keyword whole pattern brightmagenta
+    keyword whole same brightmagenta
+    keyword whole items brightmagenta
+    keyword whole required brightmagenta
+
+    keyword whole String brightcyan
+    keyword whole Email brightcyan
+    keyword whole Url brightcyan
+    keyword whole Slug brightcyan
+    keyword whole Int brightcyan
+    keyword whole F32 brightcyan
+    keyword whole Bool brightcyan
+    keyword whole Date brightcyan
+    keyword whole DateTime brightcyan
+    keyword whole Uuid brightcyan
+    keyword whole Decimal brightcyan
+    keyword whole Image brightcyan
+    keyword whole Upload brightcyan
+    keyword whole Db brightcyan
+    keyword whole Transaction brightcyan
+    keyword whole Html brightcyan
+    keyword whole Json brightcyan
+    keyword whole Redirect brightcyan
+    keyword whole PageContext brightcyan
+    keyword whole ActionContext brightcyan
+    keyword whole PageError brightcyan
+    keyword whole DbError brightcyan
+    keyword whole Result brightcyan
+    keyword whole List brightcyan
+    keyword whole Dict brightcyan
+    keyword whole Array brightcyan
+    keyword whole Void brightcyan
+    keyword whole Secret brightcyan
+    keyword whole Sensitive brightcyan
+
+    keyword whole true brightred
+    keyword whole false brightred
+    keyword whole Committed brightred
+    keyword whole RolledBack brightred
+    keyword whole CommitUnknown brightred
+    keyword whole Changed brightred
+
+    keyword => brightmagenta
+    keyword -> brightmagenta
+
+    keyword whole sin brightgreen
+    keyword whole cos brightgreen
+    keyword whole sqrt brightgreen
+    keyword whole abs brightgreen
+    keyword whole ln brightgreen
+    keyword whole log10 brightgreen
+    keyword whole log brightgreen
+    keyword whole exp brightgreen
+    keyword whole pow brightgreen
+    keyword whole round brightgreen
+    keyword whole floor brightgreen
+    keyword whole ceil brightgreen
+    keyword whole monotonicNanos brightgreen
+    keyword whole len brightgreen
+    keyword whole slug brightgreen
+    keyword whole stringLen brightgreen
+    keyword whole trim brightgreen
+    keyword whole trimStart brightgreen
+    keyword whole trimEnd brightgreen
+    keyword whole lower brightgreen
+    keyword whole upper brightgreen
+    keyword whole contains brightgreen
+    keyword whole startsWith brightgreen
+    keyword whole endsWith brightgreen
+    keyword whole replace brightgreen
+    keyword whole split brightgreen
+    keyword whole splitBounded brightgreen
+    keyword whole substring brightgreen
+    keyword whole indexOf brightgreen
+    keyword whole lastIndexOf brightgreen
+    keyword whole charAt brightgreen
+    keyword whole repeat brightgreen
+    keyword whole dict brightgreen
+    keyword whole containsKey brightgreen
+    keyword whole removeKey brightgreen
+    keyword whole regexMatch brightgreen
+    keyword whole regexReplace brightgreen
+    keyword whole regexCaptures brightgreen
+    keyword whole passwordHash brightgreen
+    keyword whole passwordVerify brightgreen
+    keyword whole newSessionToken brightgreen
+    keyword whole newPasswordResetToken brightgreen
+    keyword whole newCsrfToken brightgreen
+    keyword whole tokenHash brightgreen
+    keyword whole presentedTokenHash brightgreen
+    keyword whole tokenMatches brightgreen
+    keyword whole tokenActive brightgreen
+    keyword whole signWebhook brightgreen
+    keyword whole verifyWebhookSignature brightgreen
+    keyword whole encryptUserData brightgreen
+    keyword whole decryptUserData brightgreen
+    keyword whole redact brightgreen
+    keyword whole expose brightgreen
+    keyword whole slugify brightgreen
+    keyword whole html brightgreen
+    keyword whole redirect brightgreen
+
+context // \n brown
+    keyword TODO brightred
+    keyword FIXME brightred
+    keyword XXX brightred
+
+context " " green

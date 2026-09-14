@@ -1,0 +1,30 @@
+model Article {
+    id: Uuid
+    title: String
+    hero: Image
+}
+
+#[action]
+fn uploadHero(ctx: ActionContext, hero: Image) -> Result<Json, PageError> {
+    return Ok(json(hero.bytes));
+}
+
+route uploadHero POST "/admin/media/hero"
+    upload hero<Image> to "media" publish
+    auth role Editor
+    rate publicApi
+    => uploadHero;
+
+#[page]
+fn preview(ctx: PageContext, hero: Image, title: String) -> Result<Html, PageError> {
+    return Ok(html {
+        <article>
+            <h1>{{ title }}</h1>
+            @image(hero, title)
+        </article>
+    });
+}
+
+route preview GET "/preview"
+    query hero<Image> title<String>
+    public => preview;

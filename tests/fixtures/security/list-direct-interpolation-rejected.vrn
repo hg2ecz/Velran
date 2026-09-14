@@ -1,0 +1,15 @@
+model Product {
+    id: i64
+    name: String
+    price: i64
+}
+#[query]
+fn listProducts(db: Db) -> Result<Vec<Product>, DbError> sql {
+    SELECT id, name, price FROM products LIMIT 100
+}
+#[page]
+fn products(ctx: PageContext, db: Db) -> Result<Html, PageError> {
+    let products = listProducts(db)?;
+    return Ok(html {<p>{{ products }}</p>});
+}
+route products GET "/products" public => products;

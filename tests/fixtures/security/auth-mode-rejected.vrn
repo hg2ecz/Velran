@@ -1,0 +1,5 @@
+#[page]
+fn home(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html { <h1>bad</h1> });
+}
+route home GET "/" auth root public => home;

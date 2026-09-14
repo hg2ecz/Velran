@@ -1,0 +1,292 @@
+\chapter{Backup, restore, and disaster recovery}\label{ch:recovery}
+
+\noindent\textbf{Learning path: Fast path: core for production.} Define recoverability before production data becomes irreplaceable.\par\medskip
+
+A backup is useful only if the application is \textbf{provably restartable from a known recovery point}. Velran business state may span the application database, the local-auth identity store, and AppFs, so define the complete recovery state, its consistency boundary, and how restore is regularly proven.
+
+\section{Start with a state inventory}
+
+Before production, list everything that belongs to application state. Typically:
+
+\begin{itemize}
+  \item the application database;
+  \item the local-auth SQLite database, if local auth is used;
+  \item the AppFs \code{data_root}, including uploaded media and other runtime data;
+  \item the immutable release identifier and artifact hash;
+  \item the migration set and checksums;
+  \item the version or hash of trusted configuration and policy files;
+  \item backup time, application version, and database backend.
+\end{itemize}
+
+Secret files belong to a separate secret-management boundary. The recovery runbook must know where the required DB, Redis, TLS, or LDAP credentials can be restored from, but \textbf{secret values must never be written into a plaintext release or backup manifest}.
+
+\section{What is not business source of truth?}
+
+In V1, Redis stores session, rate-limit, and public-cache state. Do not treat that state as part of the business backup contract.
+
+An empty Redis is a safe and acceptable disaster-recovery baseline:
+
+\begin{itemize}
+  \item sessions disappear, so users sign in again;
+  \item the public cache rebuilds;
+  \item rate-limit windows restart.
+\end{itemize}
+
+If the same Redis cluster stores another application's business data, backing up that data belongs to that other system's recovery contract.
+
+\section{RPO and RTO are business decisions before they are technical settings}
+
+Record two values before implementing the backup mechanism:
+
+\begin{description}
+  \item[RPO -- Recovery Point Objective] the maximum acceptable data-loss window;
+  \item[RTO -- Recovery Time Objective] the maximum acceptable time to restore service.
+\end{description}
+
+If the RPO is 24 hours, a daily backup may be sufficient in principle. If the RPO is measured in minutes, database-level WAL/binlog/PITR or equivalent infrastructure may be required. The Velran runtime cannot invent organizational RPO/RTO values; operators must translate those requirements into backup technology.
+
+\section{Safe V1 baseline: a controlled maintenance backup}
+
+The database and AppFs may jointly represent business state. A DB row may, for example, refer to an uploaded image. A DB dump and AppFs archive taken at unrelated times are therefore not automatically a consistent recovery point.
+
+The simplest auditable V1 baseline is:
+
+\begin{lstlisting}
+traffic drain
+-> SIGTERM / graceful shutdown
+-> stopped state verified
+-> application DB backup
+-> local-auth DB backup, if used
+-> AppFs data_root snapshot
+-> recovery manifest + hashes
+-> service start
+-> readiness
+\end{lstlisting}
+
+This introduces a short write pause but gives a clear consistency boundary. An online backup should be called consistent only when the DB/storage infrastructure can provide snapshots tied to the same recovery point, or when the application data model demonstrably tolerates different snapshot times. The runtime itself does not promise a distributed snapshot.
+
+\section{Application DB: use the backend's native backup tool}
+
+Velran does not attempt to hide native database backup mechanisms. Operators should use the supported tooling of the selected backend, preferably with a dedicated backup credential.
+
+\subsection*{PostgreSQL}
+
+A typical logical backup:
+
+\begin{lstlisting}
+pg_dump --format=custom --no-owner --no-acl \\
+  --file app.dump "$DATABASE_URL"
+\end{lstlisting}
+
+For an isolated restore test:
+
+\begin{lstlisting}
+createdb velran_restore_test
+pg_restore --no-owner --no-acl \\
+  --dbname velran_restore_test app.dump
+\end{lstlisting}
+
+Do not put production secrets in shell history. For large databases, physical backup and PITR may be the better choice; their runbooks belong to the PostgreSQL platform.
+
+\subsection*{MariaDB}
+
+For a transactional InnoDB schema, a typical logical backup is:
+
+\begin{lstlisting}
+mariadb-dump --single-transaction \\
+  --routines --triggers app > app.sql
+\end{lstlisting}
+
+Restore into an isolated database:
+
+\begin{lstlisting}
+mariadb velran_restore_test < app.sql
+\end{lstlisting}
+
+\code{--single-transaction} does not magically make non-transactional tables consistent. For a mixed schema, keep the controlled-maintenance baseline.
+
+\subsection*{SQLite}
+
+Do not call a plain \code{cp} of a live SQLite database a backup. Use SQLite's backup mechanism or take a filesystem snapshot while the application is stopped.
+
+\begin{lstlisting}
+sqlite3 /srv/velran/data/app.db \\
+  ".backup '/backup/app.db'"
+\end{lstlisting}
+
+Always restore into a separate test path. Do not discover whether a backup works by restoring over production.
+
+\section{The local-auth DB is a security-sensitive backup}
+
+When local auth is enabled, the identity store is a separate SQLite boundary. It may contain password hashes, TOTP secrets, and recovery hashes, so treat its backup \textbf{as a secret}.
+
+\begin{lstlisting}
+sqlite3 /srv/velran/auth/users.db \\
+  ".backup '/backup/local-auth.db'"
+\end{lstlisting}
+
+Store the backup encrypted, with narrow access and documented retention. After restore, verify file and parent-directory ownership and permissions. The identity store cannot be reconstructed from the application database.
+
+\section{AppFs: the entire data root may be durable state}
+
+Do not back up only the media subdirectory that is published over HTTP. The entire declared AppFs \code{data_root} may belong to the recovery state.
+
+With the service stopped, for example:
+
+\begin{lstlisting}
+tar -C /srv/velran -cpf data-root.tar data
+\end{lstlisting}
+
+After restore, preserve or restore ownership and permissions. The service account should be able to write only the roots declared writable by configuration; do not weaken AppFs confinement with symlinks.
+
+\section{Every recovery point needs a manifest}
+
+Backup objects alone do not identify which release and migration state they belong to. Create a secret-free manifest:
+
+\begin{lstlisting}
+backup_id=2026-09-04T180000Z
+release_id=2026-09-04.1
+server_sha256=...
+app_source_sha256=...
+migrations_sha256=...
+config_sha256=...
+db_backend=postgresql
+app_db_backup_sha256=...
+local_auth_backup_sha256=...
+data_root_backup_sha256=...
+\end{lstlisting}
+
+The manifest should contain hashes and identifiers, not credential values. The included \code{deploy/release-record.sh} helps record release/source/migration/config state in read-only mode.
+
+\section{Restore drill: prove the backup}
+
+A successful backup job does not prove recoverability. Regularly run a restore drill in an isolated environment.
+
+\begin{lstlisting}
+new empty restore DB
+-> application DB restore
+-> local-auth restore, if used
+-> AppFs restore into separate root
+-> select exact immutable release
+-> restore-test config on isolated host/port
+-> velran-server --check-config
+-> velran-cli check main.vrn
+-> velran-cli migrate verify
+-> start velran-server on isolated listener
+-> /health/live + /health/ready
+-> application-specific smoke test
+-> log and audit verification
+\end{lstlisting}
+
+\code{deploy/restore-verify.sh} automates part of the non-mutating config/source/migration checks. It does not start a production listener and does not run \code{migrate apply}.
+
+Record the drill result with date, backup ID, and release ID. ``The backup completed'' is not a release gate; you need recent restore evidence appropriate to the organization's RPO/RTO requirement.
+
+\section{Make a recovery decision before an upgrade}
+
+A controlled production upgrade should follow an order such as:
+
+\begin{lstlisting}
+immutable release artifact + hashes
+-> migration verify
+-> compatibility decision
+-> consistent backup + recent restore evidence
+-> migration apply
+-> migration verify
+-> atomic release switch
+-> controlled restart
+-> live + ready + smoke
+-> logs + metrics + audit review
+\end{lstlisting}
+
+Record migration compatibility at release level. The key question is whether the previous application can still run against the new schema.
+
+\section{Expand/contract keeps the fast rollback window open}
+
+If the new schema is backward-compatible, a faulty application release can be switched back to the previous immutable artifact without restoring the database.
+
+Recommended pattern:
+
+\begin{enumerate}
+  \item \textbf{expand}: add a nullable/defaulted column, table, or index while keeping the old application working;
+  \item deploy the new application;
+  \item perform controlled data backfill if needed;
+  \item only in a later release \textbf{contract}: remove the old column or constraint after the rollback window has closed.
+\end{enumerate}
+
+A destructive rename/drop or immediate incompatible shape change can close the app-only rollback option. Mark that explicitly before release.
+
+\section{Rollback and restore are different operations}
+
+\subsection*{Faulty application, backward-compatible schema}
+
+\begin{lstlisting}
+traffic drain
+-> previous immutable release
+-> controlled restart
+-> live + ready + smoke
+\end{lstlisting}
+
+There is no database restore, so business data created after the faulty deployment is preserved.
+
+\subsection*{Faulty application, but a forward fix is possible}
+
+Prefer a new immutable release or a forward migration. Do not tie automatic reverse SQL to switching the release symlink back.
+
+\subsection*{Schema or data is corrupted}
+
+This is disaster recovery:
+
+\begin{lstlisting}
+stop writes
+-> choose and record recovery point
+-> restore DB + auth DB + AppFs consistently
+-> select matching release and config
+-> verify + smoke
+-> controlled return to traffic
+\end{lstlisting}
+
+Writes after the selected recovery point may be lost. This is a business incident decision, not a technical footnote: the data-loss window must be explicitly accepted and documented.
+
+\section{Forbidden shortcuts}
+
+\begin{itemize}
+  \item calling a plain \code{cp} of a live SQLite DB a backup;
+  \item backing up only the application DB when AppFs also contains business state;
+  \item considering backup successful without a restore drill;
+  \item tying an automatic down migration to application rollback;
+  \item testing restore on the production database;
+  \item giving the normal application service the migration credential;
+  \item writing secret values into release or backup manifests;
+  \item making Redis session/cache restoration a prerequisite for disaster recovery.
+\end{itemize}
+
+\section{Production recovery checklist}
+
+A system is recovery-ready only if at least the following are true:
+
+\begin{enumerate}
+  \item the state inventory is documented;
+  \item RPO and RTO are recorded;
+  \item backup encryption, retention, and access policy are known;
+  \item there is an identifiable recent successful restore drill;
+  \item migration compatibility for the release is documented;
+  \item the app-only rollback procedure has been exercised;
+  \item the owner and approval path for destructive restore are known;
+  \item the effect of losing Redis is accepted;
+  \item the recovery runbook identifies the source of release/config/secret restoration;
+  \item live, ready, smoke, log, and audit checks are performed after an incident.
+\end{enumerate}
+
+The core principle of recovery is: \textbf{a backup is not a file; it is a proven ability to restore}. Without restore drills, RPO and RTO are assumptions.
+
+\section{Practice: prove a restore, not a backup}
+\paragraph{Exercise mode: operational scenario.} Use the operational-scenario method defined in the preface.
+
+Restore a copy of the application state into an isolated environment and verify record counts, critical business invariants, media references, and application startup. Measure the restore time and record any manual step that could block an incident response.
+
+\section{Common mistake: backing up components independently without a recovery model}
+Database rows, uploaded files, configuration, and release identity may form one recoverable state even when stored separately. A backup plan must define how those pieces line up at restore time.
+
+\section{Running project checkpoint: Secure Notes}
+Perform a full Secure Notes recovery rehearsal including persistent data and any media attachments. Confirm that a restored generation serves the same ownership and publication semantics as before the simulated failure.

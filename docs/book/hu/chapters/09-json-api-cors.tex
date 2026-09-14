@@ -1,0 +1,377 @@
+\chapter{JSON API, CORS és böngészős kliensintegráció}
+
+\noindent\textbf{Tanulási út: Gyors út: API ág.} Most olvasd, ha JSON/API klienst vagy külön frontend origint használsz.\par\medskip
+
+\rustbridgeblockhu{A typed skalárok, structok/modellek, collectionök, \code{Result} és újrahasznosítható business függvények ugyanazt az alkalmazásmagot adják, mint HTML route-oknál.}{A JSON input mód, zárt request séma, explicit public projection, content negotiation és CORS policy definiálja az API-határt.}{Ne építs második business réteget csak a JSON kedvéért. Ugyanazt a typed logikát használd, csak a reprezentáció és a boundary contract változik.}
+
+
+\invariantblock{Biztonsági invariáns: a CORS nem authorization}{A CORS azt szabályozza, mely böngészős originekből indítható vagy olvasható cross-origin kérés. Nem hitelesíti a hívót, nem autorizál objektumot, és nem helyettesíti a normál request-életciklust.}
+
+\diagnosticblockhu{Security diagnostic}{SEC-DATA-004}{Egy model explicit public projection nélkül kerülne kiadásra, ezért belső mezők véletlenül átléphetnék a response határt.}{Definiáld és add vissza a szándékolt public projectiont a belső model közvetlen szerializálása helyett.}
+
+A Velran nem kényszerít választásra a klasszikus szerver-renderelt HTML és a JSON API között. Ugyanabban az alkalmazásban lehetnek \code{Html}-t visszaadó oldalak, formot feldolgozó actionök és typed JSON endpointok. Ez hasznos akkor is, ha csak egy kisebb JavaScript komponens kér adatot, és akkor is, ha külön frontend alkalmazás használja a Velran szervert API-ként.
+
+A fejezet célja három működési modell tiszta szétválasztása:
+
+\begin{enumerate}
+  \item \textbf{same-origin HTML + API}: a böngésző ugyanarról az originről tölti az oldalt és hívja az API-t;
+  \item \textbf{cross-origin publikus API}: külön origin hívja az API-t, de nincs session-cookie;
+  \item \textbf{cross-origin session auth}: külön frontend origin használ cookie-alapú sessiont, ezért CORS és CSRF policy együtt szükséges.
+\end{enumerate}
+
+A legfontosabb alapelv: \textbf{a CORS nem autentikáció és nem CSRF-védelem}. A CORS böngészőoldali hozzáférési policy; az auth azt dönti el, ki a felhasználó, a CSRF pedig azt védi, hogy egy autentikált session ne legyen más originről jogosulatlanul felhasználható állapotmódosításra.
+
+\section{Ugyanez az életciklus érvényes az API-kra is}
+
+A JSON a reprezentációt változtatja meg, nem a trust modellt. Egy állapotmódosító API requestet ugyanabban a sorrendben érdemes végiggondolni:
+
+\begin{lstlisting}
+HTTP request
+  -> parse: closed typed JSON schema
+  -> validate: bounds/refinements
+  -> authenticate: session or machine identity if required
+  -> authorize: object/permission/tenant decision
+  -> query / transaction
+  -> response: explicit JSON projection or stable error envelope
+\end{lstlisting}
+
+A CORS e mellett az életciklus mellett helyezkedik el, nem valamelyik lépés helyett. Azt dönti el, hogy egy böngésző-origin a frontend kód számára hozzáférhetővé teheti-e a választ. Nem hoz létre identityt, objektum-authorityt, CSRF-biztonságot vagy adatbázis-integritást. Ha a CORS-t a core authorization láncon kívül tartod, elkerülhető a gyakori tervezési hiba: egy engedélyezett origint engedélyezett felhasználónak tekinteni.
+
+\section{Az első typed JSON endpoint}
+
+Egy JSON endpoint handlerének visszatérési típusa \code{Json}. A \code{json(...)} a támogatott runtime értéket JSON reprezentációvá alakítja.
+
+\begin{lstlisting}[language=Velran]
+#[page]
+fn statusApi(ctx: PageContext) -> Result<Json, PageError> {
+    let healthy = true;
+    return Ok(json(healthy));
+}
+
+route statusApi GET "/api/status" public => statusApi;
+\end{lstlisting}
+
+A sikeres válasz reprezentációja JSON, például:
+
+\Needspace{9\baselineskip}
+\begin{lstlisting}
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+
+true
+\end{lstlisting}
+
+A \code{json(value)} nem tetszőleges objektum-serializáló. Scalar érték közvetlenül kódolható, de database/domain model publikus JSON boundaryn explicit \code{expose(...)} projectionön keresztül léphet át. Így egy új model field---különösen egy sensitive mező---nem jelenhet meg észrevétlenül egy meglévő API-ban. A response shape tehát tudatos szerződés, nem egy runtime objektum automatikus lenyomata.
+
+\section{Adatbázisból JSON lista}
+
+A typed SQL és a JSON response közvetlenül összekapcsolható. A query továbbra is pontos model shape-et ad vissza, a JSON réteg pedig ezt reprezentálja.
+
+\begin{lstlisting}[language=Velran]
+model Product {
+    id: i64
+    name: String
+    price: i64
+}
+
+#[query]
+fn listProducts(db: Db, offset: i64)
+    -> Result<Vec<Product>, DbError> sql {
+    SELECT id, name, price
+    FROM products
+    ORDER BY id
+    LIMIT 100 OFFSET :offset
+}
+
+#[page]
+fn productsApi(ctx: PageContext, db: Db,
+                    offset: i64)
+    -> Result<Json, PageError> {
+    let products = listProducts(db, offset)?;
+    return Ok(json(expose(products, id, name, price)));
+}
+
+route productsApi GET "/api/products"
+    query offset<i64>
+    validate offset range 0 1000000
+    public => productsApi;
+\end{lstlisting}
+
+A fontos rész nem pusztán a JSON encoding. A reusable list query saját statikus row boundot hordoz; a kliens csak a bounded offsetet adja, nem az SQL cardinality authorityját. A route input typed és validált marad, a response pedig explicit public projectiont használ. Így egy később hozzáadott model field nem válik észrevétlenül az API részévé.
+
+\Needspace{17\baselineskip}
+\section{Typed JSON POST body}
+
+JSON request bodyhoz a route \code{json} input módot deklarál.
+
+\begin{lstlisting}[language=Velran]
+#[action]
+fn echoApi(ctx: ActionContext,
+                  name: String,
+                  age: i64,
+                  active: bool)
+    -> Result<Json, PageError> {
+    return Ok(json(name));
+}
+
+route echoApi POST "/api/echo"
+    json name<String> age<i64> active<bool>
+    validate name length 1 100 age range 0 150
+    auth user
+    => echoApi;
+\end{lstlisting}
+
+Egy megfelelő kérés:
+
+\begin{lstlisting}
+POST /api/echo HTTP/1.1
+Content-Type: application/json
+Accept: application/json
+X-CSRF-Token: <session CSRF token>
+
+{"name":"Alice","age":42,"active":true}
+\end{lstlisting}
+
+A JSON input schema \textbf{zárt}. A runtime hibának tekinti többek között az ismeretlen vagy hiányzó kulcsot, a duplikált kulcsot, a rossz scalar típust, valamint a nem támogatott nested object, array, float vagy \code{null} inputot. Ezek request-contract hibák, ezért \code{400 Bad Request} választ adnak. Hibás vagy hiányzó \code{Content-Type} JSON route-on \code{415 Unsupported Media Type}. A mező- és request-méretlimitek ugyanúgy érvényesek, mint más request body esetén.
+
+A \code{json}, \code{form} és \code{upload} body módok ugyanazon POST route-on kölcsönösen kizárják egymást, és ezt már a compiler ellenőrzi. JSON route \code{application/json}, egyszerű form route \code{application/x-www-form-urlencoded}, upload route pedig \code{multipart/form-data} requestet vár. Egy endpointnak legyen egyértelmű request contractja.
+
+\section{Content negotiation és a 406 válasz}
+
+A kliens az \code{Accept} headerrel jelezheti, milyen reprezentációt tud fogadni. JSON route-nál támogatott például:
+
+\begin{lstlisting}
+Accept: application/json
+Accept: application/*
+Accept: */*
+\end{lstlisting}
+
+Ha a handler JSON választ adna, de a kliens kizárólag \code{text/html} típust fogad el, a szerver \code{406 Not Acceptable} választ ad. Ez jobb annál, mintha a szerver csendben olyan reprezentációt küldene, amelyet a kliens explicit elutasított.
+
+\section{API hibák}
+
+JSON route-on a runtime által klasszifikált alkalmazáshibák ugyanazt az egyszerű envelope-ot használják: egyetlen stabil \code{error} kódot adnak vissza, miközben a részletes diagnosztika a szerveroldali logban marad. A kliens ne angol hibaüzenetek szövegét parse-olja, hanem a HTTP státuszt és ezt a kódot kezelje.
+
+JSON-return route felismerése után a hibák JSON error envelope-ban érkeznek. Például:
+
+\begin{lstlisting}
+HTTP/1.1 401 Unauthorized
+Content-Type: application/json; charset=utf-8
+
+{"error":"unauthorized"}
+\end{lstlisting}
+
+Tipikus error kódok:
+
+\begin{itemize}
+  \item \code{bad_request};
+  \item \code{unauthorized};
+  \item \code{forbidden};
+  \item \code{csrf_failed};
+  \item \code{unsupported_media_type};
+  \item \code{database_unavailable};
+  \item \code{resource_limit};
+  \item \code{internal_error}.
+\end{itemize}
+
+Ez különösen fontos böngészős kliensnél. Egy autentikált JSON route névtelen kérésre \code{401}-et ad, nem HTML login redirectet. A frontend így státuszkód alapján tud dönteni, nem kell HTML választ API hibaként értelmeznie.
+
+\section{Same-origin: az alapértelmezett és legegyszerűbb modell}
+
+Ha a HTML és az API ugyanazon scheme + host + port kombinációról érhető el, a böngésző szempontjából same-origin alkalmazásról beszélünk.
+
+\begin{lstlisting}
+https://app.example/
+https://app.example/api/products
+\end{lstlisting}
+
+Ilyenkor általában nincs szükség CORS konfigurációra. Egy egyszerű kliens:
+
+\begin{lstlisting}
+const response = await fetch("/api/products?limit=20&offset=0", {
+  headers: { Accept: "application/json" }
+});
+
+if (!response.ok) {
+  throw new Error(`HTTP ${response.status}`);
+}
+
+const products = await response.json();
+\end{lstlisting}
+
+Ha nincs valódi igény külön frontend originre, maradj same-origin modellen: egy trust boundaryval és a CORS-bonyolultság nagy részével kevesebb.
+
+\section{CORS: exact origin allowlist}
+
+Cross-origin böngészős hozzáférés alapból nincs engedélyezve. A trusted server configban konkrét origineket kell felsorolni; wildcard origin nincs.
+
+\begin{lstlisting}
+[web]
+cors_origins = ["https://frontend.example"]
+cors_allow_credentials = false
+\end{lstlisting}
+
+A CLI megfelelője:
+
+\begin{lstlisting}
+velran-server --cors-origin https://frontend.example ...
+\end{lstlisting}
+
+Minden engedélyezett origint explicit sorolj fel; tetszőleges request \code{Origin} értéket soha ne tükrözz vissza.
+
+\section{Preflight}
+
+Bizonyos cross-origin requestek előtt a böngésző \code{OPTIONS} preflight kérést küld. A Velran csak akkor enged preflightot, ha:
+
+\begin{itemize}
+  \item az \code{Origin} konfigurált;
+  \item a cél GET/POST route létezik;
+  \item a kért request header támogatott.
+\end{itemize}
+
+Támogatott például a \code{Content-Type}, az \code{Accept} és az \code{X-CSRF-Token}; a preflight a route/origin policy része, nem általános allow-all OPTIONS endpoint.
+
+\section{Credentialed CORS session-cookie-val}
+
+Ha a frontend külön originről használ Velran session authot, credentialed CORS szükséges:
+
+\begin{lstlisting}
+[web]
+cors_origins = ["https://frontend.example"]
+cors_allow_credentials = true
+\end{lstlisting}
+
+Productionben ez csak HTTPS mellett engedélyezett. A session cookie ilyen konfigurációban \code{SameSite=None; Secure} tulajdonságot kap, mert a böngészőnek cross-site requestben is el kell küldenie.
+
+A JavaScript oldalon a fetch kérésnek is explicit credential mód kell:
+
+\begin{lstlisting}
+const response = await fetch("https://api.example/api/account", {
+  credentials: "include",
+  headers: { Accept: "application/json" }
+});
+\end{lstlisting}
+
+A fetch \code{credentials} beállítása csak a megfelelő cookie-k elküldését engedi; alkalmazás-jogosultságot nem ad.
+
+\section{CSRF JSON API-n}
+
+Cookie-alapú sessionnél a böngésző a session cookie-t automatikusan kezeli, ezért állapotmódosító JSON requestnél ugyanúgy CSRF-védelem kell, mint HTML formnál.
+
+Form POST esetén a token body mező:
+
+\begin{lstlisting}
+_csrf=<token>
+\end{lstlisting}
+
+JSON POST esetén header:
+
+\begin{lstlisting}
+X-CSRF-Token: <token>
+\end{lstlisting}
+
+Külön frontend originhez készíthető autentikált token endpoint:
+
+\begin{lstlisting}[language=Velran]
+#[page]
+fn csrfApi(ctx: PageContext) -> Result<Json, PageError> {
+    return Ok(json(csrfToken));
+}
+
+route csrfApi GET "/api/csrf" auth user => csrfApi;
+\end{lstlisting}
+
+A token ugyanahhoz a sessionhöz tartozik; a CORS nem helyettesíti a CSRF-validációt.
+
+\section{Teljes böngészős POST folyamat}
+
+Külön session-auth frontendnél a böngésző session cookie-t és sessionhöz kötött CSRF tokent küld; a runtime az üzleti handler előtt ellenőrzi az origint, authenticationt, CSRF-et és typed inputot.
+
+Példa kliens:
+
+\begin{lstlisting}
+const csrf = await fetch("https://api.example/api/csrf", {
+  credentials: "include",
+  headers: { Accept: "application/json" }
+}).then(async r => {
+  if (!r.ok) throw new Error(`CSRF HTTP ${r.status}`);
+  return r.json();
+});
+
+const result = await fetch("https://api.example/api/echo", {
+  method: "POST",
+  credentials: "include",
+  headers: {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+    "X-CSRF-Token": csrf
+  },
+  body: JSON.stringify({ name: "Alice", age: 42, active: true })
+}).then(async r => {
+  if (!r.ok) throw new Error(`API HTTP ${r.status}`);
+  return r.json();
+});
+\end{lstlisting}
+
+\section{Reverse proxy és origin}
+
+Apache vagy Nginx mögött különösen fontos, hogy a public scheme/host és a trusted proxy konfiguráció összhangban legyen. Az alkalmazás ne a kliens által szabadon küldött forwarded headerekből találja ki, hogy milyen origin tekinthető biztonságosnak. A trusted proxy boundary alapját a telepítési fejezet mutatja be; a teljes \code{server.toml} kulcsreferencia a könyv végén található.
+
+A CORS allowlistbe mindig a \textbf{böngésző által látott frontend origint} írd, például:
+
+\begin{lstlisting}
+https://frontend.example
+\end{lstlisting}
+
+nem pedig a belső proxy vagy container címet.
+
+\section{Mit ne tegyél?}
+
+\begin{itemize}
+  \item Ne legyen permissive vagy reflektált CORS; explicit origineket használj.
+  \item Ne kezeld a CORS-t authentication vagy CSRF-védelem helyett, és productionben ne küldj session credentialt HTTP-n.
+  \item Egy POST route egy typed body módot használjon, az API input pedig legyen bounded.
+  \item JSON kliens API-státuszokat, például 401/403-at kezeljen, ne HTML login redirectet.
+\end{itemize}
+
+\section{Melyik architektúrát válaszd?}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}L{0.27\textwidth}Y@{}}
+\toprule
+\textbf{Helyzet} & \textbf{Ajánlott modell} \\
+\midrule
+szerver-renderelt oldal + kisebb JS & same-origin HTML + JSON API \\
+azonos domainen futó SPA & same-origin API, CORS nélkül \\
+külön publikus frontend, nincs session & exact-origin CORS credentials nélkül \\
+külön frontend + session auth & exact-origin credentialed CORS + HTTPS + CSRF \\
+server-to-server kliens & CORS nem releváns; az auth és hálózati policy a lényeg \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{Kipróbálható példa}
+
+A repository teljes mintája: \path{examples/json-api/app.vrn}.
+
+Indulj same-originból; külön frontend origint és CORS-t csak akkor adj hozzá, ha a deployment ezt ténylegesen megköveteli.
+
+\section{Ellenőrzött companion példák}
+A repository companion példák:
+\begin{itemize}
+  \item \path{examples/json-api/app.vrn} -- JSON API route-flow;
+  \item \path{examples/typed-query-form/main.vrn} -- típusos query/form structok;
+  \item \path{examples/json-typed-response/app.vrn} -- típusos JSON response-határ.
+\end{itemize}
+Teljes request/response példához ezeket használd az izolált könyvrészlet helyett.
+
+\section{Gyakorlat: válaszd külön az API- és a CORS-tervet}
+\paragraph{Gyakorlási mód: támogatott.} Használd az előszóban meghatározott támogatott módszert.
+
+Írd le a JSON request/response contractot anélkül, hogy böngészőt említenél. Ezután külön döntsd el, szüksége van-e egy másik originről futó böngészőnek engedélyre a híváshoz. Így nem keveredik össze a CORS az authenticationnel vagy az API-autorizációval.
+
+\section{Tipikus hiba: alapból permissive CORS-t kapcsolunk be}
+A CORS böngészős origin-policy, nem általános hálózati security mechanizmus. Ahol ésszerű, preferáld a same-origin telepítést; ha kell cross-origin hozzáférés, az exact originöket és credential-viselkedést tudatosan sorold fel.
+
+\section{Folyamatos mintaprojekt: Secure Notes}
+Indulj az \path{examples/secure-notes/checkpoints/09-json-api/main.vrn} snapshotból és annak ellenőrzött JSON companion példáiból. Adj read-only JSON reprezentációt a hitelesített felhasználó jegyzeteiről. Ugyanazokat az autorizációs szabályokat tartsd meg, mint a HTML page esetén. CORS-t csak akkor adj hozzá, ha szándékosan külön frontend origint telepítesz; egyébként maradjon same-origin az API.

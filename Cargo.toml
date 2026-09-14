@@ -1,0 +1,48 @@
+[workspace]
+members = [
+  "crates/observability",
+  "crates/language-core",
+  "crates/compiler",
+  "crates/executable-ir",
+  "crates/runtime-abi",
+  "crates/native-build",
+  "crates/native-runtime",
+  "crates/runtime",
+  "crates/auth",
+  "crates/data",
+  "crates/integrations",
+  "crates/storage",
+  "crates/server",
+  "crates/cli",
+]
+resolver = "2"
+
+[workspace.dependencies]
+argon2 = "0.5.3"
+chrono = { version = "0.4", default-features = false }
+ipnet = "2"
+ldap3 = { version = "0.12.1", default-features = false }
+libc = "0.2"
+multer = "3.1.0"
+rand = "0.10.2"
+redis = { version = "1.6", default-features = false }
+regex = "1"
+rust_decimal = { version = "1", default-features = false }
+rustix = "1.1.4"
+rustls = "0.23"
+rustls-pemfile = "2"
+serde = "1"
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.9", default-features = false }
+subtle = "2.6"
+tokio = "1"
+tokio-rustls = "0.26"
+toml = "0.9"
+totp-rfc = "0.1.2"
+url = "2"
+uuid = "1"
+webpki-roots = "1"
+
+[profile.release]
+strip = "symbols"

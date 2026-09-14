@@ -1,0 +1,10 @@
+[package]
+name = "executable-ir"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+authors = ["Zsolt Krüpl"]
+
+[dependencies]
+language-core = { path = "../language-core" }
+sha2 = { workspace = true }

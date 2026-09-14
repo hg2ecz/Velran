@@ -1,0 +1,176 @@
+\chapter{How to think about a Velran application}
+
+\noindent\textbf{Learning path: Fast path: core.} Build the mental model used by every later chapter.\par\medskip
+
+\rustbridgeblock{Structs, enums, \code{Option}, \code{Result}, and explicit function inputs remain familiar typed building blocks.}{Models make application data shapes compiler-visible, while capabilities make authority to external resources explicit.}{You do not need a new object model. Keep thinking in typed values and explicit inputs; learn where Velran adds security boundaries around them.}
+
+
+Before writing routes or connecting a database, ask: \emph{what business data exists, what shape does it have, what operations may be performed on it, and within what boundaries?} Velran derives many security and correctness guarantees from making those shapes, inputs, queries, and resource accesses explicit contracts.
+
+\section{Concepts first, pages second}
+
+For a product list, start with \emph{Product}, its typed shape, the operations that read or mutate it, the capabilities and policies those operations require, and only then the HTTP surface. The direction of thought is approximately:
+
+\begin{lstlisting}
+business concept
+    -> typed data shape
+        -> operations
+            -> capabilities and policies
+                -> HTTP route
+                    -> HTML / JSON
+\end{lstlisting}
+
+This order helps keep business rules out of ad-hoc routes, templates, and string-built SQL.
+
+\section{What does \code{model} mean?}
+
+The book uses two closely related ideas:
+
+\begin{itemize}
+  \item \textbf{data model or domain model}: the human description of the business concepts and relationships in the application;
+  \item \textbf{\code{model} declaration}: Velran's concrete data shape known to the compiler.
+\end{itemize}
+
+For example:
+
+\begin{lstlisting}[language=Velran]
+model Product {
+    id: i64
+    name: String
+    price: i64
+}
+\end{lstlisting}
+
+This tells the compiler that a \code{Product} record has exactly these fields and types. A typed SQL query that returns a product must match this contract, and the same typed value can later be used in HTML or JSON output.
+
+\subsection*{A \code{model} is not an automatic database schema}
+
+The declaration above does not create a \code{products} table. The persistent database schema is created by a migration, for example:
+
+\begin{lstlisting}[language=SQL]
+CREATE TABLE products (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    price INTEGER NOT NULL
+);
+\end{lstlisting}
+
+The layers are related but separate: migrations own persistent schema, \code{model} owns the application's typed data contract, and queries map rows to models explicitly. A model therefore does not automatically create a database entity or same-named table.
+
+\subsection*{A \code{model} is not a mutable object}
+
+\code{Product} is not a traditional object-oriented class. It has no hidden \code{save()} method, implicit database connection, or mutable object lifecycle. To change data, the program uses an explicit operation and an explicit resource.
+
+At this stage, the signatures are the important part: \code{listProducts} receives \code{Db} read access, while \code{createProduct} receives an explicit \code{Transaction} for mutation. Chapter 3 shows the complete SQL bodies once the full request path is in view.
+
+\section{The model is a contract between layers}
+
+Think of a \code{model} as a typed contract that moves between layers.
+
+\begin{lstlisting}
+Database row
+    |  typed query
+    v
+Product model
+    |-------------------|
+    v                   v
+HTML page            JSON API
+    |
+    v
+user
+\end{lstlisting}
+
+If a query promises \code{Product}, its returned columns must match that shape. The same typed-record contract later carries into object authorization and JSON output.
+
+\section{Business concepts have operations}
+
+Business data becomes useful through operations such as \code{Product.list}, \code{Product.create}, or \code{Article.publish}. Small programs may use top-level functions; larger programs can group operations in the \code{object} namespace introduced later. A useful distinction is:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}lY@{}}
+\toprule
+Element & Question it answers \\
+\midrule
+\code{model} & What shape does \code{Product} data have? \\
+\callable{query} & How do we read or mutate persistent data? \\
+\code{object} & Which business concept owns these operations? \\
+\callable{page}/\callable{action} & How does the business operation connect to a web handler? \\
+\code{route} & On what HTTP path, with what input and policy, is it reachable? \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{Capability: access is part of the model too}
+
+Velran makes not only data types explicit but also the resources an operation may access. A function does not obtain the database, filesystem, or current user from an invisible global source.
+
+\begin{lstlisting}[language=Velran]
+#[page]
+fn home(ctx: PageContext, db: Db)
+    -> Result<Html, PageError> {
+    let products = listProducts(db)?;
+    return Ok(html {
+        <ul>
+            @for product in products {
+                <li>{{ product.name }}</li>
+            }
+        </ul>
+    });
+}
+\end{lstlisting}
+
+The \code{db: Db} capability is visible in the signature. File handling uses an AppFs capability, mutating database work uses a Transaction, and authenticated operations depend on auth policy and the corresponding typed context.
+
+Design rule: if an operation needs a sensitive resource, that requirement should be visible in code and policy.
+
+\section{A route is not the business model}
+
+A route matters, but it is the external boundary of the system. For example:
+
+\begin{lstlisting}[language=Velran]
+route create POST "/products"
+    form name<String> price<i64>
+    validate name length 1 100 price range 0 100000000
+    public => create;
+\end{lstlisting}
+
+The route defines the external HTTP boundary: method, path, typed input, validation, and policy. The \code{Product} itself remains reusable from HTML, JSON, admin, or other routes.
+
+For larger applications, the following boundary is especially useful:
+
+\begin{lstlisting}
+domain/model     : what is the data and what operations make sense on it?
+HTTP route       : who may call it, how, and under what policy?
+runtime config   : within what infrastructure and resource limits may it run?
+\end{lstlisting}
+
+\section{A simple design method}
+
+When starting a new feature, these five questions are a good default:
+
+\begin{enumerate}
+  \item \textbf{What is the business noun?} -- Product, Article, Invoice, WikiPage.
+  \item \textbf{What typed data is actually needed?} -- do not automatically mirror the full database row.
+  \item \textbf{Which operations read, and which mutate?}
+  \item \textbf{Which capabilities do they need?} -- Db, Transaction, AppFs, auth, and named network-egress integrations.
+  \item \textbf{Through what HTTP/policy surface do we expose them?} -- route, input, validation, auth, cache, rate limit.
+\end{enumerate}
+
+For CRUD this takes minutes; in larger systems it prevents routes, SQL fragments, and authorization rules from drifting apart.
+
+\section{What to carry into the next chapters}
+
+Carry one rule forward: keep typed data, queries, transactions, capabilities, and HTTP/security policy explicit, without inventing an elaborate object hierarchy. The next chapters install the system and apply this model to a complete \code{Product} request flow.
+
+\section{Practice: draw the boundary map}
+\paragraph{Exercise mode: guided.} Use the guided method defined in the preface.
+
+Choose a small feature you already know, such as notes, tasks, or inventory items. Before writing code, list its trusted state, request inputs, persistent records, mutation points, and externally visible responses. Then mark which transitions require validation, authorization, a transaction, or an explicit capability.
+
+The goal is to expose hidden assumptions before they become code.
+
+\section{Common mistake: starting from routes instead of the model}
+A route-first design often produces handlers that each rediscover the same business rules. If several routes repeatedly parse the same state, perform the same ownership check, or reconstruct the same invariants, move the thinking back to typed models, queries, and explicit mutation boundaries.
+
+\section{Running project checkpoint: Secure Notes}
+Use the compiler-checked \emph{Secure Notes} application in \path{examples/secure-notes/checkpoints/01-baseline/main.vrn} as the running project. Its baseline already enforces authenticated, principal-scoped access, bounded input, CSRF-protected forms, ownership checks, and transactional mutations; later checkpoints evolve it without weakening those invariants.

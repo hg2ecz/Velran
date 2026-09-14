@@ -1,0 +1,352 @@
+\chapter{A \code{server.toml} konfigurációs referencia}
+
+\noindent\textbf{Tanulási út: Teljes út / referencia.} Server konfigurációkor keresd vissza; lineáris tananyagként nem kötelező.\par\medskip
+
+\noindent\textbf{Első olvasás.} A precedence/fail-closed szabályt, a production baseline-t és az egyes beállítások trust domainjét tanuld meg. Az option táblákat deployment referenciaként használd.\par\medskip
+
+A korábbi fejezetek feladatorientáltan használták a szerverkonfigurációt. Ez a fejezet egy helyen adja meg a V1 production konfiguráció teljes, operátori nézetét. A referencia alapja a tényleges parser és a \code{config/server.toml.sample}; ha a kettő között eltérés lenne, a parser viselkedése az irányadó.
+
+\section{Betöltés, precedence és fail-closed szabályok}
+
+Az ajánlott production indítás:
+
+\begin{lstlisting}
+velran-server \
+  --config /usr/local/etc/velran/server.toml
+\end{lstlisting}
+
+A precedence:
+
+\begin{lstlisting}
+built-in defaults < server.toml < explicit CLI override
+\end{lstlisting}
+
+A TOML trusted konfiguráció, de a parser akkor is fail-closed:
+
+\begin{itemize}
+  \item ismeretlen section vagy kulcs: startup error;
+  \item duplikált kulcs vagy tábla: TOML parse error;
+  \item a config fájl csak reguláris, nem symlink fájl lehet;
+  \item maximum mérete 1 MiB;
+  \item TOML-ból érkező filesystem path abszolút kell legyen;
+  \item secret nem kerülhet plaintext mezőbe: DB/Redis/LDAP/local-auth credential csak \code{*_file} hivatkozással adható meg.
+\end{itemize}
+
+Ellenőrzés listener indítása nélkül:
+
+\begin{lstlisting}
+velran-server \
+  --config /usr/local/etc/velran/server.toml \
+  --check-config
+\end{lstlisting}
+
+Secretmentes effective nézet:
+
+\begin{lstlisting}
+velran-server \
+  --config /usr/local/etc/velran/server.toml \
+  --print-effective-config
+\end{lstlisting}
+
+\section{Hogyan olvasd a táblákat?}
+
+A \textbf{beépített default} azt jelenti, ami config nélkül érvényes. A \textbf{production minta} a projekt \code{config/server.toml.sample} ajánlott kiinduló értéke. A kettő nem mindig azonos: a sample több helyen tudatosan nagyobb, productionre szánt keretet ad.
+
+\section{[server] és [tls]}
+
+\begin{longtable}{L{0.28\textwidth}L{0.20\textwidth}L{0.42\textwidth}}
+\toprule
+Kulcs & Beépített default & Jelentés / production megjegyzés \\
+\midrule
+\path{server.app} & nincs & Az alkalmazás abszolút \code{main.vrn} útvonala. Sample: \code{/srv/velran/current/main.vrn}. \\
+\path{server.listen} & \code{127.0.0.1:8080} & Listener. Reverse proxy mögött tipikusan loopback; közvetlen TLS esetén publikus cím is lehet. \\
+\path{server.insecure_dev_cookies} & \code{false} & Csak fejlesztési HTTP-hoz. Productionben maradjon \code{false}. \\
+\path{server.unix_socket} & nincs & Opcionális abszolút Unix-domain socket útvonal; csak Unix alatt és \path{server.behind_proxy=true} mellett. \\
+\path{server.behind_proxy} & \code{false} & Explicit trusted reverse-proxy szemantikát kapcsol be. Backend TLS-sel nem kombinálható. \\
+\path{server.expected_build_id} & nincs & Opcionális 64 kisbetűs hex deployment-pin. Eltérő futó build ID esetén a startup fail-closed. \\
+\path{tls.cert_file} & nincs & TLS certificate chain abszolút útvonala. \\
+\path{tls.key_file} & nincs & TLS private key abszolút útvonala. \\
+\path{tls.handshake_timeout_ms} & \code{5000} & TLS handshake felső ideje. \\
+\path{tls.http_redirect_listen} & nincs & Opcionális HTTP listener HTTPS redirecthez. \\
+\path{tls.public_host} & nincs & Canonical/public host a redirect és Host/Origin-validációhoz; trusted HTTPS reverse proxy módban is szükséges. \\
+\bottomrule
+\end{longtable}
+
+\subsection*{Reverse proxy mögött}
+
+Apache vagy Nginx mögött a Velran tipikusan nem publikus interfészen hallgat:
+
+\begin{lstlisting}
+[server]
+app = "/srv/velran/current/main.vrn"
+listen = "127.0.0.1:8080"
+insecure_dev_cookies = false
+
+[tls]
+public_host = "www.example.com"
+\end{lstlisting}
+
+A publikus TLS-t ilyenkor a proxy terminálja. A Velran oldali certificate/key elmarad, de a \code{tls.public_host} továbbra is kötelező trusted Host/Origin pinninghez. A \path{web.trusted_proxy_cidrs} határozza meg, mely upstreamtől fogadunk el forwarded client/proto metadata-t. TLS nélküli production listener ebben a módban csak loopback címen engedett.
+
+\section{[database], [redis] és [auth]}
+
+\begin{longtable}{L{0.34\textwidth}L{0.18\textwidth}L{0.38\textwidth}}
+\toprule
+Kulcs & Default & Jelentés \\
+\midrule
+\path{database.url_file} & nincs & DB URL-t tartalmazó secret fájl. Plaintext \code{database.url} nincs. \\
+\path{database.allow_insecure} & \code{false} & Titkosítatlan remote DB kapcsolat explicit engedélyezése; productionben általában ne használd. \\
+\path{redis.url_file} & nincs & Redis URL secret fájlból. \\
+\path{redis.allow_insecure} & \code{false} & Insecure Redis explicit engedélyezése. \\
+\path{auth.ldap_url} & nincs & LDAP/LDAPS endpoint. \\
+\path{auth.ldap_search_base} & nincs & LDAP search base. \\
+\path{auth.ldap_username_attribute} & \code{uid} & Login név LDAP attribútuma. \\
+\path{auth.ldap_service_bind_dn_file} & nincs & Service bind DN secret fájlból. \\
+\path{auth.ldap_service_bind_password_file} & nincs & Bind jelszó secret fájlból. \\
+\path{auth.totp_secrets_file} & nincs & TOTP secret store fájl. \\
+\path{auth.roles_file} & nincs & Külső role mapping fájl. \\
+\path{auth.memberships_file} & nincs & Opcionális tenant/user membership authority fájl; abszolút útvonalú trusted local policy input. \\
+\path{auth.local_auth_db_url_file} & nincs & Local-auth identity store URL secret fájlból. \\
+\path{auth.require_totp} & \code{false} & Sikeres első faktor után TOTP kötelező-e. \\
+\path{auth.login_max_attempts} & \code{8} & Maximum jelszóhiba egy source+principal párra ablakonként. \\
+\path{auth.login_principal_max_attempts} & \code{16} & Maximum jelszóhiba egy principalra több source-ból. \\
+\path{auth.login_source_max_attempts} & \code{64} & Maximum authentication hiba egy source-ból több principalra. \\
+\path{auth.mfa_max_attempts} & \code{5} & Maximum második faktor hiba source+principal/principal ablakonként. \\
+\path{auth.login_window_secs} & \code{300} & Authentication abuse-control ablak másodpercben. \\
+\bottomrule
+\end{longtable}
+
+Az LDAP és a local auth ne legyen két párhuzamos elsődleges azonosítási forrás ugyanabban a deploymentben. Az identity authority legyen egyértelmű; a Redis session-, cache- és rate-limit runtime state, nem felhasználói source of truth.
+
+\section{[web]}
+
+\begin{longtable}{L{0.34\textwidth}L{0.18\textwidth}L{0.38\textwidth}}
+\toprule
+Kulcs & Default & Jelentés \\
+\midrule
+\path{web.trusted_proxy_cidrs} & üres lista & Csak ezekről a címekről hiteles a forwarded client/proto metadata. \\
+\path{web.allow_missing_origin} & \code{false} & Origin nélküli unsafe requestek policyja. Productionben fail-closed alapérték. \\
+\path{web.cors_origins} & üres lista & Exact-origin allowlist. Wildcard credentiales CORS-hoz nem használható. \\
+\path{web.cors_allow_credentials} & \code{false} & Session cookie/credential cross-origin engedélyezése; CSRF policyval együtt értelmezendő. \\
+\path{web.webhook_secrets_dir} & nincs & Verified webhook secreteket tartalmazó abszolút, nem symlink könyvtár. Verified webhook route esetén kötelező. \\
+\path{web.egress_policy_file} & nincs & Abszolút outbound integration/egress policy fájl. Outbound integration effectet deklaráló alkalmazásnál kötelező. \\
+\bottomrule
+\end{longtable}
+
+\section{[storage] és [static\_assets]}
+
+\begin{longtable}{L{0.34\textwidth}L{0.18\textwidth}L{0.38\textwidth}}
+\toprule
+Kulcs & Beépített default & Jelentés \\
+\midrule
+\path{storage.data_root} & nincs & AppFs runtime data gyökér. Sample: \code{/srv/velran/data}. \\
+\path{storage.fs_mode} & \code{rwc} & AppFs capability mód. Csak a szükséges jog legyen engedélyezve. \\
+\path{storage.max_upload_bytes} & 16 MiB & Egy upload felső byte-limitje. \\
+\path{storage.max_image_pixels} & 40 000 000 & Dekódolt kép pixel ceilingje. \\
+\path{static_assets.root} & nincs & Read-only static root. Sample: \code{/srv/velran/current/public}. \\
+\path{static_assets.url_prefix} & \code{/assets/} & A static namespace URL prefixe. \\
+\path{static_assets.max_asset_bytes} & 8 MiB & Egy static asset felső mérete. \\
+\path{static_assets.max_age_secs} & \code{300} & Nem fingerprintelt asset cache ideje. \\
+\path{static_assets.immutable_max_age_secs} & \code{31536000} & Fingerprintelt immutable asset cache ideje. \\
+\path{static_assets.precompressed} & \code{true} & Előre generált Brotli/gzip változatok használata. \\
+\bottomrule
+\end{longtable}
+
+A \code{data_root} és a static root ne legyen ugyanaz a könyvtár: az egyik mutable alkalmazásállapot, a másik release-owned read-only artifact.
+
+\section{[lifecycle], [observability] és [logging]}
+
+\begin{longtable}{L{0.36\textwidth}L{0.18\textwidth}L{0.36\textwidth}}
+\toprule
+Kulcs & Default & Jelentés \\
+\midrule
+\path{lifecycle.health_live_path} & \code{/health/live} & Process liveness endpoint. \\
+\path{lifecycle.health_ready_path} & \code{/health/ready} & Dependency-aware readiness endpoint. \\
+\path{lifecycle.health_dependency_timeout_ms} & \code{1000} & Readiness dependency probe timeout. \\
+\path{lifecycle.shutdown_grace_ms} & \code{30000} & Graceful shutdown drain idő. \\
+\path{observability.metrics_listen} & nincs & Prometheus listener; sample: \code{127.0.0.1:9090}. \\
+\path{observability.allow_public_metrics} & \code{false} & Publikus metrics listener explicit engedélye. \\
+\path{observability.access_log} & \code{true} & HTTP access események logolása. \\
+\path{logging.server_file} & nincs & Error/system log fájl. \\
+\path{logging.access_file} & nincs & Access log fájl. \\
+\path{logging.audit_file} & nincs & Security/user-activity audit log. \\
+\path{logging.stderr} & \code{true} & Stderr log output. \\
+\bottomrule
+\end{longtable}
+
+A log parent directoryt az operátor hozza létre. Létező log target nem lehet symlink vagy nem-reguláris fájl. Behind-proxy módban a \code{SIGHUP} újranyitja a logokat és tranzakciósan újraépíti a domain/application hosting állapotot; a process-szintű beállításokhoz továbbra is restart kell.
+
+\section{[rate\_limit] és [cache]}
+
+\begin{longtable}{L{0.34\textwidth}L{0.18\textwidth}L{0.38\textwidth}}
+\toprule
+Kulcs & Default & Jelentés \\
+\midrule
+\path{rate_limit.policies_file} & nincs & Route rate-limit policy fájl. Sample: \path{/usr/local/etc/velran/rate-limits.toml}. \\
+\path{rate_limit.allow_memory} & \code{false} & In-memory fallback explicit engedélyezése. Több instance productionnél maradjon false. \\
+\path{cache.max_ttl_secs} & \code{3600} & Public cache maximális route TTL-je. \\
+\path{cache.max_entries} & \code{10000} & In-memory cache entry ceiling. \\
+\path{cache.max_bytes} & 64 MiB & In-memory cache teljes byte ceiling. \\
+\path{cache.allow_memory} & \code{false} & Redis nélküli memory cache explicit engedélyezése. \\
+\path{cache.singleflight_wait_timeout_ms} & \code{5000} & Coalesced public-cache fill várakozóinak maximális ideje; nulla érték tiltott. \\
+\bottomrule
+\end{longtable}
+
+Ha több \code{velran-server} példány fut, a session/cache/rate-limit közös állapotát Redisnek kell hordoznia; a memory fallback csak tudatos, tipikusan egy-instance környezetben elfogadható.
+
+
+\section{[native]}
+
+A natív végrehajtás a production execution path; a konfiguráció a trusted compiler-invokációt és cache-t szabályozza, nem ad tetszőleges rustc flaget az alkalmazáskód kezébe.
+
+\begin{longtable}{L{0.34\textwidth}L{0.18\textwidth}L{0.38\textwidth}}
+\toprule
+Kulcs & Default & Jelentés \\
+\midrule
+\path{native.enabled} & \code{true} & Natív végrehajtás engedélyezése. A jelenlegi application activation a natív utat igényli. \\
+\path{native.required} & \code{false} & Startup/activation hiba, ha egyetlen natív shard sem fordítható és tölthető be. A production sample \code{true}. \\
+\path{native.rustc} & discovery & Opcionális abszolút trusted \code{rustc} útvonal; egyébként a konfigurált environment/PATH discovery érvényes. \\
+\path{native.cache_dir} & app-local & Opcionális abszolút natív artifact cache könyvtár. Cache hitnél a hash/integrity ellenőrzés megmarad. \\
+\path{native.optimization} & \code{release} & \code{interactive} vagy \code{release}; productionben \code{release}. \\
+\path{native.target_cpu} & nincs & Opcionális validált CPU baseline, például host-local cache esetén \code{native}. \\
+\path{native.cpu_features} & nincs & Opcionális validált feature-lista, például \code{+sse2,+avx2}; csak ismert deployment-kompatibilitás mellett pineld. \\
+\path{native.debug_rustc_repro} & \code{false} & Diagnosztikai reprodukciós segéd; normál production beállításként ne engedélyezd. \\
+\bottomrule
+\end{longtable}
+
+Security szabály: a performance-beállítás módosíthatja a kódgenerálást, de nem kerülheti meg a verified loweringot, package/capability ellenőrzést vagy a native-cache integrity verifikációját.
+
+\section{[reload]}
+
+\begin{longtable}{L{0.34\textwidth}L{0.18\textwidth}L{0.38\textwidth}}
+\toprule
+Kulcs & Default & Jelentés \\
+\midrule
+\path{reload.enabled} & \code{true} & A shared source-graph watcher engedélyezése. \\
+\path{reload.poll_interval_ms} & \code{1000} & Metadata polling intervallum. \\
+\path{reload.debounce_ms} & \code{250} & Candidate generáció fordítása előtti debounce. \\
+\path{reload.debug_compile_errors} & \code{false} & Fejlesztői compiler-diagnosztika, miközben az utolsó valid generáció tovább szolgál. Production security policy ezt a módot elutasítja. \\
+\bottomrule
+\end{longtable}
+
+\section{[limits]}
+
+A request- és runtime-limitek defense-in-depth szerepet töltenek be. A sample több értéket explicit megad, hogy az operator auditálható módon vállalja a production budgetet.
+
+\begin{longtable}{L{0.36\textwidth}L{0.20\textwidth}L{0.34\textwidth}}
+\toprule
+Kulcs & Beépített default & Sample / jelentés \\
+\midrule
+\path{limits.max_header_bytes} & 16 KiB & Sample ugyanennyi. \\
+\path{limits.max_body_bytes} & 256 KiB & Sample ugyanennyi; upload külön storage limitet is kap. \\
+\path{limits.max_connections} & \code{4096} & Egyidejű kapcsolatok ceilingje. \\
+\path{limits.max_requests_per_connection} & \code{100} & Keep-alive request ceiling. \\
+\path{limits.read_timeout_ms} & \code{5000} & Request read timeout. \\
+\path{limits.request_timeout_ms} & \code{15000} & Teljes request budget. \\
+\path{limits.write_timeout_ms} & \code{5000} & Response write timeout. \\
+\path{limits.max_header_count} & \code{64} & Header count ceiling. \\
+\path{limits.max_form_fields} & \code{64} & Form mezők maximuma. \\
+\path{limits.max_form_field_bytes} & 8 KiB & Egy form mező byte ceiling. \\
+\path{limits.max_json_depth} & \code{32} & A bounded JSON boundary maximális nesting mélysége. \\
+\path{limits.max_json_string_bytes} & 64 KiB & Egy dekódolt JSON string maximális byte-mérete. \\
+\path{limits.max_json_array_items} & \code{4096} & Egy JSON array maximális elemszáma. \\
+\path{limits.max_json_object_fields} & \code{1024} & Egy JSON object maximális mezőszáma. \\
+\path{limits.max_instructions} & \code{100000} & Sample: \code{5000000}. Verified execution/instruction budget; emelés auditálandó. \\
+\path{limits.max_runtime_alloc_bytes} & 32 MiB & Sample: 256 MiB. Runtime allocation ceiling. \\
+\path{limits.session_ttl_secs} & \code{28800} & 8 óra. \\
+\path{limits.max_sessions} & \code{100000} & Session ceiling. \\
+\path{limits.max_process_memory_bytes} & nincs & Sample: 1 GiB; process address-space limit. \\
+\path{limits.resource_profiles_file} & nincs & Sample: \path{/usr/local/etc/velran/resource-profiles.toml}. \\
+\bottomrule
+\end{longtable}
+
+\subsection*{Miért külön a request, runtime és process limit?}
+
+A \code{max_body_bytes} a hálózati inputot korlátozza, a \code{max_runtime_alloc_bytes} egy request runtime által elszámolt allokációját, a \code{max_process_memory_bytes} pedig a teljes process address space-t. Egyik nem helyettesíti a másikat.
+
+\section{[cgroup]}
+
+A cgroup korlátok Linux production defense-in-depth réteget adnak a process-szintű limitek fölé.
+
+\begin{longtable}{L{0.34\textwidth}L{0.18\textwidth}L{0.38\textwidth}}
+\toprule
+Kulcs & Default & Jelentés \\
+\midrule
+\path{cgroup.dir} & nincs & A már előkészített cgroup könyvtár abszolút útvonala. \\
+\path{cgroup.memory_max_bytes} & nincs & Cgroup memória ceiling; a systemd sample ezt nem állítja. \\
+\path{cgroup.memory_swap_max_bytes} & nincs & Swap ceiling; delegated cgroup deploymentnél opcionális. \\
+\path{cgroup.cpu_percent} & nincs & CPU budget százalékban; delegated cgroup deploymentnél opcionális. \\
+\path{cgroup.pids_max} & nincs & PID/thread ceiling; delegated cgroup deploymentnél opcionális. \\
+\bottomrule
+\end{longtable}
+
+A cgroup könyvtár és delegáció operátori feladat; a szerver nem rendszeradminisztrációs eszköz. A repository systemd baseline-jában a service manager a cgroup authority (\code{MemoryMax}, \code{CPUQuota}, \code{TasksMax}), ezért ott a \code{[cgroup]} section szándékosan nincs bekapcsolva. Velran-oldali cgroup írást csak külön delegált, írható cgroup v2 könyvtárnál használj; a két authorityt ne konfiguráld egyszerre.
+
+\section{Production baseline}
+
+Egy tipikus reverse-proxy mögötti minimum konfiguráció:
+
+\begin{lstlisting}
+[server]
+app = "/srv/velran/current/main.vrn"
+listen = "127.0.0.1:8080"
+insecure_dev_cookies = false
+
+[tls]
+public_host = "www.example.com"
+
+[database]
+url_file = "/run/secrets/velran/database-url"
+
+[redis]
+url_file = "/run/secrets/velran/redis-url"
+
+[web]
+trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
+allow_missing_origin = false
+
+[storage]
+data_root = "/srv/velran/data"
+
+[logging]
+server_file = "/var/log/velran/server.log"
+access_file = "/var/log/velran/access.log"
+audit_file = "/var/log/velran/audit.log"
+stderr = true
+
+[limits]
+resource_profiles_file = "/usr/local/etc/velran/resource-profiles.toml"
+\end{lstlisting}
+
+Ez csak baseline: auth, static, metrics, rate-limit, TLS és cgroup a deployment topológiájához igazítandó.
+
+
+\section{Automatikus source reload}
+
+A globális \code{[reload]} section az \code{enabled}, \code{poll_interval_ms}, \code{debounce_ms} és a fejlesztői \code{debug_compile_errors} alapértékeket adja. Multi-domain módban ezek \code{[domains.reload]} alatt domainenként felülírhatók. Egyetlen közös supervisor figyeli a compiler által visszaadott source graphot \code{mtime + size} alapján, beleértve az atomikus symlink deploymenthez szükséges logikai entrypoint útvonalat is. Sikertelen candidate esetén a régi generáció marad aktív; sikeres commit csak az érintett domaint cseréli, és invalidálja annak public-cache generationjeit. Karbantartáskor a \code{--no-source-reload} kapcsoló process-szinten tiltja a figyelést.
+
+\section{Változtatási workflow}
+
+Production config módosításnál a könyv egyetlen ajánlott sorrendet használ:
+
+\begin{enumerate}
+  \item módosítsd a version-controlled config template-et;
+  \item secretet külön file-ban módosíts, ne TOML-ban;
+  \item futtasd a \code{velran-server --check-config} ellenőrzést;
+  \item nézd meg a \code{--print-effective-config} secretmentes összefoglalót;
+  \item controlled restart;
+  \item ellenőrizd a live/ready endpointokat, logot, metricet és auditot.
+\end{enumerate}
+
+Behind-proxy módban a \code{SIGHUP} csak korlátozott hosting reloadot végez. Nem általános folyamat-újrakonfigurálás. Az alkalmazásforrás változásához normál esetben sem SIGHUP, sem restart nem kell. A reload supervisor az entrypointot és a tranzitív modulgráfot figyeli. Csak sikeresen forduló domain-generációt cserél be tranzakciósan.
+
+\section{Gyakorlat: trust domain szerint review-zd a konfigurációt}
+\paragraph{Gyakorlási mód: üzemeltetési szcenárió.} Használd az előszóban meghatározott üzemeltetési módszert.
+
+Csoportosítsd a konfigurációt listener/TLS, storage, authentication/session, resource limit, egress, observability és native build/runtime területre. Minden csoportot azzal review-ztass, aki ismeri a failure mode-ját, ne egyetlen lapos kulcslistaként kezeld a fájlt.
+
+\section{Tipikus hiba: nagy konfigurációt másolunk és csak a nyilvánvaló értékeket cseréljük}
+Egy másolt setting proxy-, path-, limit- vagy credential-feltételezést hordozhat, amely nem illik az új környezethez. A dokumentált minimumból indulj, és csak olyan beállítást adj hozzá, amelynek operátori jelentése ismert.
+
+\section{Operátori checkpoint: Secure Notes}
+Készítsd el a Secure Notes minimális production konfigurációját, és jelöld, mely érték környezetfüggő. A secretek referenced file-ban maradjanak, a végső konfigurációt pedig deployment előtt ellenőrizd a szerver check módjával.

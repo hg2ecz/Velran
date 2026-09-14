@@ -1,0 +1,405 @@
+\chapter{Tesztelés, hibamodellek és fejlesztői diagnosztika}
+
+\noindent\textbf{Tanulási út: Gyors út: alap production előtt.} Alakítsd a compiler-, verifier- és runtime-hibákat ismételhető hibakeresési workflow-vá.\par\medskip
+
+\invariantblock{Biztonsági invariáns: az elutasítást is bizonyítsd}{Security szabályt nem bizonyít önmagában az, hogy a helyes program sikeresen fut. Legyen negatív teszt is, amely megmutatja, hogy a tiltott változatot a rendszer elutasítja; a váratlan elfogadás regresszió.}
+
+A fordítás source- és policy-korlátokat bizonyít, nem üzleti helyességet vagy környezeti egészséget. A tesztelésnek ezért ki kell terjednie az alkalmazásállapotra, valós dependencykre, migrációkra, jogosultsági elvárásokra és a deployolt topológiára.
+
+\section{Security diagnostic olvasása négy menetben}
+
+Amikor a compiler vagy verifier stabil security kóddal elutasít egy programot, ne a check megkerülésével kezdd. Négy menetben olvasd a diagnosticot: azonosítsd a kódot, nevezd meg a megsértett invariantot, keresd meg az érintett authority- vagy adathatárt, majd végezd el a legkisebb forrásmódosítást, amely helyreállítja az invariantot. Futtasd újra az ellenőrzést, és security-szempontból fontos szabálynál tartsd meg az elutasított változatot negatív tesztként.
+
+Rögzíts négy dolgot: \emph{kód}, \emph{határ}, \emph{az elutasítás oka}, és \emph{mi bizonyítja a javítás elfogadhatóságát}.
+
+Ezért a Velranban érdemes a tesztelést több egymásra épülő rétegként kezelni:
+
+\begin{enumerate}
+  \item \textbf{source check}: a program nyelvileg és policy szempontból érvényes-e;
+  \item \textbf{negatív compile teszt}: a veszélyes vagy tiltott program valóban elutasításra kerül-e;
+  \item \textbf{alkalmazás- és adatbázisteszt}: az üzleti művelet a várt állapotot hozza-e létre;
+  \item \textbf{integration teszt}: a valódi DB, Redis, LDAP, TLS, AppFs vagy más dependency együtt helyesen működik-e;
+  \item \textbf{system/smoke teszt}: a telepített rendszer HTTP-n, a tényleges konfigurációval is működik-e.
+\end{enumerate}
+
+A cél nem az, hogy minden teszt ugyanazt bizonyítsa, hanem az, hogy minden hibafajta a lehető legolcsóbb rétegben bukjon el.
+
+\section{Az első kapu: \texttt{velran-cli check}}
+
+Fejlesztés közben a leggyorsabb ellenőrzés:
+
+\begin{lstlisting}
+velran-cli check main.vrn
+\end{lstlisting}
+
+Siker esetén a CLI összefoglalja a felismert programot, például a modellek, query-k, page-ek, actionök és route-ok számát. A check nem indít HTTP servert és nem módosít adatbázist: a source contractot ellenőrzi.
+
+A fordító többek között itt tudja megfogni:
+
+\begin{itemize}
+  \item a típusegyezési hibákat;
+  \item a query eredményalak és a \code{model} eltérését;
+  \item a hibás route vagy form deklarációt;
+  \item a tiltott HTML/script konstrukciókat;
+  \item a veszélyes SQL összeállítást vagy bind hibát;
+  \item az auth/cache/policy egymással össze nem férő kombinációit;
+  \item a capability-határok bizonyos megsértéseit.
+\end{itemize}
+
+Ez az egyik legfontosabb szemléleti különbség egy általános scripting megoldáshoz képest: a hibák jelentős részét nem HTTP kérés közben akarjuk felfedezni.
+
+\section{A negatív teszt ugyanolyan értékes, mint a pozitív}
+
+Biztonsági invariánsnál nem elég azt tesztelni, hogy a helyes program lefordul. Azt is bizonyítani kell, hogy a tiltott program \emph{nem} fordul le.
+
+A repository release-ellenőrzése ezért ilyen fixture-öket is futtat:
+
+\begin{lstlisting}
+# Ennek sikeresen kell fordulnia:
+velran-cli check examples/auth/app.vrn
+
+# Ennek viszont hibaval kell visszaternie:
+velran-cli check \
+  tests/fixtures/security/sql-injection-rejected.vrn
+\end{lstlisting}
+
+Tipikus negatív teszt:
+
+\begin{itemize}
+  \item SQL injectionre alkalmas dinamikus SQL;
+  \item raw/script jellegű XSS-kísérlet;
+  \item optional érték ellenőrzés nélküli használata;
+  \item hibás form/schema validáció;
+  \item userfüggő route public cache-sel;
+  \item public route objektumszintű authorization guarddal;
+  \item tiltott upload path vagy JSON/form body-mode keverés.
+\end{itemize}
+
+Egy biztonsági szabály akkor erős, ha a projektben van rá \textbf{pozitív és negatív bizonyíték} is.
+
+A repository szerkezetében érdemes ezt a szerepkülönbséget láthatóvá tenni. Az olvasásra és futtatásra szánt alkalmazások az \path{examples/} alatt maradnak; a szándékosan elutasítandó compiler/security inputok a \path{tests/fixtures/} alatt vannak; a verification tooling által használt listák pedig a \path{tests/manifests/} alatt. Egy pozitív példa attól még részt vehet a \code{verify.sh}-ban, de alkalmazáskódként is érdemes legyen elolvasni. Egy rejection fixture-nek viszont nem kell jó alkalmazásnak látszania: az a feladata, hogy egyetlen invariánst izoláljon, és a kívánt okból bukjon el.
+
+\section{A hibák négy külön világa}
+
+Hibakereséskor először azt döntsd el, melyik rétegben történt a hiba. Ugyanaz a felhasználói tünet teljesen más javítást kívánhat.
+
+\begin{description}
+  \item[Compile-time hiba] A source contract hibás. A \code{velran-cli check} vagy build áll meg. Ezt kódban kell javítani.
+  \item[Startup/config hiba] A program érvényes, de a szerver konfigurációja, secretje, TLS kulcsa vagy egy hard policy hibás. Itt a \code{--check-config}, a server log és az effective config a fő eszköz.
+  \item[Request/policy hiba] A szerver fut, de egy kérés input-, auth-, authorization-, rate-limit- vagy content-negotiation szabály miatt elutasítódik. Itt az HTTP státusz, request ID, access és audit log a bizonyíték.
+  \item[Dependency/runtime hiba] DB, Redis, LDAP, filesystem, hálózat vagy resource limit okozza a hibát. Itt readiness, metrics, server log és valódi integration teszt kell.
+\end{description}
+
+A rossz diagnosztikai reflex az, hogy minden 500/503 körüli tünetre a source kódot kezdjük átírni. Először a réteget azonosítsd.
+
+\section{Konfigurációt külön tesztelj}
+
+A source check nem helyettesíti a server konfiguráció ellenőrzését:
+
+\begin{lstlisting}
+velran-server \
+  --config /usr/local/etc/velran/server.toml \
+  --check-config
+\end{lstlisting}
+
+Ha deploy előtt a ténylegesen összeálló értékeket is látni akarod:
+
+\begin{lstlisting}
+velran-server \
+  --config /usr/local/etc/velran/server.toml \
+  --print-effective-config
+\end{lstlisting}
+
+A \code{--check-config} nem dependency integration teszt. Egy szintaktikailag helyes DB URL mellett a DB még lehet elérhetetlen; ezért van külön readiness és deployment smoke teszt.
+
+\section{Migráció: status, verify, apply, verify}
+
+Adatbázis-változásnál a tesztelési folyamat része maga a migrációs állapot is:
+
+\begin{lstlisting}
+velran-cli migrate status \
+  --dir migrations \
+  --db-url-file /run/secrets/velran/migration-db-url
+
+velran-cli migrate verify \
+  --dir migrations \
+  --db-url-file /run/secrets/velran/migration-db-url
+\end{lstlisting}
+
+Deploymentben a jó sorrend:
+
+\begin{lstlisting}
+source/config check
+-> migration verify
+-> migration apply
+-> migration verify
+-> application rollout
+-> readiness
+-> smoke test
+\end{lstlisting}
+
+A már alkalmazott migration fájlt ne módosítsd azért, hogy a teszt újra zöld legyen. Új változást új migrationben vezess be.
+
+\section{Üzleti teszt: állapotot bizonyíts, ne implementációt}
+
+Egy CRUD vagy CMS action tesztjének ne az legyen a lényege, hogy ``meghívódott-e ez a belső függvény''. A kívülről megfigyelhető állapotot ellenőrizd.
+
+Például cikkpublikálásnál:
+
+\begin{enumerate}
+  \item hozz létre draft cikket;
+  \item autentikálj Publisher szerepkörrel;
+  \item küldd el a publish actiont;
+  \item ellenőrizd a redirectet;
+  \item olvasd vissza a cikket és ellenőrizd a \code{Published} állapotot;
+  \item ellenőrizd a business audit rekordot;
+  \item ellenőrizd, hogy a publikus oldal már az új állapotot adja;
+  \item cache-elt route esetén ellenőrizd az invalidációt is.
+\end{enumerate}
+
+Ez a teszt akkor is értékes marad, ha később belül átszervezed a query-ket vagy a modulstruktúrát.
+
+\section{Adatbázisteszt: SQLite nem bizonyít mindent}
+
+A gyors fejlesztői tesztben a külön ideiglenes SQLite adatbázis kényelmes. De ha production PostgreSQL vagy MariaDB, legalább a release/integration körben a valódi backendet is teszteld.
+
+Különösen érzékeny területek:
+
+\begin{itemize}
+  \item tranzakciós viselkedés;
+  \item constraint és unique conflict;
+  \item konkurens módosítás és optimistic locking;
+  \item index/lekérdezési terv;
+  \item migration DDL;
+  \item timeout és connection availability.
+\end{itemize}
+
+A backend-független typed query contract sok hibát kizár, de a backend működését nem teszi azonossá.
+
+\section{Auth és authorization tesztmátrix}
+
+Egy védett actionnél legalább a következő eseteket érdemes explicit tesztelni:
+
+\begin{longtable}{L{0.42\textwidth}L{0.44\textwidth}}
+\toprule
+Eset & Elvárt eredmény \\
+\midrule
+Nincs session & login/auth elutasítás \\
+Érvényes user, nincs megfelelő role & authorization deny \\
+Megfelelő role & sikeres művelet \\
+MFA-köteles route, nincs MFA & MFA elutasítás \\
+Lejárt vagy visszavont session & új autentikáció szükséges \\
+Hibás CSRF token state change-nél & kérés elutasítva \\
+Objektum nem a useré & object authorization deny \\
+Admin/engedélyezett actor & sikeres művelet \\
+\bottomrule
+\end{longtable}
+
+LDAP/LDAPS vagy Redis használatakor legyen valódi dependency integration teszt is. Egy mock nem bizonyít TLS hostname validationt, hálózati timeoutot vagy Redis fail-closed viselkedést.
+
+\section{Fájl, média, API és cache tesztek}
+
+Ezeknél a happy path különösen kevés.
+
+\subsection*{Upload és média}
+
+Teszteld legalább:
+
+\begin{itemize}
+  \item a megengedett kis fájlt;
+  \item byte-limit túllépést;
+  \item kép pixel-limit túllépést;
+  \item hibás/támadó fájlnevet;
+  \item path traversal/symlink escape elutasítást;
+  \item félbeszakadt upload cleanupot.
+\end{itemize}
+
+\subsection*{JSON/CORS}
+
+Teszteld a helyes JSON mellett a hibás content type-ot, duplikált kulcsot, ismeretlen mezőt, \code{Accept} negotiationt, preflightot és credentialed state change esetén a CSRF/CORS együttműködését.
+
+\subsection*{Cache és rate limit}
+
+Teszteld, hogy userfüggő oldal nem válik public cache-é, módosítás után a cache invalidálódik, több instance esetén a shared state tényleg közös, és Redis kiesésnél a security szempontból választott fail-closed viselkedés érvényesül.
+
+\section{HTTP hibakód nem egyenlő programhibával}
+
+A kliensnek adott státusz a szerződés része. Tipikus esetek:
+
+\begin{longtable}{L{0.61\textwidth}r}
+\toprule
+Helyzet & HTTP \\
+\midrule
+Hibás request-contract vagy malformed input & 400 \\
+Nincs érvényes autentikáció JSON/API route-on & 401 \\
+Az actor/policy nem engedélyezi a műveletet & 403 \\
+Nem található erőforrás & 404 \\
+Rossz HTTP method & 405 \\
+Nem elfogadható representation & 406 \\
+Konkurens módosítás / \code{Changed} nulla sor & 409 \\
+Túl nagy request/upload & 413 \\
+Rossz vagy hiányzó body content type & 415 \\
+Host/trust boundary mismatch & 421 \\
+Named form mezőhiba, újrarendereléssel & 422 \\
+HTTPS szükséges & 426 \\
+Rate limit & 429 \\
+Túl nagy request header & 431 \\
+Belső, nem klasszifikált szerverhiba & 500 \\
+Dependency vagy request resource átmenetileg nem elérhető & 503 \\
+\bottomrule
+\end{longtable}
+
+A kliensnek soha ne küldj SQL-t, secretet, fizikai filesystem pathot, session tokent vagy stack trace-et. A részletes diagnosztika a szerveroldali logban marad, request ID-val korrelálva.
+
+\subsection*{A státusz és a válasz formátuma külön szerződés}
+
+Ugyanaz az üzleti helyzet eltérő reprezentációt kaphat HTML és JSON felületen. Ez nem inkonzisztencia: a státusz a hibakategóriát, a reprezentáció pedig a klienssel kötött felületi szerződést fejezi ki.
+
+\begin{longtable}{L{0.27\textwidth}L{0.31\textwidth}L{0.31\textwidth}}
+\toprule
+Helyzet & HTML route & JSON route \\
+\midrule
+\endhead
+Nincs session & \code{303 See Other} a beépített login oldalra & \code{401} + JSON error envelope \\
+\addlinespace
+Authorization tiltás & \code{403} & \code{403} + JSON error envelope \\
+\addlinespace
+Optimistic-lock konfliktus & \code{409} konfliktusoldal, \code{no-store} & \code{409} + JSON \code{error=conflict} \\
+\addlinespace
+Named form validation & \code{422}, a form újrarenderelve mezőhibákkal & nem JSON body-mód; a body-contractok kölcsönösen kizártak \\
+\addlinespace
+Nem található record & \code{404} & \code{404} + JSON error envelope \\
+\bottomrule
+\end{longtable}
+
+A sikeres mutáló HTML action tipikusan \code{303 See Other} választ használ a Post/Redirect/Get mintához. A \code{303} redirect tehát nem hiba, hanem a böngészős vezérlési folyamat része.
+
+
+\section{Exceptional state-ek exhaustív tesztelése}
+
+A Velran zárt sum type-jai security-releváns exceptional state-et compile-time tesztelhetővé tesznek. A \code{match} nem ad catch-all wildcardot, ezért új variant hozzáadása minden érintett match site review-ját kikényszeríti.
+
+Critical transactionnél legyen teszt mindhárom outcome-ra:
+
+\begin{itemize}
+  \item \code{Committed}: success path és stabil replay state;
+  \item \code{RolledBack}: a művelet nem történt meg, a public outcome biztonságos;
+  \item \code{CommitUnknown}: nincs automatikus side-effect retry, az unknown állapot explicit kezelt.
+\end{itemize}
+
+Negatív compiler teszt bizonyítsa azt is, hogy idempotens critical transaction outcome capture vagy exhaustive match nélkül reject.
+
+\section{Request ID-val hibakeresni}
+
+Ha egy HTTP kérés hibázik, a legjobb első diagnosztikai adat a szerver által generált request ID. A kliens válaszából vagy az access logból indulva:
+
+\begin{lstlisting}
+grep 'velran-...' /var/log/velran/access.log
+grep 'velran-...' /var/log/velran/server.log
+grep 'velran-...' /var/log/velran/audit.log
+\end{lstlisting}
+
+A három log más kérdésre válaszol:
+
+\begin{itemize}
+  \item access: mi érkezett és milyen státusszal végződött;
+  \item server: milyen technikai/runtime esemény történt;
+  \item audit: security vagy felhasználói policy döntés történt-e.
+\end{itemize}
+
+Ezt a diagnosztikai láncot érdemes automatizált teszt failure outputban is megőrizni.
+
+\section{Deployment smoke teszt}
+
+A CI zöld állapota nem bizonyítja, hogy a frissen telepített service ténylegesen elindult. Rollout után legalább:
+
+\begin{lstlisting}
+curl --fail --silent \
+  https://example.test/health/live
+
+curl --fail --silent \
+  https://example.test/health/ready
+
+curl --fail --silent \
+  https://example.test/
+\end{lstlisting}
+
+A smoke teszt legyen kicsi és nem destruktív. Ha state-changing végpontot is ellenőrzöl, használj erre elkülönített tesztadatot és idempotens cleanupot; ne a production tartalmon kísérletezz.
+
+\section{Mit jelent a repository \texttt{verify.sh}?}
+
+A Velran saját forrásfájában a teljes release-evidence belépési pontja:
+
+\begin{lstlisting}
+./verify.sh
+\end{lstlisting}
+
+Egyesíti a source checket a workspace Rust tesztjeivel, az \path{examples/} olvasásra szánt pozitív programjaival, a \path{tests/fixtures/} rejection/security fixture-jeivel, a \path{tests/manifests/} manifest-vezérelt corpus ellenőrzéseivel, valamint migrációs/auth/storage/runtime checkekkel és release artifact invariánsokkal.
+
+Ha magát a Velran implementációját módosítod, ez a release minimum. Ha csak egy saját \code{.vrn} alkalmazást fejlesztesz, a napi ciklus kisebb lehet, de a release folyamatodnak akkor is tartalmaznia kell source checket, migration/config ellenőrzést, a releváns integration teszteket és deploy utáni smoke tesztet.
+
+\section{Ajánlott fejlesztői ciklus}
+
+Egy hétköznapi feature fejlesztésére jó alap:
+
+\begin{lstlisting}
+1. domain/model valtozas megtervezese
+2. migration megirasa, ha kell
+3. velran-cli check main.vrn
+4. gyors alkalmazasteszt
+5. negativ/security esetek
+6. migration verify
+7. relevans integration teszt
+8. velran-server --config server.toml --check-config
+9. deploy stagingre
+10. readiness + HTTP smoke
+11. production rollout
+12. readiness + smoke + metrics/log ellenorzes
+\end{lstlisting}
+
+A sorrend lényege: a gyors és determinisztikus hibák bukjanak el korán, a drága környezeti tesztek csak azután fussanak.
+
+\section{Hibakeresési döntési sorrend}
+
+Amikor ``nem működik'', haladj következetesen:
+
+\begin{enumerate}
+  \item Lefordul? Futtasd a \code{velran-cli check} parancsot.
+  \item Érvényes a config? Futtasd a \code{--check-config} ellenőrzést.
+  \item Elindult a service? Nézd a service és server logot.
+  \item Él a process? Nézd a liveness endpointot.
+  \item Elérhetők a dependency-k? Nézd a readiness endpointot.
+  \item Eljut a kérés a route-ig? Nézd az access logot és request ID-t.
+  \item Policy dobja el? Nézd az audit logot és a trust-boundary státuszt (például forwarding 400, 401/403/421/426/429).
+  \item Runtime/dependency hibázik? Nézd a server logot és metrics-et.
+  \item Üzleti eredmény rossz? Reprodukálj izolált tesztadattal és ellenőrizd a tartós állapotot.
+\end{enumerate}
+
+Ez a sorrend sokkal gyorsabb, mint egyszerre kódot, proxy-konfigurációt és adatbázist módosítani.
+
+\section{Minimum release checklist alkalmazáshoz}
+
+\begin{itemize}
+  \item \code{velran-cli check} zöld;
+  \item migration history verify zöld;
+  \item server config check zöld;
+  \item a kritikus business flow-k pozitív és negatív tesztje zöld;
+  \item auth/authorization/security regressziós esetek zöldek;
+  \item productionnal azonos DB/Redis/TLS irányú integration teszt zöld;
+  \item backup/restore readiness ismert;
+  \item staging readiness és smoke zöld;
+  \item rollout után readiness, smoke, log és metrics ellenőrzött.
+\end{itemize}
+
+A tesztelés célja nem a százszázalékos sorlefedettség, hanem az, hogy a rendszer fontos szerződéseire legyen ismételhető bizonyíték: \textbf{mit engedünk, mit tiltunk, milyen állapotot hozunk létre, és hogyan viselkedünk dependency-hiba esetén}.
+
+\section{Gyakorlat: vezess le negatív teszteket a határokból}
+\paragraph{Gyakorlási mód: önálló.} Használd az előszóban meghatározott önálló módszert.
+
+Minden megbízható átmenethez írj legalább egy tesztet, ahol az átmenetet el kell utasítani: hibás input, hiányzó autorizáció, stale verzió, elfogyott budget vagy elérhetetlen dependency. A negatív teszt akkor értékes, ha magát a határt bizonyítja, nem csak egy hibaüzenetet.
+
+\section{Tipikus hiba: csak sikeres handlereket tesztelünk}
+Egy security-first framework értékének nagy része abból jön, amit nem hajlandó végrehajtani. A compile-time rejection, verification failure és runtime failure teszteket kezeld külön, hogy egy regresszió ne toljon csendben későbbi és gyengébb fázisba egy védelmet.
+
+\section{Folyamatos mintaprojekt: Secure Notes}
+Készíts kompakt tesztmátrixot create, view, edit, publish és delete műveletekre. Legyen benne másik felhasználó azonosítója, stale edit verzió, érvénytelen input bound és integration failure. A projekt így már nemcsak a sikert, hanem az elvárt visszautasítást is bizonyítja.

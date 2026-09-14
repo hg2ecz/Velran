@@ -1,0 +1,362 @@
+\chapter{A Velran CLI és a napi fejlesztői/üzemeltetői workflow}
+
+\noindent\textbf{Tanulási út: Gyors út: operátori referencia.} Használd következetesen a CLI-t check, build, verification és operátori workflow-khoz.\par\medskip
+
+A Velran két telepített programot ad: a hosszú életű \code{velran-server} processzt és a rövid életű \code{velran-cli} operátori eszközt. A kettőt érdemes következetesen külön kezelni. A szerver HTTP-t szolgál ki és runtime policyt érvényesít; a CLI forrást ellenőriz, migrációt kezel és local-auth adminisztrációt végez.
+
+Ez a fejezet nem új nyelvi feature-öket vezet be. Azt mutatja meg, hogyan áll össze a napi munka egy ismételhető parancsfolyamattá a szerkesztéstől a production ellenőrzésig.
+
+\section{Melyik feladathoz melyik program?}
+
+\begin{longtable}{L{0.29\textwidth}L{0.23\textwidth}L{0.39\textwidth}}
+\toprule
+Feladat & Eszköz & Megjegyzés \\
+\midrule
+Velran forrás ellenőrzése & \code{velran-cli check} & Compiler-szintű, nem indít HTTP szervert. \\
+Migration status/verify/apply & \code{velran-cli migrate} & DB URL secret fájlból. \\
+Local-auth store admin & \code{velran-cli auth} & SQLite identity store, operátori művelet. \\
+Server config preflight & \code{velran-server} & \code{--check-config}: config + app + lokális policy/resource fájlok ellenőrzése. \\
+Effective config megtekintése & \code{velran-server} & \code{--print-effective-config}; a secret értékek redaktálva maradnak. \\
+Webalkalmazás futtatása & \code{velran-server} & Hosszú életű processz, proxy vagy közvetlen HTTPS mögött. \\
+Workspace release build & \code{cargo build} & \code{--locked --release} módban készül a két bináris. \\
+Platform teljes verifikációja & \code{./verify.sh} & A Velran repository release-evidence része, nem minden alkalmazás saját parancsa. \\
+\bottomrule
+\end{longtable}
+
+A production példákban a programok helye:
+
+\begin{lstlisting}
+/usr/local/bin/velran-cli
+/usr/local/bin/velran-server
+\end{lstlisting}
+
+A shell normál \code{PATH} beállítása mellett ezért a további példákban elég a rövid programnevet használni.
+
+\section{A CLI nem a szerver alternatívája}
+
+A \code{velran-cli} nem indít listenert, nem szolgál ki route-ot és nem tart fenn session state-et. Egy parancsot végrehajt, majd kilép. Ez biztonsági szempontból is hasznos: migration vagy user-admin művelethez nem kell külön admin HTTP endpointot nyitni.
+
+A másik irányban a \code{velran-server} nem futtat automatikus migrationt startupkor. A schema változás explicit operátori döntés marad.
+
+\section{Az első parancs: \texttt{velran-cli check}}
+
+Napi fejlesztésben minden érdemi forrásmódosítás után ez legyen az első kapu:
+
+\begin{lstlisting}
+velran-cli check main.vrn
+\end{lstlisting}
+
+Siker esetén a CLI rövid összegzést ír a fordító által látott model-, query-, page-, action- és route-számról. Hiba esetén nem érdemes szervert indítani: előbb a compile-time contractot kell kijavítani.
+
+A \code{check} többek között olyan hibákat fog meg, mint:
+
+\begin{itemize}
+  \item ismeretlen típus vagy hibás nyelvi szintaxis;
+  \item query projection és model shape eltérése;
+  \item hibás typed bind/decode contract;
+  \item route/policy vagy resource profile hivatkozási hiba, amely compiler-szinten bizonyítható;
+  \item tiltott raw HTML/SQL jellegű konstrukció.
+\end{itemize}
+
+A \code{check} viszont nem bizonyítja, hogy a DB vagy Redis hálózaton elérhető, és nem helyettesíti a HTTP integration tesztet.
+
+\section{Forrásfából futtatás és telepített CLI}
+
+A Velran repository fejlesztésekor ugyanaz a program Cargo-n keresztül is futtatható:
+
+\begin{lstlisting}
+cargo run --locked -p velran-cli -- check main.vrn
+\end{lstlisting}
+
+Ez fejlesztői kényelmi forma. Production runbookban az immutable, telepített release-binárist használd:
+
+\begin{lstlisting}
+/usr/local/bin/velran-cli check /srv/velran/app/main.vrn
+\end{lstlisting}
+
+Ne keverd a kettőt egy deploymentben. A production művelet legyen egyértelműen egy release artifacthoz köthető.
+
+\section{Migration workflow}
+
+A migration parancs három műveletet ad:
+
+\begin{description}
+  \item[\code{status}] megmutatja az applied és pending migrationöket;
+  \item[\code{verify}] ellenőrzi a migration historyt és checksum-contractot;
+  \item[\code{apply}] lock mellett alkalmazza a pending migrationöket.
+\end{description}
+
+A DB URL nem parancssori plaintext secret, hanem egy egysoros secret fájl:
+
+\begin{lstlisting}
+/run/secrets/velran/db-url
+\end{lstlisting}
+
+A tipikus ellenőrzési sorrend:
+
+\begin{lstlisting}
+velran-cli migrate status \
+  --dir migrations \
+  --db-url-file /run/secrets/velran/db-url
+
+velran-cli migrate verify \
+  --dir migrations \
+  --db-url-file /run/secrets/velran/db-url
+\end{lstlisting}
+
+Jóváhagyott schema-változásnál:
+
+\begin{lstlisting}
+velran-cli migrate apply \
+  --dir migrations \
+  --db-url-file /run/secrets/velran/db-url \
+  --lock-timeout-secs 30
+
+velran-cli migrate verify \
+  --dir migrations \
+  --db-url-file /run/secrets/velran/db-url
+\end{lstlisting}
+
+A \code{--lock-timeout-secs} értéke pozitív egész. Ha a migration lock nem szerezhető meg a megadott időn belül, a művelet hibával álljon meg; ne legyen párhuzamos schema-módosítás.
+
+\subsection*{Az \texttt{--allow-insecure-db} nem kényelmi kapcsoló productionre}
+
+A migration CLI is ugyanazt a secure-by-default szemléletet követi, mint a szerver. Az \code{--allow-insecure-db} csak tudatos, kontrollált környezetben használható. Productionben a megfelelő TLS/DB security legyen az alapértelmezett, ne egy állandósult bypass flag.
+
+\section{Local-auth adminisztráció}
+
+Ha az alkalmazás local authot használ, az identity store kezelése szintén a CLI feladata. Először inicializálni kell a store-t:
+
+\begin{lstlisting}
+velran-cli auth init \
+  --db-url-file /run/secrets/velran/local-auth-db-url
+\end{lstlisting}
+
+Felhasználó létrehozása:
+
+\begin{lstlisting}
+velran-cli auth user-add \
+  --db-url-file /run/secrets/velran/local-auth-db-url \
+  --username alice \
+  --password-file /run/secrets/velran/bootstrap-password \
+  --role Editor
+\end{lstlisting}
+
+Ha nincs \code{--role}, új usernél a CLI a \code{User} role-t használja. Több role több \code{--role} kapcsolóval adható meg.
+
+Jelszócsere és account állapot:
+
+\begin{lstlisting}
+velran-cli auth password-set \
+  --db-url-file /run/secrets/velran/local-auth-db-url \
+  --username alice \
+  --password-file /run/secrets/velran/new-password
+
+velran-cli auth disable \
+  --db-url-file /run/secrets/velran/local-auth-db-url \
+  --username alice
+
+velran-cli auth enable \
+  --db-url-file /run/secrets/velran/local-auth-db-url \
+  --username alice
+\end{lstlisting}
+
+Role-csere:
+
+\begin{lstlisting}
+velran-cli auth roles-set \
+  --db-url-file /run/secrets/velran/local-auth-db-url \
+  --username alice \
+  --role Editor --role Publisher
+\end{lstlisting}
+
+A \code{roles-set} a megadott role-listát tekinti az új állapotnak; az operátor ne úgy kezelje, mint egyetlen role inkrementális hozzáadását.
+
+\section{TOTP adminisztráció különösen érzékeny művelet}
+
+TOTP enrolment:
+
+\begin{lstlisting}
+velran-cli auth totp-enroll \
+  --db-url-file /run/secrets/velran/local-auth-db-url \
+  --username alice \
+  --recovery-count 8
+\end{lstlisting}
+
+A parancs kiírja a TOTP secretet, az \code{otpauth} URI-t és az egyszer megjelenő recovery code-okat. Emiatt ezt ne futtasd CI logban, shell transcriptben vagy közös terminálon. Az operátori folyamatnak biztosítania kell a secret és recovery code-ok azonnali, biztonságos átadását és tárolását.
+
+TOTP kikapcsolása:
+
+\begin{lstlisting}
+velran-cli auth totp-disable \
+  --db-url-file /run/secrets/velran/local-auth-db-url \
+  --username alice
+\end{lstlisting}
+
+\section{A secret fájl is input contract}
+
+A CLI a DB URL és password fájlokat nem korlátlanul olvassa. A jelenlegi contract szerint a secret URL fájl:
+
+\begin{itemize}
+  \item regular file;
+  \item nem symlink;
+  \item legfeljebb 16 KiB;
+  \item pontosan egy nem üres sort tartalmaz.
+\end{itemize}
+
+A password file szintén regular, nem symlink fájl; legfeljebb 4096 byte, egyetlen sor, a jelszó pedig 12--1024 byte közötti.
+
+Ezért ne process substitutionnel, symlinkkel vagy több soros secret template-tel próbáld megkerülni a contractot. A CLI boundary szándékosan szűk.
+
+\section{Server preflight: a CLI után a szerver saját ellenőrzése jön}
+
+A forrás és migration ellenőrzése után a production konfigurációt a szerverrel validáld:
+
+\begin{lstlisting}
+velran-server \
+  --config /usr/local/etc/velran/server.toml \
+  --check-config
+\end{lstlisting}
+
+Ez beolvassa a trusted TOML-t, lefordítja az alkalmazást, ellenőrzi a route-rate/resource policy hivatkozásokat, TLS konfigurációt, valamint a deklarált storage/static rootok lokális feltételeit.
+
+Ha a precedence-t vagy az effektív policyt kell auditálni:
+
+\begin{lstlisting}
+velran-server \
+  --config /usr/local/etc/velran/server.toml \
+  --print-effective-config
+\end{lstlisting}
+
+A kimenet kifejezetten secret-redacted. Ettől még operátori információ, ezért automation logban csak indokolt retentionnel tárold.
+
+\section{Napi fejlesztői ciklus}
+
+Egy kis vagy közepes alkalmazásnál jó alapfolyamat:
+
+\begin{lstlisting}
+edit .vrn source
+-> velran-cli check main.vrn
+-> velran-cli migrate verify
+-> if schema changed: migrate status/apply/verify on dev DB
+-> velran-server --config server.dev.toml --check-config
+-> start velran-server
+-> HTTP/form/JSON smoke tests
+-> automated application tests
+\end{lstlisting}
+
+A sorrend lényege, hogy az olcsóbb és determinisztikusabb hibákat előbb fogjuk meg. Nincs értelme HTTP smoke tesztet futtatni olyan forrásra, amely már compiler-szinten hibás.
+
+\section{Application release workflow}
+
+Egy production release minimális operátori folyamata:
+
+\begin{lstlisting}
+immutable release selected
+-> velran-cli check deployed main.vrn
+-> velran-server --check-config
+-> velran-cli migrate status
+-> velran-cli migrate verify
+-> backup/recovery gate
+-> approved velran-cli migrate apply, if pending
+-> velran-cli migrate verify
+-> controlled service restart/switch
+-> /health/live
+-> /health/ready
+-> application smoke test
+-> logs + metrics + audit review
+\end{lstlisting}
+
+A migration \code{apply} az egyetlen mutáló schema-lépés ebben a folyamatban; külön approval pontként kezeld.
+
+\section{A Velran platform release workflowja más}
+
+Ha magát a Velran repositoryt buildeljük, a Rust workspace release-evidence is része a folyamatnak:
+
+\begin{lstlisting}
+./verify.sh
+cargo build --locked --release \
+  -p velran-server -p velran-cli
+\end{lstlisting}
+
+A kész binárisok:
+
+\begin{lstlisting}
+target/release/velran-server
+target/release/velran-cli
+\end{lstlisting}
+
+Telepítés:
+
+\begin{lstlisting}
+sudo install -m 0755 target/release/velran-server \
+  /usr/local/bin/velran-server
+sudo install -m 0755 target/release/velran-cli \
+  /usr/local/bin/velran-cli
+\end{lstlisting}
+
+A saját Velran webalkalmazásod napi workflowjához nem kell minden alkalommal a nyelv teljes Rust workspace-ét verifikálni. Ott a saját source-, migration-, config- és integration tesztjeid a relevánsak.
+
+\section{Automatizálás: read-only és mutáló lépések legyenek külön}
+
+CI/CD-ben különítsd el a biztonságosan ismételhető ellenőrzéseket a state-et módosító műveletektől.
+
+\textbf{Read-only/preflight:}
+
+\begin{lstlisting}
+velran-cli check main.vrn
+velran-cli migrate status \
+  --dir migrations --db-url-file /run/secrets/velran/db-url
+velran-cli migrate verify \
+  --dir migrations --db-url-file /run/secrets/velran/db-url
+velran-server --config /usr/local/etc/velran/server.toml \
+  --check-config
+velran-server --config /usr/local/etc/velran/server.toml \
+  --print-effective-config
+health/readiness GET
+\end{lstlisting}
+
+\textbf{Mutáló/operator-approved:}
+
+\begin{lstlisting}
+velran-cli migrate apply \
+  --dir migrations --db-url-file /run/secrets/velran/db-url
+velran-cli auth init \
+  --db-url-file /run/secrets/velran/local-auth-db-url
+# A tobbi auth muvelet ugyanilyen explicit --db-url-file
+# mellett kapja a sajat --username/--password-file/--role opcioit.
+\end{lstlisting}
+
+Az auth-admin parancsokat általában ne tedd automatikus application deployment pipeline-ba. Ezek identity-admin műveletek, külön audit- és hozzáférési boundaryval.
+
+\section{Gyakori hibák}
+
+\begin{description}
+  \item[\code{check} sikeres, a server mégsem indul] A compile-time contract rendben van, de konfigurációs, TLS-, filesystem- vagy policy-startup hiba van. Futtasd a \code{--check-config} ellenőrzést és olvasd a server logot.
+  \item[\code{--check-config} sikeres, readiness piros] A lokális config helyes, de runtime dependency -- például DB vagy Redis -- nem érhető el vagy nem egészséges.
+  \item[\code{migrate verify} hibázik] Ne futtass reflexből \code{apply}-t. Előbb tisztázd a history/checksum eltérést.
+  \item[Auth CLI nem nyitja meg a DB-t] Ellenőrizd, hogy local-auth SQLite URL-t adtál-e, és a store inicializálva van-e.
+  \item[Secret file hibát kap] Ne lazítsd a fájlcontractot; regular, nem symlink, egysoros secretet adj.
+\end{description}
+
+\section{Operátori emlékeztető}
+
+A konkrét parancsok deploymentenként eltérnek; a sorrend invariáns:
+
+\begin{lstlisting}
+source -> schema -> config -> approved mutation
+-> service -> health -> evidence
+\end{lstlisting}
+
+A tényleges parancsokat tartsd verziózott runbookban. Flaget, secret-file útvonalat, unit nevet vagy approval pontot ne emlékezetből rekonstruálj.
+
+\section{Gyakorlat: a biztonságos út legyen a legrövidebb}
+\paragraph{Gyakorlási mód: üzemeltetési szcenárió.} Használd az előszóban meghatározott üzemeltetési módszert.
+
+Írd le a fejlesztő vagy operátor check, test, release verification, config validation és startup parancsait. Távolítsd el a dokumentálatlan shortcutokat, és preferáld azokat a parancsokat, amelyek fail-closed módon reagálnak stale lockfile-ra, policy-ra vagy release evidence-re.
+
+\section{Tipikus hiba: megjegyzett parancssorokra támaszkodunk}
+Ha egy biztonságos release öt opcionális flag pontos felidézésétől függ, a workflow törékeny. Az invariánsokat őrző parancssorokat tedd verziózott scriptbe, és legyen az output review szempontból érthető.
+
+\section{Operátori checkpoint: Secure Notes}
+Készíts egyoldalas command runbookot a Secure Notes check, build, verify és start lépéseire. Egy új operátor tudja követni anélkül, hogy emlékezetből kellene tudnia, melyik lépés security-critical.

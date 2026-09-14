@@ -1,0 +1,12 @@
+[package]
+name = "velran-cli"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+authors = ["Zsolt Krüpl"]
+
+[dependencies]
+auth = { path = "../auth" }
+compiler = { path = "../compiler" }
+data = { path = "../data" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

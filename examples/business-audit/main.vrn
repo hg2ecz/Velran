@@ -1,0 +1,53 @@
+enum ArticleStatus {
+    Draft
+    Review
+    Published
+    Archived
+}
+
+object Article {
+    model {
+        id: i64
+        status: ArticleStatus
+        version: i64
+        authorUsername: String
+    }
+
+    #[query]
+fn byId(db: Db, id: i64) -> Result<Article, DbError> sql {
+        SELECT id, status, version, authorUsername
+        FROM articles
+        WHERE id = :id
+    }
+
+    #[query]
+fn publishChanged(tx: Transaction, id: i64, version: i64) -> Result<Changed, DbError> mutates Article by id sql {
+        UPDATE articles
+        SET status = 'Published', version = version + 1
+        WHERE id = :id AND version = :version
+    }
+
+    #[action]
+fn publish(ctx: ActionContext, db: Db, id: i64, version: i64) -> Result<Redirect, PageError> {
+        let article = Article.byId(db, id)?;
+        authorize article owner authorUsername or role Publisher;
+        transaction db {
+            Article.publishChanged(tx, article.id, version)?;
+            audit Article id action publish from article.status to ArticleStatus::Published;
+        }
+        return Ok(redirect(adminArticles()));
+    }
+}
+
+route articlePublish POST "/admin/articles/:id<i64>/publish"
+    form version<i64>
+    auth role Publisher
+    => Article.publish;
+
+
+#[page]
+fn adminArticles(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {<main><h1>Article administration</h1></main>});
+}
+
+route adminArticles GET "/admin/articles" auth role Publisher => adminArticles;

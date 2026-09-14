@@ -1,0 +1,255 @@
+\chapter*{Előszó}
+
+\paragraph{Projektazonosság.} A hivatalos magyar megfogalmazás: \textbf{Velran --- Rust szintaxisú webalkalmazás-fejlesztő nyelv és szerver, ahol a biztonság az első.} A ``Rust Web'' szókapcsolat rövid leírásként használható, de nem külön projektnév.
+
+\addcontentsline{toc}{chapter}{Előszó}
+
+Ez a könyv azoknak a webfejlesztőknek szól, akik először találkoznak az \velran{} nyelvvel. Nem a szintaxissal kezd, hanem magával az alkalmazással: üzleti adatokkal, engedélyezett műveletekkel és HTTP-határokkal.
+
+A tanulási sorrend szándékos: előbb mentális modell és toolchain, utána egy kicsi end-to-end alkalmazás, majd a nyelv, adatkezelés, authentication, fájlok, API-k, security és production mélyebb részei. A CLI és a teljes \code{server.toml} anyag a könyv végén referencia, nem előfeltétel.
+
+
+\section*{Kiadási és verifikációs állapot}
+
+Ez a kiadás a jelenlegi Velran implementáció \textbf{Ellenőrzött fejlesztési mérföldkövét} rögzíti. A jelenlegi forrásfán a megbízható fejlesztői környezetben sikeresen lefutott a \code{cargo fmt}, a teljes workspace tesztkészlet, a \code{./verify.sh}, valamint a helyi tesztkiszolgálás. A könyv nyelvi, package- és security-leírásai ezt az ellenőrzött forrásfát követik.
+
+Ez a mérföldkő tudatosan szűkebb állítás, mint a production release-ready minősítés. A célkörnyezethez kötött deployment-, recovery- és további performance evidence, a secret-provisioning, a TLS/reverse-proxy beállítás és az operátori elfogadás továbbra is a konkrét production környezet feladata. A dokumentáció az ellenőrzött repository-baseline-t rögzíti; nem helyettesíti a production change controlt és a környezetfüggő bizonyítékokat.
+
+\section*{Alapfogalmak}
+
+A könyv néhány angol eredetű technikai szót következetesen használ. Már az elején érdemes ugyanazt érteni alattuk:
+
+\begin{description}
+  \item[\code{model}] fordító által ismert, névvel ellátott typed adatalak; nem válik automatikusan adatbázistáblává vagy sémává;
+  \item[typed] az adat alakja és típusa a fordító számára ismert, nem csak futás közben derül ki;
+  \item[capability] explicit hozzáférési lehetőség egy erőforráshoz vagy érzékeny művelethez, például \code{Db}, \code{Transaction} vagy \code{AppFs};
+  \item[policy] a külső határon érvényes szabály, például auth, rate limit, CORS vagy trusted proxy;
+  \item[runtime] a lefordított Velran programot végrehajtó szerveroldali környezet, amely a limiteket és capability-határokat is kikényszeríti.
+\end{description}
+
+A későbbi fejezetek ezeket pontosítják, de a fenti jelentés első olvasásra elég.
+
+
+\section*{Hogyan olvasd a könyvet?}
+
+Első olvasáskor ne próbáld megjegyezni az összes konfigurációs kulcsot vagy production limitet. Az első cél az, hogy három kérdésre mindig tudj válaszolni:
+
+\begin{enumerate}
+  \item \emph{Milyen typed adatot kezel ez a feature?}
+  \item \emph{Milyen művelet olvassa vagy módosítja ezt az adatot?}
+  \item \emph{Milyen authority vagy capability engedi ezt a műveletet?}
+\end{enumerate}
+
+Ha ez a három kérdés tiszta, a route, a form, az SQL, az auth és a konfiguráció már ugyanannak a modellnek a különböző határai lesznek, nem egymástól független trükkök.
+
+A könyvben végig hasznos szétválasztani, mit bizonyít a Velran, és mit kell továbbra is az alkalmazás tervezőjének eldöntenie:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}Y Y@{}}
+\toprule
+\textbf{Velran/platform felelőssége} & \textbf{Alkalmazás/operator felelőssége} \\
+\midrule
+Typed boundaryk, escaping, capability check, bounded erőforrások, secure session mechanika & Üzleti szabályok, ki melyik objektumon mit tehet, retention és recovery célok \\
+Fail-closed compiler/runtime invariantok & A helyes access policy és production topológia kiválasztása \\
+Biztonságos SQL-, redirect-, upload-, egress- és crypto-primitívek & Annak eldöntése, mikor megengedett az üzleti művelet és mi történjen domain conflict esetén \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+A modell security plumbingot vesz le a fejlesztőről; az alkalmazás üzleti authorization szabályait viszont nem találja ki helyette.
+
+\subsection*{Válassz tanulási útvonalat}
+
+Nem kell minden fejezetet azonos prioritással olvasnod. Válassz az alábbi két út közül; később bármikor átválthatsz, ha változik a szereped vagy az alkalmazás igénye.
+
+\paragraph{Gyors webfejlesztői út.}
+Ezt válaszd, ha mielőbb hagyományos, autentikált Velran webalkalmazást szeretnél építeni és kiadni. A javasolt sorrend:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}L{0.23\textwidth} Y@{}}
+\toprule
+\textbf{Szakasz} & \textbf{Fejezetek és eredmény} \\
+\midrule
+Mentális modell és első vertikális szelet & 1--4.: értsd meg a határokat, telepítsd/futtasd az eszközöket, építs egy teljes request-to-response utat, és tanuld meg a Rust-szerű nyelvi/HTTP surface-t. \\
+Perzisztens alkalmazás & 5--7.: formok/CRUD, adatbázis-invariánsok, autentikáció és objektumszintű authorization. \\
+Válaszd ki a szükséges webes surface-t & 8., ha fájlt/médiát kezelsz; 9. JSON/API munkához; 10. static asset és böngészős enhancement esetén. Ezek ágak, nem egymás kötelező előfeltételei. \\
+Tedd megbízhatóvá & 14--15.: tesztelés/hibadiagnosztika, majd az összefoglaló security-hardening modell. \\
+Add ki és üzemeltesd & 18--20.: production deployment, recovery és CLI workflow. Zárásként végezd el a 23. fejezet release-readiness checklistjét. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+A 11--13. és 16--17. fejezetet addig elhalaszthatod, amíg ténylegesen nincs szükséged nagyobb modulszerkezetre, külső integrációra, cache/skálázásra vagy mélyebb observabilityre. A 15. fejezetet viszont production kiadás előtt ne hagyd ki.
+
+\paragraph{Teljes Velran út.}
+Olvasd végig sorrendben az 1--23. fejezetet. Ez az út azoknak szól, akik az alkalmazásfejlesztés mellett architektúráért, security review-ért, platformintegrációért, skálázásért, observabilityért vagy production üzemeltetésért is felelősek lesznek. A teljes út az opcionális webes feature-öket és az operátori anyagot is összefüggéseiben tanítja.
+
+\paragraph{Átváltás a két út között.}
+A gyors út nem gyengébb security mód: csak a témakörök szélességéből hagy ki, az invariantokból nem. Ha egy kihagyott capability bekerül az alkalmazásodba, implementálás előtt olvasd el az adott fejezetet, oldd meg a gyakorlatát, és használd a canonical companion példát. Bármikor folytathatod sorrendben a teljes úton anélkül, hogy újra kellene tanulnod az addigi anyagot.
+
+\section*{Használd újra a Rust-tudásodat}
+
+A Velran szándékosan nem egy második általános célú nyelv, amelyet a Rust mellett újra meg kell tanulnod. A hétköznapi számításoknál tartsd meg a Rust mentális modelljét mindenütt, ahol a webes biztonsági contract nem igényel framework-tulajdonú szerkezetet. A visszatérő \textbf{Rust $\rightarrow$ Velran} blokkok három dolgot mutatnak: mi vihető át változatlanul, mit ad hozzá a framework egy határon, és mit nem érdemes külön Velran-fogalomként újratanulni.
+
+Ha már érted a \code{let}, \code{let mut}, struct, enum, \code{Vec<T>}, \code{Option<T>}, \code{Result<T,E>}, \code{match}, metódushívás, modul és \code{?} hibaterjesztés alapjait, ezeket használd tovább. Az új tanulási energiát a route-okra, typed request határokra, querykre, capabilitykre, authorizationre és production policyra fordítsd. Az unsafe Rust, kézi FFI, allocator-internals, proc-macro írás és alacsony szintű async-runtime mechanika nem előfeltétele a hétköznapi Velran webfejlesztésnek.
+
+
+\section*{Minimum Rust a Velranhoz}
+
+Nem kell széles körű Rust-tudás ahhoz, hogy Velran alkalmazást kezdj építeni. A gyors webfejlesztői úthoz néhány hétköznapi Rust-fogalom biztos ismerete elég. Ennek a rövid ismétlőnek nem az a célja, hogy a Rustot a Velran mellett külön megtanítsa, hanem hogy megmutassa, mikor elegendő már a meglévő Rust-intuíciód.
+
+\subsection*{1. Bindingok és hétköznapi értékek}
+
+Tudd olvasni az immutable bindingokat és az alkalmanként szükséges mutable lokálist. Alapesetben maradj immutable adatfolyamnál, és csak akkor használj módosítható lokálist, ha a helyi számítás ténylegesen állapotot változtat.
+
+\begin{lstlisting}[language=Velran]
+let title = "Release notes";
+let mut retries = 0;
+retries = retries + 1;
+\end{lstlisting}
+
+Velran webfejlesztéshez ez elég a legtöbb lokális számítás megértéséhez. Az első page vagy action megírása előtt nem kell az ownership ritka peremeseteit tanulmányoznod.
+
+\subsection*{2. A négy alap adattípus: String, Vec, Option, Result}
+
+A hétköznapi alkalmazáskód nagy részét négy típus viszi:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}L{0.20\textwidth} Y@{}}
+\toprule
+\textbf{Rust-fogalom} & \textbf{Mit jelent Velran alkalmazáskódban?} \\
+\midrule
+\code{String} & saját szöveges adat; HTTP-határon viszont a framework typed request típusait használd. \\
+\code{Vec<T>} & nulla vagy több typed érték, például query eredmény vagy renderelendő elemek. \\
+\code{Option<T>} & az érték jelen lehet vagy hiányozhat; a hiány explicit marad, nem magic sentinel. \\
+\code{Result<T,E>} & a művelet sikerülhet vagy hibázhat; a hibát tudatosan továbbadjuk vagy kezeljük. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+A \code{?} operátort olvasd így: ``ha ez hiba, add vissza most; különben folytasd a sikeres értékkel.''
+
+\begin{lstlisting}[language=Velran]
+let note = queries::loadNote(db, id)?;
+let owner = note.ownerUsername;
+\end{lstlisting}
+
+Ehhez a mintához kezdő Velran kódban még nincs szükség összetett error-type tervezésre.
+
+\subsection*{3. A struct és enum a domain szókincse}
+
+Structot használj, amikor több névvel ellátott mező tartozik össze. Enumot akkor, amikor a domain egy ismert, zárt állapothalmaz egyik elemét engedi.
+
+\begin{lstlisting}[language=Velran]
+struct NoteSummary {
+    id: i64,
+    title: String,
+}
+
+enum PublicationState {
+    Draft,
+    Published,
+}
+\end{lstlisting}
+
+A legtöbb webes domain-adat modellezéséhez ez a Rust-tudásszint elég. A Velran lényegi kiegészítése az, ami akkor történik, amikor ezek a típusok request-, query-, authorization-, JSON- vagy persistence-határt lépnek át.
+
+\subsection*{4. Match, metódushívás, modulok és \code{?}}
+
+Tudj elolvasni egy rövid \code{match}-et, használd a \code{value.method()} metódushívást, értsd a kvalifikált modulneveket (például \code{queries::} + \code{loadNote}), és tudd követni a \code{?} hibaterjesztést. Ez a négy készség lefedi a framework-owned határok közötti számítás nagy részét.
+
+\begin{lstlisting}[language=Velran]
+let label = match state {
+    PublicationState::Draft => "draft",
+    PublicationState::Published => "published",
+};
+
+let count = title.chars().count();
+let note = queries::loadNote(db, id)?;
+\end{lstlisting}
+
+\subsection*{5. Borrowing: csak azt tanuld meg, amivel ténylegesen találkozol}
+
+A könyv első részéhez elég az a gyakorlati különbség, hogy egy owned érték, például a \code{String}, birtokolja az adatát, míg egy borrowed referencia, például a \texttt{\&str}, ideiglenesen máshol birtokolt adatot néz. Ha a compiler hétköznapi compute kódban egy borrow pontosítását kéri, javítsd ezt a lokális kapcsolatot; emiatt ne szakítsd meg a webes tanulási utat teljes lifetime-elmélettel.
+
+Framework-owned web surface-en a dokumentált Velran típusokat és signature-öket használd. Ne tervezz referencia-nehéz handler API-t csak azért, mert a Rust ezt megengedi.
+
+\subsection*{6. Mit halaszthatsz későbbre?}
+
+Produktív Velran fejlesztő lehetsz az unsafe Rust, kézi lifetime-tervezés, custom allocatorok, pinning, advanced trait machinery, procedural macro-k, FFI-internals és async-runtime implementációs részletek ismerete nélkül. Ezek fontosak lehetnek, ha magát a Velran compilert vagy runtime-ot fejleszted, de alkalmazásfejlesztéshez nem előfeltételek.
+
+\paragraph{Indulási önellenőrzés.}
+Elég Rustot tudsz a gyors út elkezdéséhez, ha a fenti négy listinget el tudod olvasni, el tudod mondani az \code{Option} és \code{Result} különbségét, felismered a structot és enumot, követni tudsz egy rövid \code{match}-et, és érted, hogy a \code{?} hibát terjeszt tovább. Minden mást akkor tanulhatsz meg, amikor a könyvnek ténylegesen szüksége lesz rá.
+
+\section*{Velran 60 perc alatt}
+
+Ezt első alkalmas vertikális szeletként használd, ne a könyv többi részének helyettesítésére. A cél, hogy egyszer összekapcsold a részeket, mielőtt külön-külön mélyebben tanulnád őket. Dolgozz az ellenőrzött Secure Notes baseline-nal: \path{examples/secure-notes/checkpoints/01-baseline/main.vrn}. Ha egy lépésben említett kód nem a \code{main.vrn} fájlban van, nézd meg a mellette lévő modulokat is.
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}L{0.15\textwidth} L{0.22\textwidth} Y@{}}
+\toprule
+\textbf{Menet} & \textbf{Fókusz} & \textbf{Mit figyelj meg?} \\
+\midrule
+1 & Page és route & Keresd meg a page handlert és az azt kivezető route-ot. Ellenőrizd, hogy a hozzáférés explicit, nem implicit. \\
+2 & Typed input és form & Kövess végig egy formértéket a request boundarytól a typed alkalmazáskódig. Azonosítsd a hossz-/erőforrás-korlátját. \\
+3 & Adatbázis-olvasás és -írás & Kövess végig egy queryt és egy mutationt. Figyeld meg a typed bind értékeket, a transaction scope-ot, valamint az SQL-szerkezet és a felhasználói adat szétválasztását. \\
+4 & Authentication és authorization & Keresd meg a trusted principalt, majd a külön ownership/authorization ellenőrzést a protected read vagy mutation előtt. \\
+5 & Response & Kövesd vissza a sikeres utat HTML-ig vagy typed redirectig. Kapcsold a request lifecycle-hoz: parse, validate, authenticate, authorize, effect, response. \\
+6 & Ellenőrzés és magyarázat & Futtasd a \code{velran-cli check} parancsot a \path{examples/secure-notes/checkpoints/01-baseline/main.vrn} fájlon. Ezután mondd meg, melyik boundary utasítana el egy unsafe változatot, mielőtt új feature-t adnál hozzá. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\paragraph{A 60 perces sikerfeltétel.}
+Ne azt mérd, mennyi szintaxist jegyeztél meg. Akkor lépj tovább, ha egy requestet végig tudsz követni, felismered, hol változik a trust, meg tudsz tenni egy kicsi biztonságos módosítást, és a compiler/verifier eredménye alapján el tudod dönteni, mit kell javítani. Ha valamelyik lépés még idegen, az 1--7. fejezettel folytasd, ne advanced Rust kitérővel.
+
+\section*{Tíz megjegyzendő biztonsági invariáns}
+
+A könyv az alábbi szabályokat szándékosan ismétli. Külső határnál kezeld őket rövid mentális checklistként:
+
+\begin{enumerate}
+  \item minden route explicit access policyt kap;
+  \item a külső inputot protected effect előtt parse-oljuk, normalizáljuk, validáljuk és korlátozzuk;
+  \item az SQL szerkezete compiler-owned, felhasználói adat csak typed bind paraméterként kerülhet bele;
+  \item az authentication azt bizonyítja, ki a hívó; az authorization azt, hogy mit tehet, és ennek a protected effect előtt kell megtörténnie;
+  \item a kliens fájlneve és MIME-deklarációja metaadat, nem bizalmi bizonyíték;
+  \item a CORS böngészős origin-policy, nem authentication vagy authorization;
+  \item kifelé hálózati hozzáférés csak explicit, névvel ellátott és konfigurált capabilityn keresztül létezik;
+  \item security szabályhoz negatív bizonyíték is kell: a tiltott változatnak fail-closed módon el kell buknia;
+  \item a log és trace nem válhat secretek vagy request bodyk második példányává;
+  \item production candidate csak fordítás és validálás után aktiválható; hiba esetén a known-good generáció marad aktív.
+\end{enumerate}
+
+Amikor egy szabály újra megjelenik valamelyik fejezetben, \textbf{Biztonsági invariáns} blokk jelöli. Az ismétlés szándékos: a cél az, hogy implementálás közben automatikusan felidézhető legyen.
+
+\section*{A könyv konvenciói}
+
+\begin{itemize}
+  \item A \code{main.vrn} az alkalmazás belépési pontja.
+  \item A production konfiguráció elsődleges felülete a trusted TOML fájl.
+  \item Secret érték nem kerül parancssorba vagy plaintext TOML mezőbe; a konfiguráció \code{*_file} hivatkozásokat használ.
+  \item SQL szöveg compiler-owned, felhasználói érték csak typed bind paraméterként kerülhet lekérdezésbe.
+  \item HTML-ben a \code{{ ... }} interpoláció escape-elt; raw HTML escape hatch nincs.
+  \item Üzleti módosítás transactionben történik.
+\end{itemize}
+
+A könyv a V1 surface-t célozza. Ha egy capability nincs benne ebben a surface-ben, azt nem kerülőúttal kell megvalósítani, hanem külön nyelvi/runtime feature-ként.
+
+\section*{A kiadás hatóköre és a source of truth}
+
+Ez a kiadás a jelenlegi Rust-first, native-only Velran surface-t írja le. A normál compute szintaxis tudatosan Rust-szerű mindenütt, ahol a webes security modell nem igényel framework-owned konstrukciót: az attribútumos callable-ok \callable{page}, \callable{action} és \callable{query} alakúak; a kollekciók \code{Vec<T>} és \code{Option<T>} típusokat használnak; a módosítható compute lokális \code{let mut} deklarációt és közvetlen assignmentet kap; a lebegőpontos kód \code{f32}-t és például \code{x.sin()} metódusszintaxist használ. Ha egy konstrukció nem lowerelhető biztonságosan natív kódra, a fordítás fail-closed hibával leáll; alkalmazáskódhoz nincs bytecode/VM végrehajtási fallback.
+
+A \path{examples/} alatt található futtatható példák és a \path{docs/} feature-szintű leírásai jelentik a copy/paste és részletes technikai source of truth-ot. A könyv listingjei tanítási célúak, ezért rövidíthetnek környező setupot, de ugyanazt az elfogadott nyelvi surface-t kell használniuk. A repository tudatosan külön kezeli az olvasásra és adaptálásra szánt programokat a csak verifikációs anyagoktól: az \path{examples/} tanulható alkalmazásokat tartalmaz, a \path{tests/fixtures/} fail-closed rejection/security eseteket, a \path{tests/manifests/} pedig verification metaadatokat. Szintaxis- vagy security-invariáns változásakor a canonical példákat, szükség esetén a fixture-öket és ezt az angol/magyar könyvpárt együtt kell frissíteni.
+
+
+\section*{Fokozatos gyakorlási görbe}
+A gyakorlatok négy lépcsőben veszik el a segítséget. A későbbi \emph{Gyakorlási mód} címkék definíciója ez:
+
+\begin{description}
+  \item[Vezetett, 1--4. fejezet.] Azonosítsd a határt vagy invariantot, végezd el a legkisebb módosítást, majd hasonlítsd össze az ellenőrzött companion példával. Akkor kész, ha el tudod magyarázni a változást, a védő határt és egy elutasított hibát.
+  \item[Támogatott, 5--10. fejezet.] Előbb próbáld meg a companion nélkül; ha elakadsz, az implementáció előtt csak az interfészt, policyt vagy adatformát nézd meg. Akkor kész, ha a funkció működik, a security invariant explicit, és egy negatív változat elbukik.
+  \item[Önálló, 11--17. fejezet.] Követelményként kezeld a feladatot, tervezd és implementáld önállóan, majd vesd össze a canonical példával. Akkor kész, ha a tervet és a sikeres/hibás útvonalakat meg tudod védeni.
+  \item[Üzemeltetési szcenárió, 18--23. fejezet.] Nevezd meg a veszélyeztetett invariantot, gyűjts bizonyítékot, válaszd a legkisebb biztonságos beavatkozást, és előre határozd meg a rollbacket vagy recoveryt. Akkor kész, ha egy másik operátor követni tudná a bizonyítékot és az utólagos feljegyzést.
+\end{description}
+
+Ne a jelenlegi feladat leggyorsabb befejezésére, hanem arra optimalizálj, hogy a következőhöz kevesebb segítség kelljen.

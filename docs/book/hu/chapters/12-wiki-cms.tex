@@ -1,0 +1,292 @@
+\chapter{Gyakorlati alkalmazások: wiki és CMS}
+
+\noindent\textbf{Tanulási út: Teljes út / domain példa.} Használd összetettebb workflow- és publication-state esettanulmányként.\par\medskip
+
+A wiki és CMS példák a korábbi feature-öket domain workflow-vá állítják össze. Compilerrel ellenőrzött forrásuk az \code{examples/wiki/main.vrn} és \code{examples/news-site/}; rövidített listingnél ezeket használd source of truthként.
+
+\section{Egyszerű wiki}
+
+Egy wiki minimális domainje oldalból áll: stabil azonosító, slug, cím és Markdown törzs. Az alábbi minta a nyelvi elemek összekapcsolását mutatja.
+
+\subsection*{Modell}
+
+\begin{lstlisting}[language=Velran]
+model WikiPage {
+    id: i64
+    slug: Slug
+    title: String
+    body: String
+}
+\end{lstlisting}
+
+\subsection*{Lekérdezés}
+
+\begin{lstlisting}[language=Velran]
+#[query]
+fn wikiBySlug(db: Db, slug: Slug)
+    -> Result<WikiPage, DbError> sql {
+    SELECT id, slug, title, body
+    FROM wiki_pages
+    WHERE slug = :slug
+}
+\end{lstlisting}
+
+\subsection*{Publikus oldal}
+
+\begin{lstlisting}[language=Velran]
+#[page]
+fn wikiShow(ctx: PageContext, db: Db, slug: Slug)
+    -> Result<Html, PageError> {
+    let page = wikiBySlug(db, slug)?;
+    return Ok(html {
+        @layout(Main, page.title) {
+            <article>
+                <h1>{{ page.title }}</h1>
+                @markdown(page.body)
+            </article>
+        }
+    });
+}
+
+route wikiShow GET "/wiki/:slug<Slug>" public => wikiShow;
+\end{lstlisting}
+
+\subsection*{Szerkesztő form}
+
+\begin{lstlisting}[language=Velran]
+form WikiForm {
+    title<String>
+    body<String>
+    validate title length 2 200 body length 1 300000
+}
+\end{lstlisting}
+
+A módosító route legyen autentikált, például \code{auth role Editor}. A write query \code{Transaction} capabilityt kapjon. A cím alapján generált slugot ne írd át vakon minden szerkesztéskor, ha a régi URL-ek stabilitása fontos.
+
+\subsection*{Canonical slug és alias}
+
+Érettebb wikiben külön slug-alias/history tábla tartja a régi címeket. A runtime canonical route-ból tud 301-es redirectet készíteni, így nem kell tetszőleges redirect URL-t építeni.
+
+\subsection*{Mit adj hozzá egy valódi wikihez?}
+
+\begin{itemize}
+  \item optimistic locking a konkurens szerkesztésekhez;
+  \item üzleti audit trail a módosításokhoz;
+  \item objektumszintű authorization, ha nem minden oldal azonos jogosultságú;
+  \item backup/restore policy az adatbázisra és az esetleges AppFs adatra.
+\end{itemize}
+
+
+\section{CMS és híroldal}
+
+A repository \code{examples/news-site/} példája már egy kis CMS magját mutatja: model, typed SQL, layout, Markdown, szerkesztői action és public cache.
+
+\subsection*{Projektstruktúra}
+
+\begin{lstlisting}
+main.vrn
+models.vrn
+queries.vrn
+components.vrn
+pages.vrn
+actions.vrn
+\end{lstlisting}
+
+\subsection*{Cikkmodell}
+
+\begin{lstlisting}[language=Velran]
+model Article {
+    id: i64
+    slug: Slug
+    title: String
+    body: String
+}
+\end{lstlisting}
+
+A szerkesztői input külön named form-sémát kap:
+
+\begin{lstlisting}[language=Velran]
+form ArticleForm {
+    title<String>
+    body<String>
+    validate title length 2 200 body length 1 300000
+}
+\end{lstlisting}
+
+\subsection*{Publikus cikkoldal}
+
+\begin{lstlisting}[language=Velran]
+#[page]
+fn article(ctx: PageContext, db: Db, slug: Slug)
+    -> Result<Html, PageError> {
+    let article = articleBySlug(db, slug)?;
+    return Ok(html {
+        @layout(Main, article.title) {
+            <article>
+                <h1>{{ article.title }}</h1>
+                @markdown(article.body)
+            </article>
+        }
+    });
+}
+
+route article GET "/cikk/:slug<Slug>"
+    public cache public ttl 60
+    => article;
+\end{lstlisting}
+
+Public cache csak olyan oldalra való, amely nem session- vagy userfüggő.
+
+\subsection*{Szerkesztői létrehozás}
+
+\begin{lstlisting}[language=Velran]
+#[action]
+fn create(ctx: ActionContext, db: Db,
+                 title: String, body: String)
+    -> Result<Redirect, PageError> {
+    let articleSlug = slug(title);
+    transaction db {
+        insertArticle(tx, articleSlug, title, body)?;
+    }
+    return Ok(redirect(adminArticles()));
+}
+
+route articleCreate POST "/admin/articles"
+    form ArticleForm
+    auth role Editor
+    invalidate cache article
+    => create;
+\end{lstlisting}
+
+A fenti invalidáció route-szintű generationváltás: nem csak az új slug egyetlen cache-kulcsát törli, hanem az \code{article} route korábbi generationjét teszi elérhetetlenné. Egyszerű mintában ez helyes és kiszámítható, de nagy forgalmú CMS-nél érdemes tudatosan mérlegelni, mely publikus route-okat kell valóban invalidálni egy adott módosítás után.
+
+\subsection*{CMS-ből production rendszer}
+
+A következő lépések adják a gyakorlati production CMS gerincét:
+
+\begin{itemize}
+  \item publikálási és domain-invariánsok külön validációja;
+  \item draft/published állapot enumként;
+  \item canonical slug history;
+  \item optimistic locking szerkesztéskor;
+  \item business audit trail;
+  \item media library és AppFs a képekhez;
+  \item role-based szerkesztő/publisher policy;
+  \item rate limit és resource profile a drágább route-okra;
+  \item backup, restore drill és kontrollált deployment.
+\end{itemize}
+
+A CMS-ben az eredeti Markdown legyen a source of truth; ne tárolj alkalmazásból származó raw renderelt HTML-t.
+
+
+\section{Szerveroldali Markdown renderelés és cache}
+
+Publikált tartalomnál alapértelmezetten szerveroldali Markdown renderelést használj. Az authoritative útvonal:
+
+\begin{lstlisting}
+SQL-ben tarolt Markdown
+-> typed query stabil id/slug alapjan
+-> @markdown(...)
+-> biztonsagos HTML valasz
+-> opcionalis route-szintu public cache
+\end{lstlisting}
+
+Az adatbázisban az eredeti Markdown maradjon a source of truth. Ne tárold el az alkalmazás által generált HTML-t pusztán azért, hogy megspórold a renderelést. A szerveroldali renderer nem enged raw HTML-t, és a link targeteket saját policy szerint kezeli, így a renderelés a framework HTML-security boundaryján belül marad ahelyett, hogy a bizalmat böngészős JavaScriptre helyeznéd át.
+
+Publikus, nem személyre szabott dokumentumnál route cache használható, ha a freshness contract ezt megengedi. A cache a kész választ tárolja; a cache-clause elhagyásával ugyanaz a renderelési útvonal marad cache nélkül. Egy minimális pár:
+
+\begin{lstlisting}[language=Velran]
+route markdownDocumentLive GET "/documents/:id<i64>"
+    public
+    => markdownDocument;
+
+route markdownDocumentCached GET "/documents-cached/:id<i64>"
+    public
+    cache public ttl 120
+    => markdownDocument;
+\end{lstlisting}
+
+A canonical end-to-end példa az \path{examples/markdown-sql-cache/}. SQLite-, PostgreSQL- és MariaDB-sémaváltozatot is tartalmaz, és megmutatja, hogyan táplál egy id-alapú typed SQL olvasás \code{@markdown} renderelést. Böngészőoldali Markdown renderelést csak szerkesztői preview-hoz használj, ha javítja az interakciót; a publikált reprezentációt továbbra is a szerver készítse, hogy a sanitization, cache-policy, CSP-feltételezések és JavaScript nélküli kliensek szempontjából a szerver maradjon authoritative.
+
+\section{Demo CMS-től a szerkesztőségi workflow-ig}
+
+Production tartalomkezelőhöz nem elég a CRUD; workflow is kell. Jó határvonal, ha a publikus renderelés, a szerkesztői mutáció, a concurrent-edit védelem, a média publikálása és az audit külön mechanizmus marad, amelyeket explicit módon komponálunk.
+
+\subsection*{Konkurens szerkesztés}
+
+Emberi szerkesztő gyakran percekig nyitva tart egy formot. Adj \code{version} oszlopot a rekordhoz, és update-nél használj \code{Changed} eredményt, hogy egy régi szerkesztés conflictot kapjon ahelyett, hogy felülírná az újabb munkát. Az edit oldal typed form inputként viszi a jelenlegi verziót; a mutáció atomikusan ellenőrzi az \code{id + version} párost, és siker esetén növeli a verziót.
+
+Fontos állapotváltásnál, például publish vagy archive esetén, a mutáció és a business audit rekord ugyanabban az adatbázis-tranzakcióban fusson. Az audit az autentikált actort és a statikus üzleti actiont rögzíti; authorizationt nem helyettesít.
+
+\begin{lstlisting}[language=Velran]
+transaction db {
+    Article.publishChanged(tx, id, version)?;
+    audit Article id action publish
+        from article.status to ArticleStatus::Published;
+}
+\end{lstlisting}
+
+Stale verziónál a végrehajtás az audit statement előtt megáll, így sikertelen publikálásból nem lesz hamis success audit rekord.
+
+\subsection*{A média state machine-hoz tartozik}
+
+A böngésző által küldött filename vagy client MIME type ne legyen trusted path/type. A nyers \code{Upload} privát marad. Böngészőből elérhető képhez explicit typed \code{Image} upload és \code{publish} kell; a platform a byte-okat privát stagingbe teszi, ellenőrzi a támogatott képformátumot és méreteket, majd csak sikeres handler-végrehajtás után publikál.
+
+Ez hasznos tartalmi szabályt ad: adatbázis-metadata hivatkozhat publikált médiaobjectre, de ellenőrizetlen multipart byte nem válik publikussá csak azért, mert a formot a rendszer elfogadta.
+
+\subsection*{A publikus oldal és az editor preview eltérő cache-domain}
+
+Publikus cikk route csak akkor használjon public cache-t, ha a response nem session- vagy userfüggő. Editor preview, draft oldal, permission-sensitive view és személyre szabott navigáció ne ossza meg ezt a cache-contractot. A publikus route maradjon szándékosan szűk, és a renderelt cikket módosító mutáció után annak generationjét invalidáld.
+
+\section{Gyakorlati CMS-rétegmodell}
+
+Nagyobb projektnél tartsd külön a felelősségeket:
+
+\begin{enumerate}
+  \item \textbf{domain model}: article/page azonosító, status, slug és version;
+  \item \textbf{queryk}: compiler-owned SQL és typed bindok;
+  \item \textbf{editor boundary}: named formok, validáció és autentikált route-ok;
+  \item \textbf{authorization}: role/permission és szükség esetén object-level ellenőrzés;
+  \item \textbf{tranzakciós mutáció}: állapotváltás, optimistic locking és business audit;
+  \item \textbf{presentation}: layoutok, componentek és Markdown renderelés;
+  \item \textbf{media}: staged inspection és explicit publication;
+  \item \textbf{public delivery}: canonical URL, public cache és szűk invalidáció;
+  \item \textbf{operations}: migration, backup/restore, monitoring és release evidence.
+\end{enumerate}
+
+Ez a rétegzés növekvő CMS-ben is külön, review-zható határon tartja az authorizationt, renderelést, mutationt és cache-viselkedést.
+
+\section{CMS review-kérdések}
+
+Mielőtt késznek tekintesz egy content feature-t, kérdezd meg:
+
+\begin{itemize}
+  \item Két szerkesztő felülírhatja-e egymást csendben?
+  \item Minden védett állapotváltás külön autorizált-e, a validációtól függetlenül?
+  \item A publish/archive döntések rekonstruálhatók-e business auditból, ha ez követelmény?
+  \item A régi slugok canonical redirectet kapnak-e arbitrary redirect input helyett?
+  \item Publikussá válhat-e ellenőrizetlen upload byte?
+  \item Bekerülhet-e sessionfüggő response public cache-be?
+  \item A mutáció a lehető legkisebb helyes public-cache scope-ot invalidálja-e?
+  \item A content DB és az AppFs/media állapot visszaállítható-e ismert konzisztens pontra?
+\end{itemize}
+
+\section{Ellenőrzött companion példák}
+A vizsgált kérdéshez a következő compiler-checked companionokat használd:
+\begin{itemize}
+  \item \path{examples/wiki/main.vrn} -- fókuszált wiki-flow;
+  \item \path{examples/news-site/main.vrn} -- többfájlos CMS és editorial workflow;
+  \item \path{examples/markdown-sql-cache/} -- fókuszált typed SQL--szerveroldali Markdown renderelés, opcionális public response cache-sel.
+\end{itemize}
+Együtt azt ellenőrzik, hogy az editorial workflow, a típusos SQL, a Markdown renderelés, az autorizáció, a cache és a modulstruktúra együtt is működik az aktuális compilerrel.
+
+\section{Gyakorlat: definiálj editorial state machine-t}
+\paragraph{Gyakorlási mód: önálló.} Használd az előszóban meghatározott önálló módszert.
+
+Sorold fel egy publikálható objektum állapotait és azokat az actorokat, akik az állapotok között átmenetet végezhetnek. Legyen legalább egy tiltott átmenet is. Ezután döntsd el, mely átmenetekhez kell erősebb autorizáció, audit evidence vagy concurrency-védelem.
+
+\section{Tipikus hiba: a workflow-t szabad szövegként tároljuk}
+Az editorial state üzleti állapot. Zárt, típusos halmazként modellezd, az átmeneti szabályokat pedig tartsd expliciten. Ellenkező esetben az érvénytelen kombinációk idővel adatjavítási problémává válnak ahelyett, hogy tervezési döntések lennének.
+
+\section{Folyamatos mintaprojekt: Secure Notes}
+Használd az \path{examples/secure-notes/checkpoints/12-publication/main.vrn} snapshotot. Bővítsd a Secure Notes-ot Draft és Published állapottal. A publikálás maradjon explicit state transition, az ownership szabályok maradjanak meg, a kívülről látható nézet pedig a típusos állapottól függjön, ne ad-hoc string összehasonlítástól.

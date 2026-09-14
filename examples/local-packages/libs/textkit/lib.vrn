@@ -1,0 +1,2 @@
+pub mod numbers;
+pub fn answer() -> i64 { return numbers::answer(); }

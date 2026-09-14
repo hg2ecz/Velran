@@ -1,0 +1,362 @@
+\chapter{The Velran CLI and the daily developer/operator workflow}
+
+\noindent\textbf{Learning path: Fast path: operator reference.} Use the CLI consistently for check, build, verification, and operational workflows.\par\medskip
+
+Velran installs two programs: the long-lived \code{velran-server} process and the short-lived \code{velran-cli} operator tool. Treat them consistently as separate responsibilities. The server serves HTTP and enforces runtime policy; the CLI checks source, manages migrations, and performs local-auth administration.
+
+This chapter introduces no new language features. It shows how daily work becomes a repeatable command flow from editing through production verification.
+
+\section{Which tool for which task?}
+
+\begin{longtable}{L{0.29\textwidth}L{0.23\textwidth}L{0.39\textwidth}}
+\toprule
+Task & Tool & Notes \\
+\midrule
+Check Velran source & \code{velran-cli check} & Compiler-level check; does not start an HTTP server. \\
+Migration status/verify/apply & \code{velran-cli migrate} & DB URL comes from a secret file. \\
+Local-auth store administration & \code{velran-cli auth} & Operator action on the SQLite identity store. \\
+Server configuration preflight & \code{velran-server} & \code{--check-config}: validates config, app, and local policy/resource files. \\
+Inspect effective configuration & \code{velran-server} & \code{--print-effective-config}; secret values remain redacted. \\
+Run the web application & \code{velran-server} & Long-lived process behind a proxy or direct HTTPS. \\
+Workspace release build & \code{cargo build} & Build both binaries with \code{--locked --release}. \\
+Verify the whole platform & \code{./verify.sh} & Part of Velran repository release evidence, not a command every application must run. \\
+\bottomrule
+\end{longtable}
+
+Production examples install the programs here:
+
+\begin{lstlisting}
+/usr/local/bin/velran-cli
+/usr/local/bin/velran-server
+\end{lstlisting}
+
+With a normal shell \code{PATH}, the examples below can use the short program names.
+
+\section{The CLI is not an alternative server}
+
+\code{velran-cli} does not open a listener, serve routes, or maintain session state. It performs one command and exits. This is useful from a security perspective: migrations and user administration do not require an administrative HTTP endpoint.
+
+Conversely, \code{velran-server} does not run migrations automatically at startup. Schema changes remain explicit operator decisions.
+
+\section{The first command: \texttt{velran-cli check}}
+
+During daily development, make this the first gate after every meaningful source change:
+
+\begin{lstlisting}
+velran-cli check main.vrn
+\end{lstlisting}
+
+On success, the CLI prints a short summary of models, queries, pages, actions, and routes seen by the compiler. On failure, do not start the server yet; fix the compile-time contract first.
+
+\code{check} catches issues such as:
+
+\begin{itemize}
+  \item unknown types or invalid language syntax;
+  \item query projection and model-shape mismatch;
+  \item invalid typed bind/decode contracts;
+  \item route/policy or resource-profile reference errors that are provable at compile time;
+  \item forbidden raw HTML/SQL-style constructs.
+\end{itemize}
+
+It does not prove that the DB or Redis is reachable over the network and does not replace HTTP integration tests.
+
+\section{Running from the source tree versus using the installed CLI}
+
+When developing the Velran repository itself, the same program can be run through Cargo:
+
+\begin{lstlisting}
+cargo run --locked -p velran-cli -- check main.vrn
+\end{lstlisting}
+
+This is a developer convenience. In production runbooks, use the immutable installed release binary:
+
+\begin{lstlisting}
+/usr/local/bin/velran-cli check /srv/velran/app/main.vrn
+\end{lstlisting}
+
+Do not mix the two forms in one deployment. A production operation should be clearly attributable to one release artifact.
+
+\section{Migration workflow}
+
+The migration command provides three operations:
+
+\begin{description}
+  \item[\code{status}] shows applied and pending migrations;
+  \item[\code{verify}] validates migration history and checksum contracts;
+  \item[\code{apply}] acquires the migration lock and applies pending migrations.
+\end{description}
+
+The DB URL is not a plaintext command-line secret. Put it in a one-line secret file:
+
+\begin{lstlisting}
+/run/secrets/velran/db-url
+\end{lstlisting}
+
+Typical verification order:
+
+\begin{lstlisting}
+velran-cli migrate status \\
+  --dir migrations \\
+  --db-url-file /run/secrets/velran/db-url
+
+velran-cli migrate verify \\
+  --dir migrations \\
+  --db-url-file /run/secrets/velran/db-url
+\end{lstlisting}
+
+For an approved schema change:
+
+\begin{lstlisting}
+velran-cli migrate apply \\
+  --dir migrations \\
+  --db-url-file /run/secrets/velran/db-url \\
+  --lock-timeout-secs 30
+
+velran-cli migrate verify \\
+  --dir migrations \\
+  --db-url-file /run/secrets/velran/db-url
+\end{lstlisting}
+
+\code{--lock-timeout-secs} is a positive integer. If the migration lock cannot be acquired within that time, fail the operation; do not allow parallel schema changes.
+
+\subsection*{\texttt{--allow-insecure-db} is not a production convenience switch}
+
+The migration CLI follows the server's secure-by-default model. The \path{--allow-insecure-db} flag is only for deliberate, controlled environments. In production, use proper TLS/database security rather than a permanent bypass.
+
+\section{Local-auth administration}
+
+If the application uses local auth, the CLI also owns identity-store administration. Initialize the store first:
+
+\begin{lstlisting}
+velran-cli auth init \\
+  --db-url-file /run/secrets/velran/local-auth-db-url
+\end{lstlisting}
+
+Create a user:
+
+\begin{lstlisting}
+velran-cli auth user-add \\
+  --db-url-file /run/secrets/velran/local-auth-db-url \\
+  --username alice \\
+  --password-file /run/secrets/velran/bootstrap-password \\
+  --role Editor
+\end{lstlisting}
+
+If no \code{--role} is supplied, a new user receives the \code{User} role. Supply multiple \code{--role} options to assign multiple roles.
+
+Change a password or account state:
+
+\begin{lstlisting}
+velran-cli auth password-set \\
+  --db-url-file /run/secrets/velran/local-auth-db-url \\
+  --username alice \\
+  --password-file /run/secrets/velran/new-password
+
+velran-cli auth disable \\
+  --db-url-file /run/secrets/velran/local-auth-db-url \\
+  --username alice
+
+velran-cli auth enable \\
+  --db-url-file /run/secrets/velran/local-auth-db-url \\
+  --username alice
+\end{lstlisting}
+
+Replace roles:
+
+\begin{lstlisting}
+velran-cli auth roles-set \\
+  --db-url-file /run/secrets/velran/local-auth-db-url \\
+  --username alice \\
+  --role Editor --role Publisher
+\end{lstlisting}
+
+\code{roles-set} treats the supplied role list as the new complete state. Do not treat it as an incremental ``add one role'' operation.
+
+\section{TOTP administration is especially sensitive}
+
+Enroll TOTP:
+
+\begin{lstlisting}
+velran-cli auth totp-enroll \\
+  --db-url-file /run/secrets/velran/local-auth-db-url \\
+  --username alice \\
+  --recovery-count 8
+\end{lstlisting}
+
+The command prints the TOTP secret, the \code{otpauth} URI, and one-time recovery codes. Do not run it in CI logs, shell transcripts, or shared terminals. The operator process must securely hand off and store the secret and recovery codes immediately.
+
+Disable TOTP:
+
+\begin{lstlisting}
+velran-cli auth totp-disable \\
+  --db-url-file /run/secrets/velran/local-auth-db-url \\
+  --username alice
+\end{lstlisting}
+
+\section{A secret file is also an input contract}
+
+The CLI does not read DB-URL and password files without limits. The current secret-URL file contract requires:
+
+\begin{itemize}
+  \item a regular file;
+  \item not a symlink;
+  \item at most 16 KiB;
+  \item exactly one non-empty line.
+\end{itemize}
+
+A password file must also be a regular non-symlink file; it is limited to 4096 bytes, contains one line, and the password itself must be 12--1024 bytes.
+
+Do not try to bypass the contract with process substitution, symlinks, or multiline secret templates. The CLI boundary is deliberately narrow.
+
+\section{Server preflight follows CLI checks}
+
+After source and migration checks, validate the production configuration with the server:
+
+\begin{lstlisting}
+velran-server \\
+  --config /usr/local/etc/velran/server.toml \\
+  --check-config
+\end{lstlisting}
+
+This reads the trusted TOML, compiles the application, checks route-rate/resource policy references and TLS configuration, and validates local preconditions for declared storage/static roots.
+
+To audit precedence or effective policy:
+
+\begin{lstlisting}
+velran-server \\
+  --config /usr/local/etc/velran/server.toml \\
+  --print-effective-config
+\end{lstlisting}
+
+The output is intentionally secret-redacted. It is still operator information, so retain automation logs only when justified.
+
+\section{Daily development cycle}
+
+A good baseline for a small or medium application is:
+
+\begin{lstlisting}
+edit .vrn source
+-> velran-cli check main.vrn
+-> velran-cli migrate verify
+-> if schema changed: migrate status/apply/verify on dev DB
+-> velran-server --config server.dev.toml --check-config
+-> start velran-server
+-> HTTP/form/JSON smoke tests
+-> automated application tests
+\end{lstlisting}
+
+The point of the order is to catch cheaper, more deterministic failures first. There is little value in running HTTP smoke tests against source that already fails at compiler level.
+
+\section{Application release workflow}
+
+A minimal production operator flow is:
+
+\begin{lstlisting}
+immutable release selected
+-> velran-cli check deployed main.vrn
+-> velran-server --check-config
+-> velran-cli migrate status
+-> velran-cli migrate verify
+-> backup/recovery gate
+-> approved velran-cli migrate apply, if pending
+-> velran-cli migrate verify
+-> controlled service restart/switch
+-> /health/live
+-> /health/ready
+-> application smoke test
+-> logs + metrics + audit review
+\end{lstlisting}
+
+Migration \code{apply} is the only schema-mutating step in this sequence; treat it as a separate approval point.
+
+\section{The Velran platform release workflow is different}
+
+When building the Velran repository itself, Rust workspace release evidence is part of the process:
+
+\begin{lstlisting}
+./verify.sh
+cargo build --locked --release \\
+  -p velran-server -p velran-cli
+\end{lstlisting}
+
+The resulting binaries are:
+
+\begin{lstlisting}
+target/release/velran-server
+target/release/velran-cli
+\end{lstlisting}
+
+Install them with:
+
+\begin{lstlisting}
+sudo install -m 0755 target/release/velran-server \\
+  /usr/local/bin/velran-server
+sudo install -m 0755 target/release/velran-cli \\
+  /usr/local/bin/velran-cli
+\end{lstlisting}
+
+Your own Velran web application's daily workflow does not need to verify the language's entire Rust workspace every time. Your own source, migration, configuration, and integration tests are the relevant gates.
+
+\section{Automation: separate read-only and mutating steps}
+
+In CI/CD, separate safely repeatable checks from state-changing operations.
+
+\textbf{Read-only/preflight:}
+
+\begin{lstlisting}
+velran-cli check main.vrn
+velran-cli migrate status \\
+  --dir migrations --db-url-file /run/secrets/velran/db-url
+velran-cli migrate verify \\
+  --dir migrations --db-url-file /run/secrets/velran/db-url
+velran-server --config /usr/local/etc/velran/server.toml \\
+  --check-config
+velran-server --config /usr/local/etc/velran/server.toml \\
+  --print-effective-config
+health/readiness GET
+\end{lstlisting}
+
+\textbf{Mutating/operator-approved:}
+
+\begin{lstlisting}
+velran-cli migrate apply \\
+  --dir migrations --db-url-file /run/secrets/velran/db-url
+velran-cli auth init \\
+  --db-url-file /run/secrets/velran/local-auth-db-url
+# Other auth commands also receive their explicit --db-url-file
+# plus their own --username/--password-file/--role options.
+\end{lstlisting}
+
+Do not normally put auth-administration commands into the automatic application deployment pipeline. They are identity-administration operations with a separate audit and access boundary.
+
+\section{Common failures}
+
+\begin{description}
+  \item[\code{check} succeeds but the server does not start] The compile-time contract is valid, but configuration, TLS, filesystem, or policy startup validation failed. Run \code{--check-config} and inspect the server log.
+  \item[\code{--check-config} succeeds but readiness is red] Local configuration is valid, but a runtime dependency such as DB or Redis is unreachable or unhealthy.
+  \item[\code{migrate verify} fails] Do not reflexively run \code{apply}. Resolve the history/checksum discrepancy first.
+  \item[The auth CLI cannot open the DB] Verify that the URL points to the local-auth SQLite store and that the store has been initialized.
+  \item[Secret-file error] Do not relax the file contract; provide a regular, non-symlink, one-line secret file.
+\end{description}
+
+\section{Operator memory line}
+
+The command details above are deployment-specific; the invariant is the order:
+
+\begin{lstlisting}
+source -> schema -> config -> approved mutation
+-> service -> health -> evidence
+\end{lstlisting}
+
+Keep the concrete commands in a versioned runbook. Do not rely on memory for flags, secret-file paths, unit names, or approval points.
+
+\section{Practice: make the safe path the shortest path}
+\paragraph{Exercise mode: operational scenario.} Use the operational-scenario method defined in the preface.
+
+Write down the commands a developer or operator uses for check, test, release verification, configuration validation, and startup. Remove undocumented shortcuts and prefer commands that fail closed when lockfiles, policies, or release evidence are stale.
+
+\section{Common mistake: relying on remembered command sequences}
+If a safe release depends on a person remembering five optional flags, the workflow is fragile. Put invariant-preserving command sequences into versioned scripts and keep their output understandable enough for review.
+
+\section{Operator checkpoint: Secure Notes}
+Write a one-page command runbook for checking, building, verifying, and starting Secure Notes. A new operator should be able to follow it without knowing which steps are security-critical by memory alone.

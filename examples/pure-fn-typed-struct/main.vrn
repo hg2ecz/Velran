@@ -1,0 +1,22 @@
+struct Summary {
+    normalized: String,
+    length: i64,
+}
+
+#[inline(never)]
+fn summarize(input: &str) -> Summary {
+    let normalized = input.trim().to_lowercase();
+    let length = normalized.len();
+    return Summary {
+        normalized: normalized,
+        length: length,
+    };
+}
+
+#[page]
+fn pureTypedStruct(ctx: PageContext, text: String) -> Result<Html, PageError> {
+    let summary = summarize(&text);
+    return Ok(html {<p>{{ summary.normalized }}</p><p>{{ summary.length }}</p>});
+}
+
+route GET "/pure-fn-typed-struct" -> pureTypedStruct

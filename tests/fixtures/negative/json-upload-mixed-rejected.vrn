@@ -1,0 +1,5 @@
+#[action]
+fn bad(ctx: ActionContext, name: String, file: Upload) -> Result<Json, PageError> {
+    return Ok(json(name));
+}
+route bad POST "/bad" json name<String> upload file<Upload> to "uploads" public => bad;

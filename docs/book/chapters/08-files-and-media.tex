@@ -1,0 +1,251 @@
+\chapter{Files, uploads, and the media library}
+
+\noindent\textbf{Learning path: Fast path: optional branch.} Read now if the application accepts uploads or serves application-owned media.\par\medskip
+
+\invariantblock{Security invariant: client file metadata is untrusted}{The submitted file name and Content-Type are descriptive metadata, not proof of safe storage or safe content. Keep storage behind AppFs/capability boundaries and derive serving decisions from trusted detection and policy.}
+
+\diagnosticblock{Compiler diagnostic}{SEC-FILE-001}{An \code{Image} upload is declared without the explicit publish transition required before serving it as media.}{Use the typed image upload form with \code{publish}; raw/unverified uploads remain private.}
+
+Uploads cross request, resource, filesystem, authorization, persistence, and serving boundaries. Velran therefore separates general streamed \code{Upload} values from the stricter validated \code{Image} type used for publishable media.
+
+\section{The mental model: three different things}
+
+Keep these three concepts separate during upload handling:
+
+\begin{enumerate}
+  \item \textbf{client metadata}: original filename and client-declared MIME type;
+  \item \textbf{storage}: the server-side file selected by the runtime inside AppFs;
+  \item \textbf{business reference}: the value the application stores in the database and uses later.
+\end{enumerate}
+
+The client filename is not a storage path, and the client's \code{Content-Type} header is not security evidence. Treat both at most as display or audit metadata.
+
+\section{General file upload: \code{Upload}}
+
+The route declaration tells the runtime that a multipart file is expected and names the static AppFs subdirectory that receives it:
+
+\begin{lstlisting}[language=Velran]
+route uploadFile POST "/upload"
+    upload file<Upload> to "uploads"
+    public => uploadFile;
+\end{lstlisting}
+
+\newpage
+The action does not receive the whole file in memory. \code{Upload} exposes upload metadata:
+
+\begin{lstlisting}[language=Velran]
+#[action]
+fn uploadFile(ctx: ActionContext, file: Upload)
+    -> Result<Redirect, PageError> {
+    let savedPath = file.path;
+    let originalName = file.filename;
+    let contentType = file.contentType;
+    let byteCount = file.bytes;
+    return Ok(redirect(uploaded()));
+}
+\end{lstlisting}
+
+The redirect uses the typed \code{uploaded()} GET route helper. More importantly, a raw \code{Upload} remains private application data; it does not become a public asset merely because the handler can inspect its metadata. This is also an important resource-protection property: the runtime streams multipart content, so a large file does not automatically become an equally large in-memory request allocation.
+
+\section{AppFs: the application's writable filesystem}
+
+AppFs is the restricted filesystem area assigned to the application. Give it a dedicated data root in production; do not mix it with the program binary, static assets, or other writable system areas.
+
+Example server configuration:
+
+\begin{lstlisting}
+[storage]
+data_root = "/srv/velran/data"
+fs_mode = "rwc"
+max_upload_bytes = 16777216
+max_image_pixels = 40000000
+\end{lstlisting}
+
+The short capability letters mean:
+
+\begin{description}
+  \item[\code{r}] read;
+  \item[\code{w}] write;
+  \item[\code{c}] create and the operations required to commit an upload.
+\end{description}
+
+Uploads typically require \code{rwc}. The byte limit is an operator hard limit; application code cannot raise it arbitrarily for one route.
+
+On Linux, AppFs confinement is intended to prevent an application from escaping the assigned root through path traversal, symlinks, or magic-link tricks. Normal Unix ownership and permissions are still required: the service user should have write access only to directories it actually needs.
+
+\section{What happens during an upload?}
+
+From a developer perspective, the safe upload path is:
+
+\begin{enumerate}
+  \item the runtime checks request-size limits and the route upload schema;
+  \item it streams the file into a confined staging location;
+  \item the server generates the storage key rather than deriving it from the client filename;
+  \item typed uploads perform additional server-side content validation;
+  \item after successful processing the file can be committed atomically;
+  \item on handler/runtime failure the runtime attempts cleanup.
+\end{enumerate}
+
+Do not bypass AppFs with a parallel filename-sanitizing write path; that would bypass the framework boundary.
+
+\section{Image upload: prefer the \code{Image} type}
+
+For images in a CMS, wiki, news site, or admin interface, use \code{Image} rather than the general \code{Upload} surface:
+
+\begin{lstlisting}[language=Velran]
+route saveHero POST "/admin/hero"
+    upload hero<Image> to "media" publish
+    auth role Editor
+    => saveHero;
+\end{lstlisting}
+
+\code{Image} uses the same streaming multipart and AppFs path, but the server also validates actual file content. V1 accepts PNG and JPEG. The client-declared MIME type is not authority.
+
+SVG is intentionally not a general image-upload format because it can carry active content and script/XSS surface. Do not assume GIF, WebP, or AVIF support unless the documentation for the runtime version explicitly states it.
+
+\section{Byte limits and pixel limits are different}
+
+Images have two distinct resource risks. A file may be small in bytes but decode into an enormous number of pixels. The pixel ceiling (\path{max_image_pixels}) is therefore separate from the upload-byte ceiling (\path{max_upload_bytes}).
+
+\begin{lstlisting}
+max_upload_bytes = 16777216
+max_image_pixels = 40000000
+\end{lstlisting}
+
+The second limit caps \code{width * height}. Set both consciously for the application's requirements; a ``16 MB upload limit'' alone is not image-decode protection.
+
+\section{Image references in the database}
+
+\code{Image} is a first-class scalar, so it can be stored as a model field and in the database using a canonical representation. The application does not need -- and should not attempt -- to assemble or parse internal storage-path components manually.
+
+A typical business model:
+
+\begin{lstlisting}[language=Velran]
+model Article {
+    id: i64
+    slug: Slug
+    title: String
+    body: String
+    hero: Image
+}
+\end{lstlisting}
+
+The important point is that the database stores a \emph{reference}, not a client filename and not a hand-built public URL. Storage and HTTP-serving policy therefore remain under runtime control.
+
+\newpage
+\section{Safe rendering in HTML}
+
+A validated image is rendered using the dedicated renderer rather than direct string interpolation:
+
+\begin{lstlisting}[language=Velran]
+#[page]
+fn article(ctx: PageContext, article: Article)
+    -> Result<Html, PageError> {
+    return Ok(html {
+        <article>
+            <h1>{{ article.title }}</h1>
+            @image(article.hero, article.title)
+            @markdown(article.body)
+        </article>
+    });
+}
+\end{lstlisting}
+
+\code{@image(image, alt)} generates HTML from the validated image reference. It escapes the alt text, uses validated dimensions, and targets the built-in read-only media endpoint. Direct \code{{ image }} interpolation of an \code{Image} is a compiler error, so the typed reference cannot accidentally become a raw URL or markup value.
+
+\section{The built-in media endpoint}
+
+The runtime reserves this URL prefix:
+
+\begin{lstlisting}
+/__velran/media/
+\end{lstlisting}
+
+Applications cannot declare conflicting routes. The media endpoint does not make the entire \code{data_root} browsable over HTTP; it serves images only from AppFs directories declared by an \code{upload ...<Image> to "..." publish} route in the program.
+
+When serving media, the server re-detects content based on the image detector rather than trusting the client's original MIME type. Responses receive security and cache headers; media serving does not run an application route and does not create a session.
+
+\section{CMS example: uploading a hero image}
+
+An editor workflow normally consists of two business steps:
+
+\begin{enumerate}
+  \item the editor uploads a validated image;
+  \item the application associates the resulting typed image reference with the article.
+\end{enumerate}
+
+The route should at least require authentication; an admin/editor function normally also deserves role policy:
+
+\begin{lstlisting}[language=Velran]
+route saveHero POST "/admin/articles/:id<i64>/hero"
+    upload hero<Image> to "media" publish
+    auth role Editor
+    => saveHero;
+\end{lstlisting}
+
+Do not assume that ``it is only an image, so it is harmless.'' An upload route is still a state-changing POST: authentication, CSRF/origin protection, request limits, and an auditable business operation may all apply.
+
+\section{Database and AppFs may form one business state}
+
+If database rows reference AppFs images, database and AppFs form one recoverable business state. Use a coordinated application DB + local-auth DB + AppFs snapshot under controlled stop/drain; unrelated snapshots are not automatically consistent. Redis session/cache/rate-limit state is not business source of truth.
+
+\section{Static assets and uploaded files are different}
+
+CSS, JavaScript, icons, and other versioned assets shipped with the program have a different lifecycle from user uploads. The static root should be a read-only deployment artifact; the AppFs data root should be a separate, controlled writable runtime area.
+
+This separation prevents several classes of mistakes:
+
+\begin{itemize}
+  \item deployment cannot overwrite user media;
+  \item upload cannot modify application code or versioned assets;
+  \item backup clearly distinguishes business data from reinstallable release artifacts;
+  \item reverse-proxy rules can be designed more cleanly.
+\end{itemize}
+
+\section{What not to do}
+
+\begin{itemize}
+  \item Do not use the client filename directly as a filesystem path.
+  \item Do not trust multipart \code{Content-Type}.
+  \item Do not expose the entire AppFs data root through an Apache/Nginx alias.
+  \item Do not manually interpolate an \code{Image} into a URL or HTML.
+  \item Do not treat DB and AppFs as unrelated recovery states when references exist between them.
+  \item Do not bypass operator upload/pixel limits from application code.
+\end{itemize}
+
+\section{Current media-surface limits}
+
+The V1 media surface is intentionally small. Do not build on undocumented assumptions. The current baseline does not promise an automatic thumbnail/resize pipeline, WebP/AVIF conversion, EXIF normalization or metadata stripping, a complete admin media browser, S3/object-storage backends, or general Markdown image syntax.
+
+If an application needs one of these, treat it as a separate architectural feature with its own resource, security, and lifecycle rules.
+
+\section{Developer upload checklist}
+
+{\small
+\begin{tabularx}{\textwidth}{@{}Y Y@{}}
+1. Auth/authorization correct? & 2. AppFs root separate and non-public? \\
+3. Reasonable byte limit? & 4. Pixel limit for images too? \\
+5. Using \code{Image} for images? & 6. Filename/MIME treated only as metadata? \\
+7. Typed reference in DB? & 8. \code{@image} in HTML? \\
+9. DB + AppFs backed up together? & 10. No reverse-proxy alias for data root? \\
+\end{tabularx}
+}
+
+\section{Verified companion examples}
+For exact current syntax, use:
+\begin{itemize}
+  \item \path{examples/upload/app.vrn} -- general upload boundary;
+  \item \path{examples/media/app.vrn} -- validated media surface;
+  \item \path{examples/typed-multipart/main.vrn} -- typed multipart decoding.
+\end{itemize}
+
+\section{Practice: threat-model one upload}
+\paragraph{Exercise mode: supported.} Use the supported method defined in the preface.
+
+For an image upload, enumerate size, pixel count, filename, MIME metadata, decoded format, storage location, authorization, backup, and serving path. Decide which values are trusted only after framework validation and which remain untrusted metadata forever.
+
+\section{Common mistake: putting uploads under the static root}
+Static assets are deployment artifacts; uploads are mutable application data. Combining the two weakens rollback and backup semantics and can accidentally bypass authorization or content-handling rules.
+
+\section{Running project checkpoint: Secure Notes}
+Optionally attach one image to a note using the typed media path. Keep the file outside the static release tree, store only the typed reference needed by the application, and verify that deleting or replacing a note cannot expose an unrelated user's media.

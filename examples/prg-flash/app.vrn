@@ -1,0 +1,22 @@
+#[page]
+fn articles(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {
+        <main>
+            @flash()
+            <h1>Articles</h1>
+            <form method="post" @action(saveArticle)>
+                <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+                <button type="submit">Save</button>
+            </form>
+        </main>
+    });
+}
+
+#[action]
+fn saveArticle(ctx: ActionContext) -> Result<Redirect, PageError> {
+    flash success "Article saved";
+    return Ok(redirect(articles()));
+}
+
+route articles GET "/articles" public => articles;
+route saveArticle POST "/articles/save" public => saveArticle;

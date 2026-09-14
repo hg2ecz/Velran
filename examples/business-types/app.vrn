@@ -1,0 +1,23 @@
+model Invoice {
+    id: Uuid
+    issued: Date
+    createdAt: DateTime
+    net: Decimal
+}
+
+#[action]
+fn calculate(
+    ctx: ActionContext,
+    net: Decimal,
+    tax: Decimal,
+    invoiceId: Uuid,
+    issued: Date,
+    createdAt: DateTime
+) -> Result<Json, PageError> {
+    let gross = net + tax;
+    return Ok(json(gross));
+}
+
+route calculate POST "/api/calculate"
+    json net<Decimal> tax<Decimal> invoiceId<Uuid> issued<Date> createdAt<DateTime>
+    public => calculate;

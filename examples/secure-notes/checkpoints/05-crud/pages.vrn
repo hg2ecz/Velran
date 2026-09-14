@@ -1,0 +1,46 @@
+#[page]
+fn notes(ctx: PageContext, db: Db) -> Result<Html, PageError> {
+    let notes = queries::listNotes(db, authPrincipal)?;
+    return Ok(html {
+        <main>
+            @flash()
+            <h1>Secure Notes</h1>
+            <form method="post" @action(createNote)>
+                <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+                <label>Title <input name="title" maxlength="120"></label>
+                <label>Body <textarea name="body" maxlength="4000"></textarea></label>
+                <button type="submit">Create note</button>
+            </form>
+            <ul>
+                @for note in notes {
+                    <li><a @href(note, note.id)>{{ note.title }}</a></li>
+                }
+            </ul>
+        </main>
+    });
+}
+
+#[page]
+fn note(ctx: PageContext, db: Db, id: i64) -> Result<Html, PageError> {
+    let note = queries::noteById(db, id)?;
+    authorize note owner ownerUsername;
+    return Ok(html {
+        <main>
+            <h1>{{ note.title }}</h1>
+            <p>{{ note.body }}</p>
+            <form method="post" @action(updateNote, note.id)>
+                <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+                <label>Title <input name="title" value="{{ note.title }}" maxlength="120"></label>
+                <label>Body <textarea name="body" maxlength="4000">{{ note.body }}</textarea></label>
+                <button type="submit">Save</button>
+            </form>
+            <form method="post" @action(deleteNote, note.id)>
+                <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+                <button type="submit">Delete</button>
+            </form>
+        </main>
+    });
+}
+
+route notes GET "/notes" auth user => pages::notes;
+route note GET "/notes/:id<i64>" auth user => pages::note;

@@ -1,0 +1,12 @@
+[package]
+name = "native-runtime"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+authors = ["Zsolt Krüpl"]
+
+[dependencies]
+native-build = { path = "../native-build" }
+executable-ir = { path = "../executable-ir" }
+runtime-abi = { path = "../runtime-abi" }
+observability = { path = "../observability" }

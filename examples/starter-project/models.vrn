@@ -1,0 +1,5 @@
+model Article {
+    id: i64
+    slug: Slug
+    title: String
+}

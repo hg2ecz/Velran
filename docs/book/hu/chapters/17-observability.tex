@@ -1,0 +1,401 @@
+\chapter{Naplózás, audit, metrics és hibakeresés}
+
+\noindent\textbf{Tanulási út: Teljes út / üzemeltetési mélység.} Akkor olvasd, ha production diagnosztikáért, telemetriáért és audit evidence-ért felelsz.\par\medskip
+
+\invariantblock{Biztonsági invariáns: a telemetry nem adatdump}{A log és trace csak az üzemeltetéshez és vizsgálathoz szükséges minimális bizonyítékot őrizze meg, és ne váljon secretek, credentialök, tokenek vagy nyers request bodyk második adattárává.}
+
+Production hibakeresésnél össze kell kapcsolni a requestet, route-ot, státuszt, security döntést és az esetleges tartós business audit eseményt.
+
+\noindent\textbf{Első olvasás.} Fókuszálj a request ID-ra, naplóosztályokra, redaction/cardinality szabályokra, healthre és a hibakeresési folyamatra. A proxy-, rotation- és retention-részletek operátori referenciaanyagok.\par\medskip
+
+A Velran ehhez négy külön felületet ad:
+
+\begin{itemize}
+  \item strukturált \textbf{server log} a technikai és lifecycle eseményekhez;
+  \item strukturált \textbf{access log} a HTTP kérésekhez;
+  \item strukturált \textbf{audit log} a security és felhasználói aktivitáshoz;
+  \item külön listen socketen elérhető \textbf{Prometheus metrics} felületet.
+\end{itemize}
+
+Ehhez társul az alkalmazás adatbázisában tárolható, tranzakciós \textbf{business audit trail}. Fontos: az audit log és a business audit nem ugyanaz.
+
+\section{A három naplóosztály szerepe}
+
+Ajánlott production konfiguráció:
+
+\begin{lstlisting}
+[observability]
+metrics_listen = "127.0.0.1:9090"
+allow_public_metrics = false
+access_log = true
+
+[logging]
+server_file = "/var/log/velran/server.log"
+access_file = "/var/log/velran/access.log"
+audit_file = "/var/log/velran/audit.log"
+stderr = true
+\end{lstlisting}
+
+A fájlok célja eltérő.
+
+\begin{description}
+  \item[server.log] Indulás, leállás, dependency-hibák, technikai és belső runtime események. Ezt nézd először, ha a szerver nem indul, readiness hibás, vagy egy háttérkomponens problémát jelez.
+  \item[access.log] Egy rekord HTTP kérésenként. Ez adja a forgalmi és latency nyomot: method, route, státusz, időtartam, kliens IP, be- és kimenő byte-ok, request ID.
+  \item[audit.log] Biztonsági és felhasználói aktivitás: login/logout, auth vagy MFA failure, policy deny, rate-limit deny, resource-profile startup audit és autentikált state-changing action.
+\end{description}
+
+Az \code{access_log = false} csak az access logot kapcsolja ki. A security/user audit ettől még megmarad.
+
+\section{Request ID: egy kérés végigkövetése}
+
+Minden sikeresen parse-olt application, static vagy health request szerver-generált azonosítót kap:
+
+\begin{lstlisting}
+X-Request-Id: velran-...
+\end{lstlisting}
+
+Az access log például ilyen lehet:
+
+\begin{lstlisting}
+{"event":"http_request","request_id":"velran-...",
+ "method":"GET","route":"articleShow","status":200,
+ "duration_ms":7,"client_ip":"203.0.113.5",
+ "bytes_in":0,"bytes_out":812}
+\end{lstlisting}
+
+A kliens által küldött \code{X-Request-Id} nem authority. A Velran saját request ID-t generál, így a támadó nem kényszerítheti rá a szerverre a saját korrelációs azonosítóját.
+
+A hibakeresés alapművelete ezért:
+
+\begin{lstlisting}
+# 1. keresd meg a request ID-t az access logban
+grep 'velran-...' /var/log/velran/access.log
+
+# 2. keresd ugyanazt a technikai logban
+grep 'velran-...' /var/log/velran/server.log
+
+# 3. security esetben az audit logban is
+grep 'velran-...' /var/log/velran/audit.log
+\end{lstlisting}
+
+A három napló együtt adja a teljes technikai képet.
+
+\section{Mit szabad és mit tilos logolni?}
+
+A log nem debug adatlerakó. Productionban különösen tilos érzékeny request tartalmat automatikusan naplózni.
+
+A Velran logfelületére nem kerülhet:
+
+\begin{itemize}
+  \item \code{Authorization} header;
+  \item Cookie vagy session ID;
+  \item CSRF token;
+  \item TOTP secret és recovery code;
+  \item DB, Redis vagy LDAP credential;
+  \item secret-file tartalma;
+  \item teljes request body vagy form payload.
+\end{itemize}
+
+Tartós üzleti bizonyítékhoz explicit, szűk auditmezőket használj request-body naplózás helyett.
+
+\section{Security audit és HTTP elutasítások}
+
+A trust-boundary elutasításoknál a Velran külön \code{security_audit} eseményt képez ugyanazzal a request ID-val. Ide tartozik a hibás/untrusted forwarding metadata 400-as elutasítása, a 401/403/421/426/429 security döntések, valamint a CSRF/CORS/origin tiltások finomabb kategorizálása. Így elkülöníthető például:
+
+\begin{itemize}
+  \item \code{proxy/invalid_forwarding}: hibás vagy nem trusted forwarding metadata;
+  \item \code{auth/unauthorized}: autentikáció hiánya API route-on;
+  \item \code{csrf/denied}, \code{cors/denied}, \code{origin/denied}: böngészős trust-boundary tiltás;
+  \item \code{policy/forbidden}: route- vagy object-authorization deny;
+  \item \code{host/mismatch}, \code{transport/https_required}: Host/TLS boundary sérülése;
+  \item \code{rate_limit/denied}: limiter miatti elutasítás.
+\end{itemize}
+
+A fejlesztő számára fontos különbség: a 403 nem feltétlen programhiba. Lehet helyes security-policy döntés is. Hibakereséskor mindig nézd meg az audit eseményt és a route policyt is.
+
+\section{Business audit: tartós üzleti változástörténet}
+
+Az operációs log eseményt ír le; a tartós business state change tranzakciós business audit rekordba való.
+
+Példa:
+
+\begin{lstlisting}[language=Velran]
+enum ArticleStatus {
+    Review
+    Published
+}
+
+transaction db {
+    Article.publishChanged(tx, id, version)?;
+    audit Article id action publish;
+        from article.status
+        to ArticleStatus.Published
+}
+\end{lstlisting}
+
+Az audit ugyanabban a DB-tranzakcióban fut, mint a módosítás. Ha az audit rekord nem írható be, a business módosítás is rollbackel. Ez erősebb garancia, mint egy külön log sor kiírása.
+
+A Velran a \code{_velran_business_audit} runtime táblába többek között az alábbiakat írja:
+
+\begin{itemize}
+  \item runtime-generált eseményazonosító és UTC timestamp;
+  \item HTTP request ID;
+  \item canonical autentikált actor;
+  \item source action;
+  \item objektumtípus és objektumazonosító;
+  \item statikus üzleti action név;
+  \item opcionális előző és új domain állapot.
+\end{itemize}
+
+\Needspace{0.30\textheight}
+A business audit statement authorizationt nem helyettesít:
+
+\begin{lstlisting}[language=Velran]
+let invoice = Invoice.byId(db, id)?;
+authorize invoice owner ownerUsername or role Accountant;
+
+transaction db {
+    Invoice.approve(tx, id, version)?;
+    audit Invoice id action approve;
+        from invoice.status
+        to InvoiceStatus.Approved
+}
+\end{lstlisting}
+
+A helyes sorrend: \textbf{azonosítás -> authorization -> módosítás -> ugyanazon tranzakción belüli audit}.
+
+\section{Platform security event, redaction és burst alert}
+
+A security monitoring strukturált platform boundary. Automatikus event keletkezik authentication/MFA abuse, policy/browser-boundary denial, webhook failure, idempotency conflict és resource exhaustion esetén.
+
+Az event schema szándékosan nem fogad arbitrary request payloadot vagy message textet. Emitted principal/source mező redacted. Ha alkalmazáskódnak érzékeny szövegből biztonságos monitoring reprezentáció kell, a trusted \code{redact(...)} builtint használd; \code{Redacted<T>} annotationnel vagy casttal nem hozható létre.
+
+A server bounded in-memory correlationt és platform-owned burst thresholdokat/cooldownt is használ. Threshold átlépéskor strukturált \code{threshold_exceeded} alert event keletkezik. Raw correlation key átmenetileg memóriában lehet, de security eventbe nem kerül.
+
+Ez a monitoring layer nem helyettesíti az enforcementet. Rate limiting, authorization, replay prevention és resource limit továbbra is blokkol; az alert detection és incident-response evidence-et ad.
+
+\section{Prometheus metrics külön management socketen}
+
+A metrics nem application route. Külön listeneren fut:
+
+\begin{lstlisting}
+[observability]
+metrics_listen = "127.0.0.1:9090"
+allow_public_metrics = false
+\end{lstlisting}
+
+Lekérdezés ugyanazon a hoston:
+
+\begin{lstlisting}
+curl http://127.0.0.1:9090/metrics
+\end{lstlisting}
+
+A listener csak a \code{/metrics} GET/HEAD kérést szolgálja ki. Nem fut rajta alkalmazás-route, session vagy auth handler.
+
+Tipikus metrikák:
+
+\begin{lstlisting}
+velran_requests_total
+velran_responses_5xx_total
+velran_auth_failures_total
+velran_csrf_failures_total
+velran_policy_denials_total
+velran_request_timeouts_total
+velran_runtime_budget_exceeded_total
+velran_rate_limit_denials_total
+velran_readiness_failures_total
+velran_request_bytes_in_total
+velran_response_bytes_out_total
+velran_active_connections
+velran_log_fallback_total
+velran_request_duration_ms_bucket
+velran_route_requests_total{route="..."}
+velran_route_5xx_total{route="..."}
+velran_route_duration_ms_sum{route="..."}
+\end{lstlisting}
+
+A \code{velran_policy_denials_total} a security-policy tiltásokat követi: a 403/421/426 döntések mellett a kifejezetten forwarding metadata hibaként felismert 400-as elutasítás is ide számít. A normál malformed request 400 nem security policy denial.
+
+A legfontosabb szabály a \textbf{bounded cardinality}. A \code{route} label compiler-owned route név vagy fix reserved név. Raw URL, path paraméter, IP, username, tenant, session ID és request ID soha ne legyen metric label. Ellenkező esetben egy támadó korlátlan idősor-számot hozhatna létre.
+
+\Needspace{0.42\textheight}
+\section{Apache vagy Nginx mellett ki scrape-elje a metricset?}
+
+A publikus webes proxy és a metrics listener külön trust boundary. Tipikus elrendezés:
+
+\begin{lstlisting}
+Internet
+   |
+   v
+Apache/Nginx :443
+   |
+   v
+127.0.0.1:8080  Velran server
+
+Prometheus agent
+   |
+   v
+127.0.0.1:9090  Velran metrics
+\end{lstlisting}
+
+A metrics portot ne proxyd ki automatikusan ugyanarra a publikus domainre. Ha távoli Prometheus szervernek kell elérnie, használj privát management hálózatot, ACL-t vagy külön autentikált monitoring proxyt.
+
+\section{Health: liveness és readiness nem ugyanaz}
+
+A Velran beépített szerver endpointjai:
+
+\begin{lstlisting}
+GET  /health/live
+HEAD /health/live
+
+GET  /health/ready
+HEAD /health/ready
+\end{lstlisting}
+
+A liveness csak azt jelzi, hogy a szerver event loop él. Nem hív DB-t, Redist vagy LDAP-ot.
+
+A readiness azt mutatja, hogy a kiszolgáláshoz szükséges konfigurált runtime dependency-k elérhetők. DB vagy Redis hiba/timeout esetén \code{503 Service Unavailable} lehet a válasz.
+
+Ezért load balancernél:
+
+\begin{itemize}
+  \item a \textbf{liveness} alapján ne vedd ki rögtön az instancet egy rövid DB kiesés miatt;
+  \item a \textbf{readiness} alapján viszont ideiglenesen kivehető a forgalomból.
+\end{itemize}
+
+A health endpoint nem üzleti monitoring API: szándékosan minimális státuszt közöl.
+
+\Needspace{0.46\textheight}
+\section{Logrotate és SIGHUP}
+
+A Velran file logging append módban ír. Productionban a logrotációt az operációs rendszerre bízd. A repository példája: \code{examples/logrotate/velran}.
+
+Egyszerűsített minta:
+
+\begin{lstlisting}
+/var/log/velran/server.log /var/log/velran/access.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 velran velran
+    sharedscripts
+    postrotate
+        systemctl kill -s HUP --kill-who=main velran.service || true
+    endscript
+}
+\end{lstlisting}
+
+A \code{SIGHUP} jelentése tudatosan korlátozott. Behind-proxy módban újranyitja a logfájlokat és tranzakciósan újraépíti a domain/application hosting állapotot; nem általános process-szintű \code{server.toml} rekonfiguráció. Az alkalmazásforrás változását normál esetben az automatikus source-reload supervisor kezeli.
+
+Konfigurációmódosításnál:
+
+\begin{lstlisting}
+/usr/local/bin/velran-server \
+  --config /usr/local/etc/velran/server.toml \
+  --check-config
+
+systemctl restart velran.service
+\end{lstlisting}
+
+Ez auditálhatóbb és kiszámíthatóbb, mint egy részlegesen sikerülő hot reload.
+
+\section{Mi történik, ha a logfájl nem írható?}
+
+A file logging bounded writer queue-t használ. Ha a queue megtelik, a file sink kiesik vagy a writer nem érhető el, a Velran stderr fallbacket használ és növeli a következő metrikát:
+
+\begin{lstlisting}
+velran_log_fallback_total
+\end{lstlisting}
+
+Ezt érdemes riasztási feltételként kezelni. Ha növekszik, lehet:
+
+\begin{itemize}
+  \item jogosultság- vagy filesystem-hiba;
+  \item megtelt lemez;
+  \item hibás logrotate/reopen;
+  \item tartós log-processing nyomás.
+\end{itemize}
+
+A logfájl útvonalának parent directory-ja létezzen. Unix rendszeren a runtime a logfájlt \code{0640} móddal, symlink-követés nélkül nyitja meg; az operatornak ettől még helyesen kell kialakítania a könyvtárjogosultságokat.
+
+\section{Gyakorlati production hibakeresési folyamat}
+
+Egy 5xx vagy ``lassú az oldal'' bejelentésnél ne találgass. Használj reprodukálható sorrendet.
+
+\begin{enumerate}
+  \item \textbf{Liveness:} fut-e maga a process?
+  \item \textbf{Readiness:} elérhető-e DB/Redis?
+  \item \textbf{Access log:} melyik route, státusz, duration és request ID érintett?
+  \item \textbf{Server log:} ugyanahhoz a request ID-hoz tartozik-e dependency/runtime hiba?
+  \item \textbf{Audit log:} security policy vagy rate limit utasította-e el?
+  \item \textbf{Metrics:} egyedi eset vagy trendszerű 5xx/latency növekedés?
+  \item \textbf{Reverse proxy:} a hiba az Apache/Nginx előtt, benne vagy a Velran mögött keletkezik?
+\end{enumerate}
+
+Példa gyors ellenőrzésre:
+
+\begin{lstlisting}
+curl -i https://www.example.com/health/live
+curl -i https://www.example.com/health/ready
+# Proxy deploymentnel plusz belso upstream-proba:
+curl -i http://127.0.0.1:8080/health/ready
+curl -s http://127.0.0.1:9090/metrics | grep velran_responses_5xx_total
+journalctl -u velran.service --since "10 min ago"
+\end{lstlisting}
+
+Ha a loopback Velran endpoint jó, de a publikus domain rossz, a következő vizsgálati réteg az Apache/Nginx, TLS vagy forwarded-header policy. Ha a loopback readiness is 503, előbb a backend dependency-ket vizsgáld.
+
+\section{Minimum monitoring baseline}
+
+Egy kisebb production telepítésnél is legyen legalább riasztás az alábbiakra:
+
+\begin{itemize}
+  \item readiness tartósan nem ready;
+  \item 5xx arány vagy számláló hirtelen növekedése;
+  \item request latency érdemi romlása;
+  \item auth/policy/rate-limit denial szokatlan kiugrása;
+  \item \code{velran_runtime_budget_exceeded_total} növekedése;
+  \item \code{velran_log_fallback_total} növekedése;
+  \item process restart loop vagy váratlan shutdown.
+\end{itemize}
+
+A konkrét thresholdot nem a nyelvnek kell hardcode-olnia. A forgalom, SLO és üzleti kritikalitás alapján az üzemeltető állítja be.
+
+\section{Retention, SIEM és auditvédelem}
+
+A retention szervezeti és jogi policy. A Velran nem kényszerít rá univerzális megőrzési időt.
+
+A helyi \code{audit.log} fontos operációs nyom, de önmagában nem erős tamper-evident archívum, mert a service host adminisztrátora vagy megfelelő filesystem jogosultságú szereplő módosíthatja. Magasabb assurance esetén továbbítsd centralizált, hozzáférés-védett vagy append-only log/SIEM rendszerbe.
+
+A business audit adatbázis-tábla ugyancsak nem véd a DB-admin közvetlen módosítása ellen. A két réteg együtt ad jó alkalmazási nyomot, de compliance környezetben a külső, független logarchívum marad fontos.
+
+\section{Ellenőrzőlista}
+
+Production indulás előtt ellenőrizd:
+
+\begin{itemize}
+  \item külön server/access/audit log útvonal van;
+  \item a logkönyvtár jogosultságai szűkek;
+  \item request body és secret nincs logolva;
+  \item a metrics listener nem publikus véletlenül;
+  \item a Prometheus labelk bounded cardinality-jűek;
+  \item a liveness és readiness külön van kezelve;
+  \item logrotate után SIGHUP történik, configmódosítás után restart;
+  \item \code{velran_log_fallback_total} monitorozva van;
+  \item üzleti workflow esetén a business audit ugyanabban a DB-tranzakcióban fut;
+  \item az audit log központi továbbításáról és retentionjéről van dokumentált döntés.
+\end{itemize}
+
+\section{Gyakorlat: tervezz evidence trailt}
+\paragraph{Gyakorlási mód: önálló.} Használd az előszóban meghatározott önálló módszert.
+
+Egy fontos kéréshez sorold fel azokat az operátori tényeket, amelyekből rekonstruálható, mi történt anélkül, hogy secretet vagy teljes érzékeny payloadot logolnál. Legyen correlation/request identity, eredmény, latency, policy rejection és releváns domain-audit azonosító.
+
+\section{Tipikus hiba: események helyett adatot logolunk}
+A nagyobb logvolumen nem automatikusan jobb observability. Strukturált eseményeket részesíts előnyben, amelyek döntéseket és eredményeket magyaráznak. Credentialt, tokent, request body-t vagy érzékeny üzleti rekordot ne másolj logba csak azért, mert elérhető.
+
+\section{Folyamatos mintaprojekt: Secure Notes}
+Definiálj observable eseményeket sikertelen autorizációra, publish átmenetre, integration failure-re és váratlan szerverhibára. A business audit és az operational telemetry maradjon külön, de legyen korrelálható.

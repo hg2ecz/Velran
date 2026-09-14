@@ -1,0 +1,107 @@
+#[page]
+fn fft4096(ctx: PageContext) -> Result<Html, PageError> {
+    let n = 4096;
+    let mut real = vec![0.0f32; 4096];
+    let mut imag = vec![0.0f32; 4096];
+
+    // Deterministic test signal:
+    // two deterministic tones at bins 64 and 256
+    let mut i = 0;
+    while i < n {
+        let sample = i as f32;
+        let size = n as f32;
+        let a64 = 6.283185307179586f32 * 64.0f32 * sample / size;
+        let a256 = 6.283185307179586f32 * 256.0f32 * sample / size;
+        real[i] = a64.sin() + 0.5f32 * a256.sin();
+        i += 1;
+    }
+
+    let started = std::time::Instant::now();
+
+    // In-place bit-reversal permutation.
+    i = 1;
+    let mut j = 0;
+    while i < n {
+        let mut bit = n / 2;
+        while j >= bit {
+            j -= bit;
+            bit /= 2;
+        }
+        j += bit;
+        if i < j {
+            let tr = real[i];
+            let ti = imag[i];
+            real[i] = real[j];
+            imag[i] = imag[j];
+            real[j] = tr;
+            imag[j] = ti;
+        }
+        i += 1;
+    }
+
+    // Iterative radix-2 Cooley-Tukey FFT.
+    let mut span = 2;
+    while span <= n {
+        let angle = -6.283185307179586f32 / span as f32;
+        let step_r = angle.cos();
+        let step_i = angle.sin();
+        let half = span / 2;
+
+        i = 0;
+        while i < n {
+            let mut wr = 1.0f32;
+            let mut wi = 0.0f32;
+            j = 0;
+            while j < half {
+                let even = i + j;
+                let odd = even + half;
+
+                let vr = real[odd] * wr - imag[odd] * wi;
+                let vi = real[odd] * wi + imag[odd] * wr;
+                let ur = real[even];
+                let ui = imag[even];
+
+                real[even] = ur + vr;
+                imag[even] = ui + vi;
+                real[odd] = ur - vr;
+                imag[odd] = ui - vi;
+
+                let next_wr = wr * step_r - wi * step_i;
+                let next_wi = wr * step_i + wi * step_r;
+                wr = next_wr;
+                wi = next_wi;
+                j += 1;
+            }
+            i += span;
+        }
+        span *= 2;
+    }
+
+    let elapsed = started.elapsed().as_nanos();
+    let peak64 = (real[64] * real[64] + imag[64] * imag[64]).sqrt();
+    let peak256 = (real[256] * real[256] + imag[256] * imag[256]).sqrt();
+    let mut correct = true;
+    if peak64 < 1900.0f32 {
+        correct = false;
+    }
+    if peak64 > 2200.0f32 {
+        correct = false;
+    }
+    if peak256 < 900.0f32 {
+        correct = false;
+    }
+    if peak256 > 1150.0f32 {
+        correct = false;
+    }
+
+    Ok(html {
+        <h1>Velran F32 FFT4096 benchmark</h1>
+        <p>FFT size: 4096</p>
+        <p>FFT elapsed: {{ elapsed }} ns</p>
+        <p>bin 64 magnitude: {{ peak64 }}</p>
+        <p>bin 256 magnitude: {{ peak256 }}</p>
+        <p>correctness window passed: {{ correct }}</p>
+    })
+}
+
+route fft4096 GET "/fft4096" public => fft4096;

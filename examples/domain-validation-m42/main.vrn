@@ -1,0 +1,18 @@
+model Link {
+    id: i64
+    target: Url
+    externalCode: String
+}
+
+form LinkForm {
+    target<Url>
+    externalCode<String>
+    validate externalCode pattern "^[A-Z]{3}-[0-9]{4}$"
+}
+
+#[action]
+fn save(ctx: ActionContext, target: Url, externalCode: String) -> Result<Json, PageError> {
+    return Ok(json(target));
+}
+
+route save POST "/links" form LinkForm public => save;

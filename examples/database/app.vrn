@@ -1,0 +1,73 @@
+model Product {
+    id: i64
+    name: String
+    price: i64
+}
+
+#[query]
+fn loadProduct(
+    db: Db,
+    id: i64
+) -> Result<Product, DbError> sql {
+    SELECT id, name, price FROM products WHERE id = :id
+}
+
+#[query]
+fn insertProduct(
+    tx: Transaction,
+    name: String,
+    price: i64
+) -> Result<Product, DbError> sql {
+    INSERT INTO products(name, price) VALUES (:name, :price) RETURNING id, name, price
+}
+
+#[page]
+fn product(
+    ctx: PageContext,
+    db: Db,
+    id: i64
+) -> Result<Html, PageError> {
+    let product = loadProduct(db, id)?;
+    return Ok(html {
+        <!doctype html>
+        <html lang="hu">
+            <body>
+                <h1>{{ product.name }}</h1>
+                <p>Azonosító: {{ product.id }}</p>
+                <p>Ár: {{ product.price }}</p>
+            </body>
+        </html>
+    });
+}
+
+#[page]
+fn newProduct(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {
+        <!doctype html>
+        <html lang="hu"><body>
+            <form method="post" @action(productCreate)>
+                <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+                <label>Név <input name="name"></label>
+                <label>Ár <input name="price" type="number"></label>
+                <button type="submit">Létrehozás</button>
+            </form>
+        </body></html>
+    });
+}
+
+#[action]
+fn createProduct(
+    ctx: ActionContext,
+    db: Db,
+    name: String,
+    price: i64
+) -> Result<Redirect, PageError> {
+    transaction db {
+        insertProduct(tx, name, price)?;
+    }
+    return Ok(redirect(product(1)));
+}
+
+route product GET "/products/:id<i64>" public => product;
+route productNew GET "/products/new" public => newProduct;
+route productCreate POST "/products" form name<String> price<i64> public => createProduct;

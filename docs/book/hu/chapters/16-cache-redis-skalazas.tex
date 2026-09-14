@@ -1,0 +1,390 @@
+\chapter{Cache, Redis, rate limiting és többpéldányos működés}
+
+\noindent\textbf{Tanulási út: Teljes út / skálázás.} Akkor olvasd, amikor mérés alapján valóban cache-re, Redisre vagy horizontális skálázásra van szükség.\par\medskip
+
+\noindent\textbf{Első olvasás.} Tanuld meg, mi cache-elhető, hogyan invalidál biztonságosan a generation modell, és hogyan viselkedik fail closed módon a shared session/rate limit. A backend tuning és topológiai részletek referenciaanyagok.\par\medskip
+
+Több instance esetén a session state, rate limit és public cache ownershipja legyen explicit. A Velran a Redist runtime-owned infrastruktúraként kezeli: az alkalmazáskód policyt deklarál, általános key/value API-t nem kap. A business source of truth továbbra is DB/AppFs.
+
+\section{Miért nem általános Redis kliens?}
+
+A V1 nyelvben nincs olyan művelet, amellyel a program tetszőleges Redis kulcsot írhatna vagy olvashatna. A Redis compiler/runtime-owned infrastruktúra:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}L{0.27\textwidth}Y@{}}
+\toprule
+\textbf{Felhasználás} & \textbf{Ki birtokolja a kulcsot és a szabályokat?} \\
+\midrule
+session & runtime/auth réteg \\
+TOTP replay & runtime/auth réteg \\
+login rate limit & runtime/auth réteg \\
+route rate limit & runtime + trusted policy config \\
+public page cache & compiler/runtime \\
+üzleti adat & nem Redisben; application DB-ben/AppFs-ben \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Ezért egy wiki cikkét, CMS workflow állapotát vagy számlázási rekordját ne Redisbe tedd. Az ilyen adat üzleti source of truth, ezért a typed SQL-lel elért application DB-be tartozik. Redis elvesztése után a rendszernek újraépíthető állapotból kell indulnia: a sessionök megszűnhetnek, a cache újraépülhet, a rate-limit ablakok újraindulhatnak.
+
+\section{Production Redis konfiguráció}
+
+A Redis URL secret, ezért fájlból érkezzen:
+
+\begin{lstlisting}
+[redis]
+url_file = "/run/secrets/velran/redis-url"
+allow_insecure = false
+\end{lstlisting}
+
+A secret file például TLS-es URL-t tartalmazhat:
+
+\begin{lstlisting}
+rediss://velran:SECRET@redis.internal.example/0
+\end{lstlisting}
+
+Productionben az \code{allow_insecure = false} legyen az alap. A Redis hálózati elérhetősége önmagában nem jogosultsági modell: korlátozd hálózati ACL-lel/firewallal is, és a credentialt csak a Velran service user olvashassa.
+
+A runtime külön namespace-eket használ a különböző célokra. A public cache például \code{velran-cache} namespace-ben él; az alkalmazás nem választ tetszőleges key prefixet.
+
+\section{Shared session több szerverpéldánnyal}
+
+Az in-memory session store fejlesztési kényelem, nem multi-instance production modell:
+
+\begin{lstlisting}
+                 +--> Velran A --+
+Browser -> proxy |               |--> Redis
+                 +--> Velran B --+
+\end{lstlisting}
+
+Ha a session csak A-ban él, egy B-re routolt request elveszíti az authentication állapotot. Shared session backend kell; a sticky session nem failover- vagy rollout-stratégia.
+
+Redis production környezetben többek között az alábbi auth state-et osztja meg:
+
+\begin{itemize}
+  \item sessionök;
+  \item TOTP replay védelem;
+  \item login rate-limit állapot.
+\end{itemize}
+
+Így nincs szükség arra, hogy ugyanaz a böngésző mindig ugyanarra a példányra kerüljön.
+
+\subsection*{A local auth fontos kivétele}
+
+A session shared lehet, de a V1 local-auth identity store SQLite és single-node identity megoldás. Ezért több application instance esetén a jelenlegi shared identity backend az LDAP/LDAPS. Ne téveszd össze a két réteget:
+
+\begin{description}
+  \item[Redis session] megmondja, hogy egy már autentikált request milyen trusted principalhoz és auth state-hez tartozik;
+  \item[identity backend] a login során ellenőrzi a credentialt és az account/role állapotot.
+\end{description}
+
+Több instance-nál shared Redis session mellett is közös identity forrás kell; V1-ben erre az LDAP a production út.
+
+\section{Public page cache}
+
+A public cache célja, hogy nyilvános, felhasználótól független GET oldalnál ne fusson minden requestre ugyanaz a query és HTML render.
+
+Deklaráció:
+
+\begin{lstlisting}[language=Velran]
+route frontPage GET "/"
+    public cache public ttl 60
+    => frontPage;
+\end{lstlisting}
+
+A fejlesztő csak a cache-elési szándékot és a route TTL-jét adja meg. A kulcsot a runtime készíti canonical, hash-elt formában többek között a route nevéből, route generationből, pathból, rendezett typed query inputból és reprezentációból.
+
+Az alkalmazás tehát nem írhat ilyet:
+
+\begin{lstlisting}
+cache.set("homepage:" + userInput, rendered)
+\end{lstlisting}
+
+Ilyen általános cache API nincs. Ez megakadályozza a kulcsnév-konvenciók szétcsúszását, a véletlen PII-keyeket és több invalidációs stratégia keverését.
+
+\section{Mit szabad public cache-be tenni?}
+
+A \code{cache public} név szó szerinti. Csak olyan GET route legyen cache-elt, amelynek válasza nem függ a felhasználó sessionjétől vagy request-specifikus security state-től.
+
+A compiler tiltja többek között az olyan függéseket, mint:
+
+\begin{lstlisting}
+csrfToken
+authPrincipal
+authMfaVerified
+\end{lstlisting}
+
+Ez azért kritikus, mert sikeres cache-elt válasz HTTP szinten is public cache-elhető:
+
+\begin{lstlisting}
+Cache-Control: public, max-age=<ttl>
+\end{lstlisting}
+
+Vagyis ugyanaz a response reverse proxy vagy CDN cache-be is kerülhet. Account oldal, admin felület, személyre szabott navigáció vagy flash üzenetet fogyasztó oldal ezért nem public cache.
+
+\section{Operator által szabott cache-határok}
+
+A route nem állíthat tetszőlegesen nagy TTL-t. A trusted server config kemény plafont ad:
+
+\begin{lstlisting}
+[cache]
+max_ttl_secs = 3600
+max_entries = 10000
+max_bytes = 67108864
+allow_memory = false
+\end{lstlisting}
+
+A \code{max_ttl_secs} a route által kérhető TTL maximuma. A memória backend entry- és byte-limitjei bounded development fallbackot adnak, nem production skálázási stratégiát.
+
+Ha az alkalmazás public cache-t használ, de Redis nincs konfigurálva, a server production default mellett nem indul el. Fejlesztéshez explicit engedélyezhető a memory cache, de ezt ne vidd át észrevétlenül productionbe.
+
+\section{Cache invalidation: generation, nem kulcskeresés}
+
+State-changing route megjelölheti, mely cache-elt route-ok válnak érvénytelenné:
+
+\begin{lstlisting}[language=Velran]
+route publish POST "/publish"
+    public invalidate cache frontPage article
+    => publish;
+\end{lstlisting}
+
+Az invalidation nem Redis \code{SCAN} és nem kulcslista törlése. A runtime route-generationt növel. Az ezután érkező request már új generationből készíti a cache key-t, ezért a korábbi entry automatikusan elérhetetlenné válik az új forgalom számára.
+
+Ennek két fontos következménye van:
+
+\begin{itemize}
+  \item az invalidation O(1) jellegű, nem függ a korábban létrejött cache key-ek számától;
+  \item shared Redis esetén minden instance ugyanazt az új generationt látja, ezért az invalidáció cluster-safe.
+\end{itemize}
+
+A régi entry fizikailag egy ideig még Redisben maradhat, de logikailag már nem része az aktuális cache namespace-nek és TTL alapján kifut.
+
+\section{Stampede védelem és annak határa}
+
+Cache miss után több azonos request egyszerre érkezhet. A Velran ugyanazon instance-en ugyanarra a cache keyre single-flight jelleggel csak egy requestet enged újraépíteni; a többiek várnak, majd újra cache-t olvasnak.
+
+Ez fontos, de a határát is ismerni kell: V1-ben nincs distributed single-flight lease. Két külön Velran instance ugyanannak a lejárt kulcsnak az újraépítését egyszerre is elkezdheti. Ezért a cache-elhető page queryje önmagában is legyen ésszerű költségű és jól indexelt. A cache nem mentség drága, kontrollálatlan adatbázis-műveletre.
+
+\section{Redis hiba cache-elt request közben}
+
+A public cache backend hibája nem változhat csendben más konzisztenciamodellre. Cache backend elérhetetlenségnél a Velran \code{cache_unavailable} hibával szolgáltatáshibát adhat a cache-elt útvonalon ahelyett, hogy implicit, korlátlan fallbackként minden requestet az adatbázisra engedne.
+
+Ez productionben hasznos fail-closed viselkedés: Redis kiesés ne okozzon észrevétlen DB thundering herdöt. A readiness probe DB/Redis függőségi hibánál 503-at adhat, ezért a load balancer ki tudja venni a példányt a forgalomból.
+
+\section{Route rate limiting}
+
+A route nem numerikus limitet ír a forráskódba, hanem trusted policy nevet kér:
+
+\begin{lstlisting}[language=Velran]
+route api GET "/api/status"
+    public rate publicApi
+    => api;
+\end{lstlisting}
+
+A konkrét számok operátori configban élnek:
+
+\begin{lstlisting}
+[policy.publicApi]
+limit = 120
+window_secs = 60
+scope = "ip_route"
+\end{lstlisting}
+
+Ez tudatos elválasztás. Az alkalmazás megmondhatja, hogy az endpointot védeni kell a \code{publicApi} policy-val, de nem tudja önkényesen felülírni a production erőforrás- és abuse policy-t.
+
+\section{Rate-limit scope-ok}
+
+A V1 scope-ok:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}L{0.22\textwidth}Y@{}}
+\toprule
+\textbf{Scope} & \textbf{Bucket alanya} \\
+\midrule
+\code{ip} & effective client IP \\
+\code{route} & minden kliens közös route bucketje \\
+\code{ip_route} & effective client IP + route \\
+\code{user} & autentikált canonical principal \\
+\code{user_route} & canonical principal + route \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+A \code{user} és \code{user_route} public route-on startup error, mert nincs trusted autentikált principal, amelyből a bucket képződhetne.
+
+IP-scope esetén a Velran nem vakon bízik az \code{X-Forwarded-For} fejlécben. Előbb a trusted proxy policy alapján állapítja meg az effective client IP-t. Emiatt Apache/Nginx mögött a proxy CIDR helyes konfigurálása rate-limit security kérdés is.
+
+\section{Fixed-window modell több instance-nál}
+
+A route limiter fixed-window bucketet használ. Redisben minden instance ugyanazt a bucketet növeli atomikusan, ezért a limit nem példányonként értendő.
+
+Például két szerver mellett:
+
+\begin{lstlisting}
+limit = 120 / 60 sec
+
+nem: 120 request A + 120 request B
+hanem: 120 request a shared bucketben
+\end{lstlisting}
+
+A subject stabil hashként kerül a Redis kulcsba, így a raw username vagy IP nem jelenik meg közvetlenül keyként.
+
+Limit túllépésekor a válasz:
+
+\begin{lstlisting}
+HTTP/1.1 429 Too Many Requests
+Retry-After: 60
+\end{lstlisting}
+
+Redis limiter hiba esetén a policy fail-closed:
+
+\begin{lstlisting}
+503 rate_limiter_unavailable
+\end{lstlisting}
+
+Ez biztonságosabb annál, mintha Redis hiba idején automatikusan korlátlanra nyílna az endpoint.
+
+\section{Memory backend csak fejlesztési kivétel}
+
+A trusted config production baseline-ja:
+
+\begin{lstlisting}
+[rate_limit]
+policies_file = "/usr/local/etc/velran/rate-limits.toml"
+allow_memory = false
+
+[cache]
+allow_memory = false
+\end{lstlisting}
+
+A memory rate limiter és memory cache explicit development escape hatch. Több process vagy több host esetén minden példány külön memóriát látna, tehát sem a limit, sem a cache-invalidation globális szemantikája nem lenne ugyanaz, mint Redis mellett.
+
+Ha lokálisan memory backenddel tesztelsz, deployment előtt mindig fuss át a production configon:
+
+\begin{lstlisting}
+velran-server --config /usr/local/etc/velran/server.toml --check-config
+\end{lstlisting}
+
+\section{Egy tipikus többpéldányos topológia}
+
+\begin{lstlisting}
+                    +--> Velran A --+--> application DB
+Internet -> proxy --|               |
+                    +--> Velran B --+--> Redis
+                            |
+                            +----------> shared AppFs (*)
+\end{lstlisting}
+
+A csillag fontos: ha az alkalmazás feltöltött fájlokat/AppFs üzleti állapotot használ, akkor több instance esetén annak tárolását is olyan deploymenttel kell megoldani, amely minden példány számára konzisztensen elérhető. A V1 AppFs API confinementet és biztonságos fájlműveleteket ad; attól még az infrastruktúra feladata eldönteni, hogyan lesz a data root több példány számára helyesen megosztott.
+
+A komponensek szerepe:
+
+\begin{itemize}
+  \item \textbf{reverse proxy/load balancer}: TLS, routing és instance-választás;
+  \item \textbf{Velran instance}: statelesshez közelítő alkalmazásprocessz, lokális bounded runtime state-tel;
+  \item \textbf{application DB}: tartós strukturált üzleti source of truth;
+  \item \textbf{AppFs}: tartós fájl/mediális üzleti állapot, ha az alkalmazás használja;
+  \item \textbf{Redis}: újraépíthető shared session/cache/rate-limit/replay infrastruktúra.
+\end{itemize}
+
+\section{Rolling restart és cache generation}
+
+Új release rolloutjánál nem kell a régi cache kulcsokat kézzel törölni. A cache key része a route generation, ezért a release/compiler által meghatározott új generation új namespace-t eredményez. Explicit üzleti invalidáció továbbra is a state-changing route deklarációjából jön.
+
+Rolling restartnál a proxy csak ready instance-nak küldjön forgalmat. A SIGTERM graceful drain útvonalat használd. Az orchestrator leállítási türelmi ideje legyen nagyobb a szerver konfigurált shutdown grace értékénél.
+
+Sticky session nem követelmény, ha a shared session backend helyesen konfigurált.
+
+\section{Mit monitorozz?}
+
+A cache és rate limit önmagában nem láthatatlan optimalizáció. Minimum production monitoring:
+
+\begin{itemize}
+  \item \code{velran_cache_hits_total} és \code{velran_cache_misses_total};
+  \item 429 válaszok és \code{velran_rate_limit_denials_total};
+  \item \code{rate_limiter_unavailable} események;
+  \item readiness 503 események Redis/DB dependency hibánál;
+  \item Redis latency, connection és memória állapot az infrastruktúra monitoringjában;
+  \item az alkalmazás DB latency-je cache miss időszakokban.
+\end{itemize}
+
+Metric labelként továbbra se használj raw IP-t, username-et, session ID-t, tenantot, request ID-t vagy teljes URL-t. A későbbi observability fejezet bounded-cardinality szabálya itt is érvényes: metric label ne legyen felhasználónként vagy kérésenként korlátlanul változó.
+
+\section{Redis recovery szerepe}
+
+A Redis ebben az architektúrában runtime state: session, cache, rate-limit és replay-védelmi állapot élhet benne, de nem ez az üzleti source of truth. Emiatt recovery során a fő kérdés nem a cache visszatöltése, hanem az, hogy a Redis elvesztése után a rendszer biztonságosan és kiszámíthatóan építse újra ezt az állapotot.
+
+A teljes backup/restore sorrendet és azt, hogy mely állapotot kell ténylegesen menteni, a \ref{ch:recovery}. fejezet tárgyalja.
+
+\section{Gyakorlati példa: cache-elt híroldal publikálással}
+
+A publikus címlap userfüggetlen, ezért cache-elhető:
+
+\begin{lstlisting}[language=Velran]
+#[page]
+fn frontPage(ctx: PageContext, db: Db)
+    -> Result<Html, PageError> {
+    let articles = latestArticles(db)?;
+    return Ok(html {
+        <main>
+            @for article in articles {
+                <a href="/cikk/{{ article.slug }}">
+                    {{ article.title }}
+                </a>
+            }
+        </main>
+    });
+}
+
+route frontPage GET "/"
+    public cache public ttl 60
+    => frontPage;
+\end{lstlisting}
+
+A publikálás autentikált state change, ezért nem cache-elhető, viszont invalidálja a címlapot:
+
+\begin{lstlisting}[language=Velran]
+route publish POST "/admin/publish/:id<i64>"
+    auth role Publisher
+    invalidate cache frontPage
+    => publish;
+\end{lstlisting}
+
+A mentális modell így egyszerű marad:
+
+\begin{enumerate}
+  \item az adatbázis a cikk igazságforrása;
+  \item a publikus HTML cache csak gyors másolat;
+  \item a publish tranzakció után az új generation miatt a következő GET friss oldalt épít;
+  \item ezt bármelyik Velran instance megteheti;
+  \item az elkészült response shared Redis cache-be kerül.
+\end{enumerate}
+
+\section{Ellenőrzőlista}
+
+Többpéldányos production deployment előtt ellenőrizd:
+
+\begin{itemize}
+  \item Redis URL secret file-ból jön, TLS/security policy megfelel;
+  \item shared session miatt nincs szükség sticky sessionre;
+  \item local auth SQLite-ot nem kezeled shared multi-instance identity store-ként;
+  \item public cache csak valóban userfüggetlen GET route-on van;
+  \item minden releváns state-changing route explicit cache invalidációt deklarál;
+  \item a cache TTL nem lépi túl az operator maximumot;
+  \item productionben \code{allow_memory = false} cache-hez és rate limiterhez;
+  \item rate-limit scope trusted identityből/effective client IP-ből képződik;
+  \item Redis outage esetére 503/readiness viselkedést tesztelted;
+  \item cache hit/miss és rate-limit denial metrikák monitorozva vannak;
+  \item Redis állapotot nem tekinted üzleti backup kötelező részének.
+\end{itemize}
+
+\section{Gyakorlat: osztályozd a cache-elhető adatot}
+\paragraph{Gyakorlási mód: önálló.} Használd az előszóban meghatározott önálló módszert.
+
+Minden cache-jelöltnél nevezd meg az authoritative source-ot, key scope-ot, lifetime-ot, invalidation triggert és authorization contextet. Ha ezek közül bármelyik bizonytalan, halaszd a cache-t addig, amíg a contract explicit nem lesz.
+
+\section{Tipikus hiba: consistency előtt cache-elünk}
+A cache a stale vagy cross-user adatot is sokkal gyorsabbá teheti. A performance optimalizáció őrizze meg ugyanazokat az ownership és visibility szabályokat, mint a nem cache-elt út, az invalidation pedig szűken kapcsolódjon az authoritative állapotváltozáshoz.
+
+\section{Folyamatos mintaprojekt: Secure Notes}
+Csak olyan read pathot cache-elj, amelynek visibility szabályai már stabilak. Bizonyítsd, hogy publish, edit, delete vagy authorization-változás után sem maradhat más felhasználó számára stale vagy rosszul scope-olt reprezentáció.

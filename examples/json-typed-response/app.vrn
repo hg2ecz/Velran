@@ -1,0 +1,30 @@
+struct EchoInput {
+    name: String,
+    age: i64,
+    active: bool,
+}
+
+struct EchoOutput {
+    name: String,
+    age: i64,
+    active: bool,
+}
+
+#[action]
+fn echoTyped(
+    ctx: ActionContext,
+    input: Json<EchoInput>,
+) -> Result<Json<EchoOutput>, PageError> {
+    let clean_name = input.name.trim();
+    Ok(Json(EchoOutput {
+        name: clean_name,
+        age: input.age,
+        active: input.active,
+    }))
+}
+
+route echoTyped POST "/api/echo-typed"
+    json EchoInput
+    validate name length 1 100 age range 0 150
+    auth user
+    => echoTyped;

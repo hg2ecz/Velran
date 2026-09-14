@@ -1,0 +1,12 @@
+#[page]
+fn home(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {
+        <link rel="stylesheet" href="/assets/css/app.01234567.css">
+        <main>
+            <h1>Static asset example</h1>
+            <p>Serve CSS/JS from the configured /assets/ namespace.</p>
+        </main>
+    });
+}
+
+route home GET "/" public => home;

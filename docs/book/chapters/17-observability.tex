@@ -1,0 +1,401 @@
+\chapter{Logging, audit, metrics, and troubleshooting}
+
+\noindent\textbf{Learning path: Complete path / operations depth.} Read when you own production diagnosis, telemetry, and audit evidence.\par\medskip
+
+\invariantblock{Security invariant: telemetry is not a data dump}{Logs and traces must preserve the minimum evidence needed to operate and investigate the system without becoming a second store for secrets, credentials, tokens, or raw request bodies.}
+
+Production diagnostics must correlate a request, route, status, security decision, and any durable business audit event.
+
+\noindent\textbf{First read.} Focus on request IDs, log classes, redaction/cardinality, health, and the troubleshooting workflow. Treat proxy, rotation and retention details as operational reference.\par\medskip
+
+Velran provides four separate surfaces for this:
+
+\begin{itemize}
+  \item structured \textbf{server log} for technical and lifecycle events;
+  \item structured \textbf{access log} for HTTP requests;
+  \item structured \textbf{audit log} for security and user activity;
+  \item a separate-listener \textbf{Prometheus metrics} endpoint.
+\end{itemize}
+
+Applications may additionally store a transactional \textbf{business audit trail} in their database. The audit log and business audit are not the same thing.
+
+\section{The role of the three log classes}
+
+Recommended production configuration:
+
+\begin{lstlisting}
+[observability]
+metrics_listen = "127.0.0.1:9090"
+allow_public_metrics = false
+access_log = true
+
+[logging]
+server_file = "/var/log/velran/server.log"
+access_file = "/var/log/velran/access.log"
+audit_file = "/var/log/velran/audit.log"
+stderr = true
+\end{lstlisting}
+
+Each file serves a different purpose.
+
+\begin{description}
+  \item[server.log] Startup, shutdown, dependency failures, technical and internal runtime events. Check this first if the server does not start, readiness fails, or a background component reports trouble.
+  \item[access.log] One record per HTTP request. This is the traffic and latency trace: method, route, status, duration, client IP, input/output bytes, request ID.
+  \item[audit.log] Security and user activity: login/logout, auth or MFA failure, policy denial, rate-limit denial, resource-profile startup audit, and authenticated state-changing actions.
+\end{description}
+
+\code{access_log = false} disables only the access log. Security/user audit remains active.
+
+\section{Request ID: following one request end to end}
+
+Every successfully parsed application, static, or health request receives a server-generated identifier:
+
+\begin{lstlisting}
+X-Request-Id: velran-...
+\end{lstlisting}
+
+An access-log entry may look like:
+
+\begin{lstlisting}
+{"event":"http_request","request_id":"velran-...",
+ "method":"GET","route":"articleShow","status":200,
+ "duration_ms":7,"client_ip":"203.0.113.5",
+ "bytes_in":0,"bytes_out":812}
+\end{lstlisting}
+
+A client-provided \code{X-Request-Id} is not authority. Velran generates its own request ID so an attacker cannot force the server to use an attacker-chosen correlation identifier.
+
+The basic troubleshooting workflow is therefore:
+
+\begin{lstlisting}
+# 1. find the request ID in the access log
+grep 'velran-...' /var/log/velran/access.log
+
+# 2. search for the same ID in the technical log
+grep 'velran-...' /var/log/velran/server.log
+
+# 3. for security cases, search the audit log too
+grep 'velran-...' /var/log/velran/audit.log
+\end{lstlisting}
+
+Together the three logs provide the complete technical picture.
+
+\section{What may and may not be logged?}
+
+A log is not a debug-data dumping ground. In production, sensitive request contents especially must not be logged automatically.
+
+Velran logs must not contain:
+
+\begin{itemize}
+  \item \code{Authorization} headers;
+  \item Cookie headers or session IDs;
+  \item CSRF tokens;
+  \item TOTP secrets or recovery codes;
+  \item DB, Redis, or LDAP credentials;
+  \item secret-file contents;
+  \item complete request bodies or form payloads.
+\end{itemize}
+
+For durable business evidence, use explicit narrow audit fields rather than request-body logging.
+
+\section{Security audit and HTTP denials}
+
+For trust-boundary denials, Velran emits a dedicated \code{security_audit} event with the same request ID. This includes invalid/untrusted forwarding metadata returning 400, security decisions returning 401/403/421/426/429, and more precise categories for CSRF/CORS/origin denials. This lets operators distinguish, for example:
+
+\begin{itemize}
+  \item \code{proxy/invalid_forwarding}: malformed or untrusted forwarding metadata;
+  \item \code{auth/unauthorized}: missing authentication on an API route;
+  \item \code{csrf/denied}, \code{cors/denied}, \code{origin/denied}: browser trust-boundary denial;
+  \item \code{policy/forbidden}: route- or object-authorization denial;
+  \item \code{host/mismatch}, \code{transport/https_required}: Host/TLS boundary failure;
+  \item \code{rate_limit/denied}: limiter denial.
+\end{itemize}
+
+A key developer distinction is that 403 does not necessarily mean a program bug. It may be the correct result of security policy. Always inspect the audit event and route policy too.
+
+\section{Business audit: durable business history}
+
+Operational logs describe events; durable business state changes belong in a transactional business audit record.
+
+Example:
+
+\begin{lstlisting}[language=Velran]
+enum ArticleStatus {
+    Review
+    Published
+}
+
+transaction db {
+    Article.publishChanged(tx, id, version)?;
+    audit Article id action publish;
+        from article.status
+        to ArticleStatus.Published
+}
+\end{lstlisting}
+
+The audit runs in the same DB transaction as the mutation. If the audit record cannot be written, the business change rolls back too. This is stronger than writing a separate log line.
+
+Velran writes to the \code{_velran_business_audit} runtime table fields such as:
+
+\begin{itemize}
+  \item runtime-generated event ID and UTC timestamp;
+  \item HTTP request ID;
+  \item canonical authenticated actor;
+  \item source action;
+  \item object type and object identifier;
+  \item static business-action name;
+  \item optional previous and new domain state.
+\end{itemize}
+
+\Needspace{0.30\textheight}
+A business audit statement does not replace authorization:
+
+\begin{lstlisting}[language=Velran]
+let invoice = Invoice.byId(db, id)?;
+authorize invoice owner ownerUsername or role Accountant;
+
+transaction db {
+    Invoice.approve(tx, id, version)?;
+    audit Invoice id action approve;
+        from invoice.status
+        to InvoiceStatus.Approved
+}
+\end{lstlisting}
+
+The correct order is: \textbf{identity -> authorization -> mutation -> audit in the same transaction}.
+
+\section{Platform security events, redaction, and burst alerts}
+
+Security monitoring is a structured platform boundary. Automatic events cover authentication/MFA abuse, policy/browser-boundary denial, webhook failure, idempotency conflict, and resource exhaustion.
+
+The event schema intentionally does not accept arbitrary request payload or message text. Emitted principal/source fields are redacted. If application code must create a safe representation of sensitive text for a permitted monitoring sink, use the trusted \code{redact(...)} builtin; \code{Redacted<T>} cannot be created by annotation or cast.
+
+The server also maintains bounded in-memory correlation and platform-owned burst thresholds with cooldowns. When a threshold is crossed, it emits a structured \code{threshold_exceeded} alert event. Raw correlation keys may exist transiently in memory but are not written into the security event.
+
+This monitoring layer does not replace enforcement. Rate limiting, authorization, replay prevention and resource limits still block the request; alerts add detection and incident-response evidence.
+
+\section{Prometheus metrics on a separate management socket}
+
+Metrics are not an application route. They run on a separate listener:
+
+\begin{lstlisting}
+[observability]
+metrics_listen = "127.0.0.1:9090"
+allow_public_metrics = false
+\end{lstlisting}
+
+Query from the same host:
+
+\begin{lstlisting}
+curl http://127.0.0.1:9090/metrics
+\end{lstlisting}
+
+The listener serves only GET/HEAD \code{/metrics}. It does not run application routes, sessions, or auth handlers.
+
+Typical metrics include:
+
+\begin{lstlisting}
+velran_requests_total
+velran_responses_5xx_total
+velran_auth_failures_total
+velran_csrf_failures_total
+velran_policy_denials_total
+velran_request_timeouts_total
+velran_runtime_budget_exceeded_total
+velran_rate_limit_denials_total
+velran_readiness_failures_total
+velran_request_bytes_in_total
+velran_response_bytes_out_total
+velran_active_connections
+velran_log_fallback_total
+velran_request_duration_ms_bucket
+velran_route_requests_total{route="..."}
+velran_route_5xx_total{route="..."}
+velran_route_duration_ms_sum{route="..."}
+\end{lstlisting}
+
+\code{velran_policy_denials_total} tracks security-policy denials: in addition to 403/421/426 decisions, a 400 explicitly classified as forwarding-metadata failure counts too. A normal malformed-request 400 does not.
+
+The most important rule is \textbf{bounded cardinality}. The \code{route} label is a compiler-owned route name or fixed reserved name. Raw URLs, path parameters, IP addresses, usernames, tenants, session IDs, and request IDs must never become metric labels. Otherwise an attacker could create an unbounded number of time series.
+
+\Needspace{0.42\textheight}
+\section{Who scrapes metrics behind Apache or Nginx?}
+
+The public web proxy and the metrics listener are separate trust boundaries. A typical layout is:
+
+\begin{lstlisting}
+Internet
+   |
+   v
+Apache/Nginx :443
+   |
+   v
+127.0.0.1:8080  Velran server
+
+Prometheus agent
+   |
+   v
+127.0.0.1:9090  Velran metrics
+\end{lstlisting}
+
+Do not automatically proxy the metrics port out through the public domain. If a remote Prometheus server must reach it, use a private management network, ACL, or separate authenticated monitoring proxy.
+
+\section{Health: liveness and readiness are different}
+
+Built-in server endpoints are:
+
+\begin{lstlisting}
+GET  /health/live
+HEAD /health/live
+
+GET  /health/ready
+HEAD /health/ready
+\end{lstlisting}
+
+Liveness only proves that the server event loop is alive. It does not call DB, Redis, or LDAP.
+
+Readiness reports whether configured runtime dependencies required for service are reachable. DB or Redis failure/timeout may produce \code{503 Service Unavailable}.
+
+Therefore in a load balancer:
+
+\begin{itemize}
+  \item do not remove an instance based on \textbf{liveness} because of a brief DB outage;
+  \item but an instance may be removed temporarily based on \textbf{readiness}.
+\end{itemize}
+
+A health endpoint is not a business monitoring API; it deliberately exposes minimal status.
+
+\Needspace{0.46\textheight}
+\section{Logrotate and SIGHUP}
+
+Velran writes file logs in append mode. Let the operating system handle log rotation in production. The repository includes \code{examples/logrotate/velran}.
+
+Simplified example:
+
+\begin{lstlisting}
+/var/log/velran/server.log /var/log/velran/access.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 velran velran
+    sharedscripts
+    postrotate
+        systemctl kill -s HUP --kill-who=main velran.service || true
+    endscript
+}
+\end{lstlisting}
+
+The meaning of \code{SIGHUP} is deliberately bounded. In behind-proxy mode it reopens log files and transactionally rebuilds domain/application hosting state; it is not a general process-level \code{server.toml} reconfiguration mechanism. Application source changes normally use the automatic source-reload supervisor instead.
+
+For configuration changes:
+
+\begin{lstlisting}
+/usr/local/bin/velran-server \
+  --config /usr/local/etc/velran/server.toml \
+  --check-config
+
+systemctl restart velran.service
+\end{lstlisting}
+
+This is more auditable and predictable than a partially successful hot reload.
+
+\section{What if the log file is not writable?}
+
+File logging uses a bounded writer queue. If the queue fills, a file sink fails, or the writer is unavailable, Velran falls back to stderr and increments:
+
+\begin{lstlisting}
+velran_log_fallback_total
+\end{lstlisting}
+
+Treat increases as alertable conditions. Possible causes include:
+
+\begin{itemize}
+  \item permission or filesystem failure;
+  \item full disk;
+  \item broken logrotate/reopen;
+  \item sustained log-processing pressure.
+\end{itemize}
+
+The parent directory of a log path must exist. On Unix, the runtime opens log files with mode \code{0640} and without following symlinks; the operator must still configure directory permissions correctly.
+
+\section{Practical production troubleshooting workflow}
+
+When investigating 5xx responses or ``the page is slow,'' do not guess. Use a reproducible order.
+
+\begin{enumerate}
+  \item \textbf{Liveness:} is the process itself running?
+  \item \textbf{Readiness:} are DB/Redis reachable?
+  \item \textbf{Access log:} which route, status, duration, and request ID are involved?
+  \item \textbf{Server log:} does the same request ID show a dependency/runtime error?
+  \item \textbf{Audit log:} did security policy or rate limiting reject the request?
+  \item \textbf{Metrics:} is this isolated or a trend in 5xx/latency?
+  \item \textbf{Reverse proxy:} did the failure occur before, inside, or after Apache/Nginx?
+\end{enumerate}
+
+Quick checks:
+
+\begin{lstlisting}
+curl -i https://www.example.com/health/live
+curl -i https://www.example.com/health/ready
+# For proxy deployments, also test the internal upstream:
+curl -i http://127.0.0.1:8080/health/ready
+curl -s http://127.0.0.1:9090/metrics | grep velran_responses_5xx_total
+journalctl -u velran.service --since "10 min ago"
+\end{lstlisting}
+
+If the loopback Velran endpoint is healthy but the public domain is not, inspect Apache/Nginx, TLS, or forwarded-header policy next. If loopback readiness is also 503, investigate backend dependencies first.
+
+\section{Minimum monitoring baseline}
+
+Even a small production deployment should alert on at least:
+
+\begin{itemize}
+  \item readiness persistently not ready;
+  \item sudden growth in 5xx rate/count;
+  \item meaningful request-latency degradation;
+  \item unusual spikes in auth/policy/rate-limit denials;
+  \item increases in \code{velran_runtime_budget_exceeded_total};
+  \item increases in \code{velran_log_fallback_total};
+  \item process restart loops or unexpected shutdown.
+\end{itemize}
+
+Thresholds should not be hardcoded by the language. Operators set them according to traffic, SLOs, and business criticality.
+
+\section{Retention, SIEM, and audit protection}
+
+Retention is an organizational and legal policy. Velran does not impose one universal retention period.
+
+Local \code{audit.log} is an important operational trace, but by itself it is not a strong tamper-evident archive because a host administrator or actor with sufficient filesystem rights can modify it. For higher assurance, forward it to a centralized access-controlled or append-only log/SIEM system.
+
+The business-audit database table is likewise not protected against direct modification by a DB administrator. Together the two layers provide a strong application trace, but compliance environments still benefit from an independent external log archive.
+
+\section{Checklist}
+
+Before production startup, verify:
+
+\begin{itemize}
+  \item separate server/access/audit log paths exist;
+  \item log-directory permissions are restrictive;
+  \item request bodies and secrets are not logged;
+  \item the metrics listener is not accidentally public;
+  \item Prometheus labels have bounded cardinality;
+  \item liveness and readiness are treated separately;
+  \item logrotate triggers SIGHUP, while config changes trigger restart;
+  \item \code{velran_log_fallback_total} is monitored;
+  \item business workflows write business audit in the same DB transaction;
+  \item audit-log forwarding and retention have a documented decision.
+\end{itemize}
+
+\section{Practice: design an evidence trail}
+\paragraph{Exercise mode: independent.} Use the independent method defined in the preface.
+
+Take one important request and list the operational facts needed to reconstruct what happened without logging secrets or full sensitive payloads. Include request identity/correlation, outcome, latency, policy rejection, and relevant domain audit identifiers.
+
+\section{Common mistake: logging data instead of events}
+More log volume is not automatically more observability. Prefer structured events that explain decisions and outcomes. Avoid copying credentials, tokens, request bodies, or sensitive business records into logs simply because they are available.
+
+\section{Running project checkpoint: Secure Notes}
+Define observable events for failed authorization, publish transitions, integration failures, and unexpected server errors. Keep business audit and operational telemetry distinct but correlatable.

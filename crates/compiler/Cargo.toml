@@ -1,0 +1,15 @@
+[package]
+name = "compiler"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+authors = ["Zsolt Krüpl"]
+
+[dependencies]
+language-core = { path = "../language-core" }
+executable-ir = { path = "../executable-ir" }
+runtime-abi = { path = "../runtime-abi" }
+
+regex = { workspace = true }
+sha2 = { workspace = true }
+toml = { workspace = true }

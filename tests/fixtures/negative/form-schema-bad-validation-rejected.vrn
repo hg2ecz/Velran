@@ -1,0 +1,9 @@
+form BadForm {
+    amount<i64>
+    validate amount length 1 10
+}
+#[action]
+fn create(ctx: ActionContext, amount: i64) -> Result<Redirect, PageError> {
+    return Ok(redirect(create()));
+}
+route create POST "/" form BadForm public => create;

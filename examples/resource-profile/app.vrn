@@ -1,0 +1,12 @@
+#[page]
+fn report(ctx: PageContext) -> Result<Html, PageError> {
+    with resource compute {
+        let result = 40 + 2;
+        return Ok(html {
+            <h1>Compute profile</h1>
+            <p>{{ result }}</p>
+        });
+    }
+}
+
+route report GET "/report" public => report;

@@ -1,0 +1,303 @@
+\chapter{Nagyobb alkalmazások szervezése}
+
+\noindent\textbf{Tanulási út: Teljes út / skálázódó kódszerkezet.} Akkor olvasd, amikor az egymodulos alkalmazást már nehéz biztonságosan módosítani.\par\medskip
+
+\rustbridgeblockhu{A modulokra bontás, qualified nevek, explicit függőségek és összetartozó kód együtt tartása ugyanazokat a Rustos tervezési ösztönöket használja.}{A Velran application-root source graphot old fel, domain \code{object} namespace-t ad, és a HTTP \code{route} policyt külön kezeli a forrás/modul struktúrától.}{Nem kell újratanulnod a modularitást. Használd a megszokott modulhatárokat; csak a source location, domain namespace és külső HTTP exposure különbségét tanuld meg.}
+
+
+Ahogy nő az alkalmazás, a change locality fontosabb lesz a fájlszámnál. A \code{mod} a forrásszerkezetet, az \code{object} a domain API névterét szervezi; a HTTP exposure maradjon \code{route}-ban.
+
+\section{Három külön kérdés}
+
+A nagyobb alkalmazás szerkezetét érdemes három külön rétegként kezelni:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}l Y@{}}
+\toprule
+\textbf{Eszköz} & \textbf{Feladata} \\
+\midrule
+\code{mod} & Melyik fájlban, illetve forrásmodulban található a kód? \\
+\code{object} & Melyik üzleti fogalomhoz tartozik a model, query, page vagy action? \\
+\code{route} & Milyen HTTP felület és milyen auth/cache/rate-limit policy teszi elérhetővé? \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Ez a szétválasztás tudatos. Egy domain object nem kap automatikusan adatbázist, current usert, fájlrendszert vagy hálózati hozzáférést, és egy modul sem jelent HTTP policy-t.
+
+\section{A \code{mod} nem szöveges include}
+
+Egy kisebb, többfájlos projekt már így nézhet ki:
+
+\begin{lstlisting}
+myapp/
+|-- main.vrn
+|-- models.vrn
+|-- queries.vrn
+|-- components.vrn
+|-- pages.vrn
+|-- actions.vrn
+|-- migrations/
+`-- public/
+\end{lstlisting}
+
+A belépési pont:
+
+\begin{lstlisting}[language=Velran]
+mod models;
+mod queries;
+mod components;
+mod pages;
+mod actions;
+\end{lstlisting}
+
+A \code{mod} nem C-szerű szövegbeillesztés, és nem önti a deklarációkat globális névtérbe. A compiler az explicit source graphot tölti be, ellenőrzi és egyetlen programmá fordítja. Egy modul saját névteret birtokol: például a \code{queries.vrn} deklarációira más modulból \code{queries::name} alakban kell hivatkozni. A modulútvonal application-root relatív; nested forrásfájlt explicit, például \code{mod article::admin;} deklarációval kell felvenni. Nincs automatikus almappa-discovery vagy relatív \code{../} modulútvonal.
+
+\section{Mikor válts feature-alapú szerkezetre?}
+
+A \code{models.vrn}, \code{queries.vrn}, \code{pages.vrn} típus szerinti bontás jó első lépés, de nagyobb alkalmazásnál könnyen azt eredményezi, hogy egyetlen feature módosításakor öt-hat fájlt kell párhuzamosan megnyitni. Ilyenkor jobb üzleti terület szerint bontani:
+
+\begin{lstlisting}
+main.vrn
+article.vrn
+article/
+|-- admin.vrn
+`-- components.vrn
+account.vrn
+account/
+`-- profile.vrn
+invoice.vrn
+invoice/
+`-- admin.vrn
+routes.vrn
+migrations/
+public/
+\end{lstlisting}
+
+A \code{main.vrn} ilyenkor inkább alkalmazás-kompozíció:
+
+\begin{lstlisting}[language=Velran]
+mod article;
+mod article::admin;
+mod article::components;
+mod account;
+mod account::profile;
+mod invoice;
+mod invoice::admin;
+mod routes;
+\end{lstlisting}
+
+A cél a change locality: egy üzleti változtatás kódja maradjon többnyire egy feature könyvtáron belül.
+
+\section{Domain object: üzleti névtér, nem OOP-osztály}
+
+A globális nevek számát az \code{object} csökkenti. Például:
+
+\needspace{30\baselineskip}
+\begin{lstlisting}[language=Velran]
+object Article {
+    model {
+        id: i64
+        slug: Slug
+        title: String
+        body: String
+        authorUsername: String
+    }
+
+    #[query]
+fn bySlug(db: Db, slug: Slug)
+        -> Result<Article, DbError> sql {
+        SELECT id, slug, title, body, authorUsername
+        FROM articles
+        WHERE slug = :slug
+    }
+
+    #[page]
+fn show(ctx: PageContext, db: Db, slug: Slug)
+        -> Result<Html, PageError> {
+        let article = Article.bySlug(db, slug)?;
+        return Ok(html {
+            <article>
+                <h1>{{ article.title }}</h1>
+                @markdown(article.body)
+            </article>
+        });
+    }
+}
+\end{lstlisting}
+
+A használat így beszédes:
+
+\begin{lstlisting}[language=Velran]
+let article = Article.bySlug(db, slug)?;
+\end{lstlisting}
+
+Később ugyanilyen természetesek a rövid domainnevek: \code{Invoice.approve}, \code{Invoice.cancel}, illetve \code{UserAccount.disable}.
+
+\subsection*{Mit tartalmazhat egy object?}
+
+A framework domain object egy model köré rendezheti a hozzá tartozó műveleteket. Az alábbi blokk csak szerkezeti váz, nem önmagában fordítható Velran forrás:
+
+\begin{lstlisting}
+object Article {
+    model { ... }
+    #[query]
+fn bySlug(...) ...
+    #[page]
+fn show(...) ...
+    #[action]
+fn publish(...) ...
+    #[component]
+fn Card(...) ...
+    #[layout]
+fn EditorLayout(...) ...
+}
+\end{lstlisting}
+
+Pontosan egy model blokk tartozik egy framework domain \code{object}-hez. Ez a konstrukció framework-owned model/query/page/action neveket rendez egybe; külön fogalom a normál pure/domain értékekhez használt Rust-szerű \code{struct} + inherent \code{impl} surface-től. A framework object továbbra sem jelent öröklést, rejtett capabilityt, virtual dispatchot vagy reflectiont. Rust-szerű értékeknél támogatott az associated konstruktor (például \code{Type::new}) és az immutable \code{&self} metódus; az általános mutable/owned receiver továbbra is szándékosan fail-closed.
+
+
+\section{Package-határok újrahasznosítható alkalmazáskódhoz}
+
+Ha kódot több alkalmazás között kell újrahasznosítani vagy stabil library-határ mögé kell zárni, ne növeld korlátlanul az application modulgráfot: emeld lokális package-be. Minden package saját \code{velran.toml}-lal, alapból privát API-val és korlátozott lokális dependency-gráffal rendelkezik. A közvetlen dependency explicit path dependency; a tranzitív dependency enkapszulált marad, nem válik ambient application névtérré.
+
+A library surface tervezéséhez \code{pub struct}, \code{pub fn}, publikus inherent metódus és a szűk package-root modul-re-export használható. A framework authority maradjon az alkalmazásban: egy reusable library \code{pub} hatására sem kaphat HTTP route-ot, actiont, adatbázis-/hálózati authorityt vagy más webes capabilityt. Így a package-dekompozíció architekturális határ, nem capability-eszkalációs mechanizmus.
+
+\section{A dependency továbbra is explicit}
+
+A domain namespace nem rejt el capabilityket. Ez jó:
+
+\needspace{11\baselineskip}
+\begin{lstlisting}[language=Velran]
+#[query]
+fn byId(db: Db, id: i64)
+    -> Result<Article, DbError> sql {
+    SELECT id, slug, title, body, authorUsername
+    FROM articles
+    WHERE id = :id
+}
+\end{lstlisting}
+
+Az action ugyanilyen explicit módon kapja meg a szükséges capabilityket. A következő blokk szándékosan rövidített szerkezeti példa; az állapotváltás konkrét typed queryjét a CRUD és üzleti-audit fejezetek mutatják be:
+
+\needspace{12\baselineskip}
+\begin{lstlisting}
+#[action]
+fn publish(ctx: ActionContext, db: Db, id: i64)
+    -> Result<Redirect, PageError> {
+    let article = Article.byId(db, id)?;
+    authorize article owner authorUsername or role Publisher;
+    // ... allapotvaltas tranzakcioban ...
+    return Ok(redirect(adminArticles()));
+}
+\end{lstlisting}
+
+A handler aláírásából továbbra is látszik, hogy adatbázishoz fér hozzá. Ugyanez igaz AppFs-re, authra és named hálózati egressre is: a domain object nem válhat rejtett service locatorrá.
+
+\section{Miért maradjon a route top-level?}
+
+A route tudatosan nem olvad bele teljesen az objectbe:
+
+\begin{lstlisting}[language=Velran]
+route articleShow GET "/cikk/:slug<Slug>"
+    public cache public ttl 60
+    => article::Article.show;
+
+route articlePublish POST "/admin/cikk/:id<i64>/publish"
+    auth role Publisher
+    invalidate cache articleShow
+    => article::Article.publish;
+\end{lstlisting}
+
+Így egy route-registry vagy egy code review során egy helyen látszik:
+
+\begin{itemize}
+  \item az URL és a HTTP method;
+  \item az authentication/authorization követelmény;
+  \item a cache policy és invalidáció;
+  \item a rate limit vagy resource profile;
+  \item a logokban és auditban megjelenő globális route-név.
+\end{itemize}
+
+A domain member neve lehet rövid és helyi jelentésű, például \code{Article.publish} a saját modulján belül; külön \code{routes.vrn} fájlból \code{article::Article.publish} szükséges. A route neve viszont maradjon globálisan beszédes, például \code{articlePublish}.
+
+\section{Ajánlott névkonvenció}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}l l Y@{}}
+\toprule
+\textbf{Elem} & \textbf{Forma} & \textbf{Példa} \\
+\midrule
+object & PascalCase üzleti főnév & \code{Article}, \code{Invoice}, \code{UserAccount} \\
+member & camelCase, domainen belül rövid & \code{bySlug}, \code{publish}, \code{approve} \\
+route & globálisan auditálható név & \code{articleShow}, \code{invoiceApprove} \\
+module & feature vagy technikai egység & \code{article}, \code{account}, \code{routes} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{Egy CMS lehetséges szerkezete}
+
+Egy közepes CMS-nél jó kompromisszum lehet:
+
+\needspace{18\baselineskip}
+\begin{lstlisting}
+main.vrn
+routes.vrn
+article.vrn            # Article object + alap queryk
+article/
+|-- admin.vrn          # szerkesztes/publikalas
+`-- components.vrn     # Card, listak
+media.vrn
+media/
+`-- admin.vrn
+account.vrn
+migrations/
+public/
+`-- app.css
+\end{lstlisting}
+
+A publikus és admin HTTP policy továbbra is a route-rétegben marad. Az article feature viszont együtt tartja a cikk üzleti modelljét és műveleteit.
+
+\section{Mit ne csinálj?}
+
+\subsection*{Ne készíts minden deklarációból külön fájlt}
+
+A túl apró modulok több navigációt okoznak, mint amennyi szerkezetet adnak. Egy ötven soros feature-nek nem kell nyolc fájl.
+
+\subsection*{Ne építs rejtett ``service'' réteget}
+
+Ha egy művelet DB-t, AppFs-t vagy auth contextet használ, az maradjon látható a typed aláírásban. A Velran egyik értéke éppen az, hogy a capability-határ explicit.
+
+\subsection*{Ne duplikáld a route policy-t a handlerben}
+
+A route-level auth, cache, rate limit és resource policy deklaratív szerződés. A domain-specifikus objektumszintű authorization természetesen a handlerben maradhat, mert az üzleti rekordtól függ.
+
+\subsection*{Ne használj szabad Stringet üzleti állapotnak}
+
+Ha egy domain \code{Draft}, \code{Review}, \code{Published} vagy \code{Cancelled} állapotokból áll, használd az enumot. A projektstruktúra akkor segít igazán, ha a domain contract is typed.
+
+\section{Refaktorálási út: egy fájlból nagyobb alkalmazás}
+
+Nem kell a projekt első napján végleges könyvtárhierarchiát tervezni. Jó evolúciós út:
+
+\begin{enumerate}
+  \item Kezdj egy \code{main.vrn} fájllal, amíg az alkalmazás kicsi.
+  \item Válaszd külön a model/query/page/action csoportokat, amikor a fájl már nehezen áttekinthető.
+  \item Ha egy feature több technikai fájlon szétszóródik, válts feature-alapú modulokra.
+  \item Ha sok globális üzleti név keletkezik, rendezd őket \code{object} namespace-be.
+\end{enumerate}
+
+\section{Ellenőrzött companion példák}
+Modulstruktúrához használd az \path{examples/module-namespaces/main.vrn} példát, általános többfájlos kiindulóponthoz az \path{examples/starter-project/main.vrn} fájlt, a könyv folyamatos mintaprojektjéhez pedig az \path{examples/secure-notes/main.vrn} példát. Mindhárom compilerrel ellenőrzött, ezért jobb copy/paste forrás a rövidített architekturális vázlatoknál.
+
+\section{Gyakorlat: refaktorálj változási lokalitás alapján}
+\paragraph{Gyakorlási mód: önálló.} Használd az előszóban meghatározott önálló módszert.
+
+Válassz egy feature-t, és azonosíts minden fájlt, amely megváltozik a feature módosításakor. Ha egy kis üzleti változás sok, egymástól távoli technikai réteg szerkesztését kívánja, fontold meg a feature vagy domain objektum körüli csoportosítást. Csak akkor refaktorálj, amikor a dependency-irány már világos.
+
+\section{Tipikus hiba: csak a fájlszám miatt modularizálunk}
+A hasznos modul koherens contractot birtokol és csökkenti az egyszerre fejben tartandó fogalmakat; kerüld a monolit fájlokat és a mesterséges egyfüggvényes modulokat.
+
+\section{Folyamatos mintaprojekt: Secure Notes}
+Mozgasd át a Secure Notes alkalmazást a kezdeti egyfájlos alakból olyan struktúrába, ahol a jegyzethez tartozó modellek, query-k, page/action elemek és policy-k könnyen megtalálhatók. A külső route-ok és security-viselkedés közben ne változzon.

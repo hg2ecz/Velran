@@ -1,0 +1,6 @@
+[package]
+name = "demo_app"
+kind = "app"
+entry = "main.vrn"
+[dependencies]
+textkit = { path = "../libs/textkit" }

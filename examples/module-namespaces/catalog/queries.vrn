@@ -1,0 +1,7 @@
+#[query]
+fn recent(db: Db) -> Result<Vec<catalog::Product>, DbError> sql {
+    SELECT id, name
+    FROM products
+    ORDER BY id DESC
+    LIMIT 20
+}

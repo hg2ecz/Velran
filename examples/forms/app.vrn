@@ -1,0 +1,35 @@
+form ProductForm {
+    name<String>
+    price<i64>
+    published<bool>
+    validate name length 2 100 price range 0 1000000
+}
+
+#[action]
+fn create(
+    ctx: ActionContext,
+    name: String,
+    price: i64,
+    published: bool
+) -> Result<Redirect, PageError> {
+    return Ok(redirect(newProduct()));
+}
+
+#[page]
+fn newProduct(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {
+        <main>
+            <h1>New product</h1>
+            <form method="post" @action(create)>
+                <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+                <label>Name <input name="name"></label>
+                <label>Price <input name="price"></label>
+                <label>Published <select name="published"><option value="false">No</option><option value="true">Yes</option></select></label>
+                <button type="submit">Save</button>
+            </form>
+        </main>
+    });
+}
+
+route newProduct GET "/products/new" public => newProduct;
+route create POST "/products" form ProductForm public => create;

@@ -1,0 +1,1 @@
+mariadb://velran:SECRET@db.example/velran?ssl-mode=verify_identity

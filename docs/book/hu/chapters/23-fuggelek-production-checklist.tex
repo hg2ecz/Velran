@@ -1,0 +1,356 @@
+
+
+\chapter{Függelékek és production checklist}
+
+\section{Aktuális verifikációs megjegyzés}
+
+A jelenlegi Velran forrásfa teljesítette a repository-szintű Ellenőrzött fejlesztési mérföldkövet: a formázás, a teljes workspace tesztkészlet, a \code{./verify.sh} és a helyi tesztkiszolgálás sikeresen lefutott. Production release előtt az egzakt release-forrásfán ismét futtasd a lock/provenance frissítést és a repository teljes verifikációját, majd gyűjtsd össze a célkörnyezet deployment-, recovery- és operátori bizonyítékait. A repository verifikáció szükséges, de nem helyettesíti a production-környezeti release evidence-et.
+
+\noindent\textbf{Tanulási út: Gyors út: végső release gate.} A checklisttel bizonyítsd a release readiness állapotot, ne emlékezetből feltételezd.\par\medskip
+
+Ez a fejezet nem új nyelvi elemeket vezet be. Az előző fejezetekből összeálló, röviden használható üzemeltetési segédlet: tipikus könyvtárstruktúra, reverse proxy minták, systemd unit, logrotate és egy release előtti ellenőrzőlista. A minták kiindulópontok; a konkrét domaineket, tanúsítványokat, jogosultságokat és erőforráslimiteket a saját környezethez kell igazítani.
+
+\section{Ajánlott production könyvtárstruktúra}
+
+A Velran helyben telepített szoftver, ezért a könyv következetesen a \code{/usr/local} hierarchiát használja a programhoz és a konfigurációhoz. Az alkalmazás állapota és a logok ettől külön élnek.
+
+\begin{lstlisting}
+/usr/local/bin/
+  velran-server
+  velran-cli
+
+/usr/local/etc/velran/
+  server.toml
+  rate-limits.toml
+  resource-profiles.toml
+
+/run/secrets/velran/
+  database-url
+  redis-url
+  local-auth-database-url
+
+/srv/velran/
+  current/                 # current application release
+  releases/
+    2026-09-04.1/
+  data/                    # AppFs / durable application data
+
+/var/log/velran/
+  server.log
+  access.log
+  audit.log
+\end{lstlisting}
+
+A release tartalom legyen lehetőleg read-only. A szervernek csak azokon a helyeken legyen írási joga, ahol valóban tartós állapotot vagy logot kell írnia. A secret fájl ne legyen az alkalmazás release könyvtárában és ne kerüljön verziókezelésbe.
+
+\section{Apache reverse proxy teljes minimálminta}
+
+A példa egyetlen Apache reverse proxyt feltételez. A publikus TLS az Apache feladata, a Velran pedig csak loopbacken figyel.
+
+Az ehhez tartozó Velran minimum:
+
+\begin{lstlisting}
+[server]
+listen = "127.0.0.1:8080"
+insecure_dev_cookies = false
+
+[tls]
+public_host = "www.example.com"
+
+[web]
+trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
+\end{lstlisting}
+
+Reverse proxy production módban a certificate/key a proxyn marad, de a trusted \code{public_host} kell a Host/Origin pinninghez. A proxy feladata a hiteles \code{X-Forwarded-Proto: https} metadata előállítása.
+
+\begin{lstlisting}
+<VirtualHost *:80>
+    ServerName www.example.com
+    Redirect permanent / https://www.example.com/
+</VirtualHost>
+
+<VirtualHost *:443>
+    ServerName www.example.com
+
+    SSLEngine on
+    SSLCertificateFile \
+      /etc/letsencrypt/live/www.example.com/fullchain.pem
+    SSLCertificateKeyFile \
+      /etc/letsencrypt/live/www.example.com/privkey.pem
+
+    ProxyPreserveHost On
+    ProxyPass        / http://127.0.0.1:8080/
+    ProxyPassReverse / http://127.0.0.1:8080/
+
+    RequestHeader set X-Forwarded-Proto "https"
+</VirtualHost>
+\end{lstlisting}
+
+Tipikus Apache modulok: \code{proxy}, \code{proxy_http}, \code{headers} és \code{ssl}. A Velran trusted-proxy listája csak a tényleges proxyt foglalja magában. Loopback proxy esetén ez tipikusan \code{127.0.0.1/32} és szükség esetén \code{::1/128}. Internetméretű trusted proxy tartomány hibás konfiguráció.
+
+\section{Nginx reverse proxy teljes minimálminta}
+
+\begin{lstlisting}
+server {
+    listen 80;
+    server_name www.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name www.example.com;
+
+    ssl_certificate
+      /etc/letsencrypt/live/www.example.com/fullchain.pem;
+    ssl_certificate_key
+      /etc/letsencrypt/live/www.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+    }
+}
+\end{lstlisting}
+
+A példában az Nginx közvetlenül látja a klienst, ezért a forwarding címet maga állítja elő. Ne örökíts tovább internet felől érkező tetszőleges \code{X-Forwarded-*} értéket authorityként. Több proxy esetén a trust láncot explicit kell megtervezni.
+
+\section{systemd service minta}
+
+A repository teljes mintája: \code{examples/systemd/velran.service}. A lényegi forma:
+
+\begin{lstlisting}
+[Unit]
+Description=Velran application
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=velran
+Group=velran
+WorkingDirectory=/srv/velran/current
+ExecStartPre=/usr/local/bin/velran-server \
+  --config /usr/local/etc/velran/server.toml \
+  --check-config
+ExecStart=/usr/local/bin/velran-server \
+  --config /usr/local/etc/velran/server.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=45s
+
+MemoryMax=1G
+MemorySwapMax=0
+CPUQuota=200%
+TasksMax=256
+LimitNOFILE=8192
+# Direct TLS 80/443 eseten add hozza:
+# AmbientCapabilities=CAP_NET_BIND_SERVICE
+# CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ReadWritePaths=/srv/velran/data /var/log/velran
+
+[Install]
+WantedBy=multi-user.target
+\end{lstlisting}
+
+A systemd hard limit és a Velran request/runtime resource policyja egymást kiegészítő védelmi réteg. A systemd baseline maga legyen a process cgroup authority; ilyenkor ne kapcsold be mellette a Velran \code{[cgroup]} író módját. Közvetlen 80/443 bindnál csak a \code{CAP_NET_BIND_SERVICE} capabilityt add, reverse proxy mögötti magas portnál ezt is hagyd el. A \code{TimeoutStopSec} legyen nagyobb, mint az alkalmazott graceful shutdown időablak. Behind-proxy módban a SIGHUP tranzakciósan újratöltheti a domain/application hosting állapotot, míg process-szintű konfigurációváltozás után továbbra is kontrollált restart kell; pusztán alkalmazásforrás-változást normál esetben az automatikus source-reload supervisor aktivál.
+
+\section{logrotate minta}
+
+\begin{lstlisting}
+/var/log/velran/server.log /var/log/velran/access.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 velran velran
+    sharedscripts
+    postrotate
+        systemctl kill -s HUP --kill-who=main \
+          velran.service >/dev/null 2>&1 || true
+    endscript
+}
+
+/var/log/velran/audit.log {
+    daily
+    rotate 90
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 velran velran
+    sharedscripts
+    postrotate
+        systemctl kill -s HUP --kill-who=main \
+          velran.service >/dev/null 2>&1 || true
+    endscript
+}
+\end{lstlisting}
+
+A konkrét retention jogi és kockázati döntés. Az auditlog általában hosszabb megőrzést és központi továbbítást érdemel; a minta számai nem univerzális előírások.
+
+\section{Release előtti production gate}
+
+A következő lista szándékosan rövid és végrehajtható. A részletes indoklást az előző fejezetek adják.
+
+\begin{enumerate}
+  \item \textbf{Forrás és build:} a release commit azonosított; \code{Cargo.lock} rögzített; a platform buildje \code{cargo build --locked --release -p velran-server -p velran-cli}; az alkalmazás forrása \code{velran-cli check} ellenőrzésen átment.
+  \item \textbf{Migration:} production előtt \code{migrate status} és \code{migrate verify}; a jóváhagyott schema változás explicit \code{migrate apply}; utána újabb verify.
+  \item \textbf{Konfiguráció:} a valódi production \code{server.toml} config-checken átment. Az effective config redaktált kimenete reviewzható.
+  \item \textbf{Secrets:} DB/Redis/auth secret fájlok nem a repositoryban vannak, szűk filesystem jogosultsággal rendelkeznek, és nem kerülnek logba vagy release-recordba.
+  \item \textbf{HTTP edge:} a domain, TLS és Host kezelés helyes. A trusted-proxy lista kizárólag a tényleges proxykat tartalmazza.
+  \item \textbf{Auth:} production cookie policy aktív; local auth/LDAP konfiguráció ellenőrzött; admin/MFA recovery folyamat dokumentált.
+  \item \textbf{CSRF és CORS:} state-changing böngészős kérés CSRF-védett; CORS allowlist explicit; credentialed CORS esetén nincs wildcard origin.
+  \item \textbf{Adatbázis:} az alkalmazás DB user least privilege; pool/budget összhangban van a backend kapacitásával; fontos queryk indexelése ismert.
+  \item \textbf{Storage/upload:} AppFs root confinement és jogosultságok helyesek; upload byte/pixel limitek aktívak; release tartalom nem írható alkalmazásból.
+  \item \textbf{Redis/cache/rate limit:} multi-instance környezetben a közös security/runtime state Redisben van; Redis kiesési viselkedése ismert és tesztelt.
+  \item \textbf{Egress:} csak named outbound target engedélyezett; host/CIDR/port/TLS/timeout/méret policy explicit; secret nem kerül URL-be vagy logba.
+  \item \textbf{Erőforrások:} request/runtime limitek és process hard limitek konzisztensen be vannak állítva; cgroup authorityként systemd vagy külön delegált Velran cgroup legyen, ne mindkettő.
+  \item \textbf{Observability:} server/access/audit log írható; request ID működik; metrics és readiness elérhető a megfelelő belső hálózatról; riasztási minimum definiált.
+  \item \textbf{Backup/recovery:} van friss, ellenőrzött DB + AppFs + identity backup; recovery manifest rendelkezésre áll; restore drill nem csak papíron létezik.
+  \item \textbf{Deploy/rollback:} a release artifact és checksum ismert; a régi release visszaállítható; schema-változásnál tisztázott, hogy app rollback vagy teljes restore lehetséges.
+  \item \textbf{Indítás utáni evidence:} liveness, readiness és legalább egy üzleti smoke kérés sikeres; logban nincs startup fallback vagy váratlan policy-hiba.
+\end{enumerate}
+
+\subsection*{Platform-release security evidence}
+
+A Velran platform release csak akkor nevezhető release-ready állapotúnak, ha pontosan az a source tree átmegy ezen:
+
+\begin{lstlisting}
+cargo fmt --all -- --check
+cargo metadata --locked --format-version 1 >/dev/null
+cargo check --workspace --locked
+cargo test --workspace --locked
+./verify.sh
+\end{lstlisting}
+
+A supply-chain envelope egyezzen a \code{Cargo.lock} és \path{SUPPLY-CHAIN-CAPABILITIES.txt} állapottal. Release packaging nem generálhat vagy pecsételhet le Cargo szerint stale lockfile-t. Minden dokumentáció/book változás után a release manifestet is újra kell verifikálni.
+
+\section{Gyors hibadiagnosztikai térkép}
+
+\begin{longtable}{L{0.23\textwidth}L{0.30\textwidth}L{0.38\textwidth}}
+\toprule
+Tünet & Első hely, ahol nézd & Következő kérdés \\
+\midrule
+\endhead
+Nem indul a service & config-check, server log & Config/secret/path/policy vagy dependency readiness? \\
+\addlinespace
+502/504 a proxyban & proxy log, Velran listener/readiness & Fut-e a processz, loopback port helyes-e, readiness zöld-e? \\
+\addlinespace
+400/415 & access log + route body-contract & Malformed input, rossz schema vagy rossz Content-Type érkezett? \\
+\addlinespace
+401 & auth/session audit esemény & Nincs session, lejárt, invalidálva vagy MFA hiányzik? \\
+\addlinespace
+403 & route/object authorization, CSRF/CORS & Ki az actor, melyik policy tagadta meg? \\
+\addlinespace
+404/405/406 & route map + request method/Accept & Létezik a route, jó methodot és elfogadható reprezentációt kér a kliens? \\
+\addlinespace
+409 & optimistic-lock/business state & Közben megváltozott a record, vagy a \code{Changed} query nulla sort módosított? \\
+\addlinespace
+413/431 & request hard limitek & Body/upload vagy header lépte túl a konfigurált limitet? \\
+\addlinespace
+421/426 & Host/proxy/TLS policy & Helyes a public host, trusted proxy és az effektív HTTPS? \\
+\addlinespace
+422 & named form rerender & Melyik mező typed decode/validation hibája áll fenn? \\
+\addlinespace
+429 & rate-limit metrics/audit & Melyik limiter és melyik identity/IP bucket fogyott el? \\
+\addlinespace
+500 & request ID alapján server log & Valódi belső invariáns/internal hiba történt? \\
+\addlinespace
+503 & readiness + server log & DB/Redis/auth/storage vagy request resource limit tette átmenetileg kiszolgálhatatlanná? \\
+\addlinespace
+DB hiba & DB readiness + query környezet & Kapcsolat, timeout, schema drift, lock vagy constraint? \\
+\addlinespace
+Fájl/media hiba & AppFs path/jogosultság/limit & Storage root írható, confinement és byte/pixel limit rendben? \\
+\addlinespace
+Külső API hiba & egress policy + adapter log & DNS, CIDR, port, TLS, timeout vagy response limit zárt? \\
+\addlinespace
+Log eltűnik rotation után & log fallback metric, service log & SIGHUP eljutott-e, új fájl jogosultsága megfelelő-e? \\
+\bottomrule
+\end{longtable}
+
+\section{Mit vigyél magaddal productionbe?}
+
+Öt szabály foglalja össze az operátori modellt:
+
+\begin{itemize}
+  \item HTTP felület csak typed adat, explicit policy és bounded külső input után legyen;
+  \item a stabil policy trusted konfigurációban, a secret pedig secret fájlban maradjon;
+  \item schema-módosítás, release-aktiválás és rollback legyen explicit operátori döntés;
+  \item proxy, Redis, DB, AppFs és outbound integráció a deklarált authority boundary szerint működjön;
+  \item release előtt verifikálj, utána evidence-dzsel bizonyíts healtht, observabilityt, backupot és restore-t.
+\end{itemize}
+
+\section{Velran webfejlesztői kompetencia-checklist}
+
+Ez a lista más kérdésre válaszol, mint a production gate: \emph{képes vagy-e egy kisebb Velran webalkalmazást önállóan felépíteni és üzemeltetni anélkül, hogy vakon receptet másolnál?} Egy kipipált pont azt jelentse, hogy a feladatot meg tudod oldani, a releváns boundaryt el tudod magyarázni, és a legvalószínűbb hibát diagnosztizálni tudod.
+
+\subsection*{Alkalmazásfejlesztési alapkompetenciák}
+\begin{itemize}[label={\texttt{[ ]}},leftmargin=2em]
+  \item El tudok olvasni egy meglévő Velran projektet, és felismerem a page, action, query, route, modul, migration és konfigurációs boundarykat.
+  \item Tudok page vagy action handlert hozzáadni, és explicit access policyval route-hoz kötni.
+  \item El tudom dönteni, hogy query, form, JSON vagy multipart input illik a feladathoz, és a külső kontroll alatt álló stringeket és collectionöket bounded formában tartom.
+  \item Rust-szerű structtal, enummal, \code{Option<T>}, \code{Vec<T>} és \code{Result<T,E>} típussal tudok adatot modellezni legacy Velran írásmód nélkül.
+  \item Tudok adatbázis-migrationt hozzáadni, typed queryt írni, és az adatbázis-constraintet összhangban tartani az alkalmazásszintű validációval.
+  \item Tudok create, read, update és delete folyamatot írni, és tranzakciót használok, ha több írás egyetlen logikai műveletet alkot.
+  \item Felismerem, mikor kell optimistic locking vagy más concurrency szabály a frissebb állapot csendes felülírása helyett.
+  \item Egy növekvő alkalmazást modulokra tudok bontani anélkül, hogy gyengíteném a route-, adat- vagy capability-boundarykat.
+  \item Tudok typed JSON endpointot készíteni, és külön kezelem a böngészős form-flowt és az API request/response folyamatot.
+  \item Tudok adatbázisból érkező Markdownot szerveroldalon renderelni, a Markdownot source of truthként megtartani, és public response cache-t csak valóban nem személyre szabott, megfelelő freshness contracttal rendelkező route-on használok.
+  \item A canonical repository-példákat és a Secure Notes checkpointokat használom ellenőrzésre ahelyett, hogy emlékezetből támogatás nélküli szintaxist találnék ki.
+\end{itemize}
+
+\subsection*{Security boundaryk}
+\begin{itemize}[label={\texttt{[ ]}},leftmargin=2em]
+  \item Értem, hogy az authentication azt bizonyítja, ki az actor, az authorization pedig azt dönti el, hogy az actor végrehajthatja-e ezt a műveletet ezen az objektumon.
+  \item Tudatosan tudok választani a \code{public}, authenticated, MFA, role, permission, webhook és critical-operation route policyk között.
+  \item Védett objektum olvasása vagy módosítása előtt ownership vagy más object-level authorization szabályt érvényesítek.
+  \item Principal/tenant szűrést már az adatbázis-querybe teszek, ha egy collection soha nem tartalmazhat más actorhoz tartozó rekordot.
+  \item El tudom magyarázni, miért security boundary a korlátlan külső input, upload/media feldolgozás és outbound hálózat, nem egyszerű kényelmi feature.
+  \item A CSRF-, CORS-, trusted-proxy-, Host-, cookie- és credential-kezelést külön fogalomként értem, nem egyetlen általános ``web security'' kapcsolóként.
+  \item A gyakori compiler/security diagnosticokat értelmezni tudom, és a megsértett invariánst javítom a check elnyomása helyett.
+  \item Egy változtatás reviewjakor meg tudom mondani, mely capability-, filesystem-, database-, network- vagy identity-boundary bővül.
+\end{itemize}
+
+\subsection*{Build, verification és production}
+\begin{itemize}[label={\texttt{[ ]}},leftmargin=2em]
+  \item Önállóan végig tudom vinni a normál fejlesztési ciklust: módosítás, \code{velran-cli check}, célzott tesztek, build és a változáshoz tartozó repository verification gate-ek.
+  \item A hibakereséshez szükséges mélységben értem a natív útvonalat a verified source-tól az executable IR-en és generált Ruston át a \code{rustc}, immutable generation és atomic activation lépésekig.
+  \item Meg tudom különböztetni az alkalmazás reloadolható állapotát azoktól a konfigurációs vagy infrastruktúra-változásoktól, amelyek process restartot igényelnek.
+  \item Migrationt elő tudok készíteni és ellenőrizni anélkül, hogy a schema-módosítást a szerver indulásához kötném.
+  \item Request ID alapján tudok server/access/audit logot olvasni, és readiness/metrics segítségével különválasztom az alkalmazáshibát a dependency-hibától.
+  \item Explicit release artifacttal, checksummal, konfigurációs review-val, smoke teszttel és rollback döntéssel tudok deployolni.
+  \item El tudom mondani, mi tartozik a backupba, izoláltan vissza tudok állítani konzisztens DB/AppFs/identity állapotot, és a restore drillt evidence-nek tekintem, nem puszta dokumentációnak.
+  \item Le tudom futtatni a \code{./verify.sh}-t, megértem, melyik gate bukott el, meg tudom különböztetni a tanulói példákat a rejection fixture-öktől/manifesztektől, és kerülöm az olyan ``javítást'', amely csak gyengíti az ellenőrzést.
+\end{itemize}
+
+\subsection*{Hogyan használd a checklistet?}
+Nem minden parancs bemagolása a cél, hanem az önálló döntés. Ha egy pont bizonytalan, térj vissza a megfelelő Secure Notes checkpointhoz, változtass meg tudatosan egy dolgot, futtasd a releváns verifiert, és mondd el, miért biztonságos az eredmény. Ha a fenti pontok mindegyikét egy kisebb alkalmazáson bizonyítani tudod, elérted azt a gyakorlati alapszintet, amelyet egy Velran webfejlesztőtől elvárunk; a későbbi referenciaanyag ezután mélyít, nem pedig helyettesíti ezt az alapot.
+
+\section{Gyakorlat: evidence-gyűjtésként futtasd a checklistet}
+\paragraph{Gyakorlási mód: üzemeltetési szcenárió.} Használd az előszóban meghatározott üzemeltetési módszert.
+
+Ne emlékezetből pipáld ki a pontokat. Minden release-safety szempontból releváns elemhez kapcsolj parancseredményt, config review-t, teszteredményt, restore próbát vagy más konkrét evidence-et.
+
+\section{Tipikus hiba: a checklistet engineering judgment helyettesítőjeként kezeljük}
+A checklist ismert omission-osztályokat fog meg; ismeretlen architektúráról nem bizonyítja, hogy biztonságos. Állítsd meg a release-t, ha egy pont kétértelmű, és oldd fel a tervezési kérdést ahelyett, hogy optimistán értelmeznéd a checkboxot.
+
+\section{Végső Secure Notes checkpoint}
+E függelékkel végezz release-readiness review-t a végső checkpointon:
+\begin{quote}\path{examples/secure-notes/checkpoints/23-release-readiness/main.vrn}\end{quote} Kövesd végig az evidence-láncot a forrástól és lockfile-tól a baseline migráción, compiler verificationön, konfiguráción és natív aktiváláson át a backup/restore eljárásig. Minden nem bizonyítható pont legyen a következő engineering feladat a production aktiválás előtt.

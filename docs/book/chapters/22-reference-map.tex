@@ -1,0 +1,138 @@
+\chapter{Developer reference and where to go next}
+
+\noindent\textbf{Learning path: Complete path / reference map.} Use this to find the authoritative source for a language, security, or operations question.\par\medskip
+
+\section{Canonical documentation map}
+
+This book is the long-form development guide. The current high-level security status is \path{SECURITY-STATUS.md}; detailed canonical topic documentation lives in \path{docs/}. Hungarian operator/developer companions remain under \path{docs/hu/} where a translated topic exists.
+
+\begin{longtable}{L{0.34\textwidth}L{0.58\textwidth}}
+\toprule
+Topic & Canonical project documentation \\
+\midrule
+Current security architecture & \path{SECURITY-STATUS.md}, \path{docs/99-security-architecture-and-status.md} \\
+Secure-by-construction foundation & \path{docs/57-secure-by-construction-foundation.md} \\
+Domain types and bounded collections & \path{docs/62-domain-types-and-bounded-collections.md} \\
+Nominal types and refinement & \path{docs/63-nominal-domain-types.md}, \path{docs/64-domain-value-refinement.md} \\
+Public projections and secret flows & \path{docs/65-explicit-public-projections.md}, \path{docs/66-secret-consumer-contracts.md} \\
+Passwords, tokens and sessions & \path{docs/67-typed-credentials-and-passwords.md} through \path{docs/74-platform-owned-browser-sessions.md} \\
+Permissions, MFA and critical operations & \path{docs/75-function-level-permissions.md} through \path{docs/77-critical-operation-contracts.md} \\
+Resource profiles and bounded request input & \path{docs/78-route-budget-profiles.md}, \path{docs/79-bounded-request-collections.md} \\
+Public error boundary & \path{docs/80-public-error-boundaries.md} \\
+Tenant authority and isolation & \path{docs/81-tenant-membership-authority.md}, \path{docs/82-compiler-enforced-tenant-isolation.md} \\
+Idempotent critical operations & \path{docs/83-idempotent-critical-operations.md} \\
+Verified webhooks & \path{docs/81-verified-webhook-integrity.md} \\
+Safe upload state machine & \path{docs/84-safe-file-upload-state-machine.md} \\
+Effect/capability model & \path{docs/85-effect-capability-foundation.md} \\
+Typed outbound integrations & \path{docs/86-typed-outbound-integration-calls.md} \\
+Production security policy & \path{docs/87-production-configuration-policy.md} \\
+Typed HTTP metadata & \path{docs/88-typed-http-metadata.md} \\
+Crypto key purpose/lifecycle & \path{docs/89-crypto-key-purpose-lifecycle.md} \\
+Generated CSP/security headers & \path{docs/90-generated-security-headers.md} \\
+Supply-chain capabilities/provenance & \path{docs/92-supply-chain-capability-provenance.md} \\
+Authentication abuse protection & \path{docs/93-authentication-abuse-protection.md} \\
+Closed sum types/exhaustive match & \path{docs/94-sum-types-and-exhaustive-match.md} \\
+Transaction outcome semantics & \path{docs/95-transaction-outcome-semantics.md} \\
+Authenticated encryption/key lifecycle & \path{docs/96-authenticated-encryption-key-lifecycle.md} \\
+Advanced resource safety & \path{docs/97-advanced-resource-safety.md} \\
+Typed security events & \path{docs/79-typed-security-events.md} \\
+Bounded JSON boundary & \path{docs/100-bounded-json-boundary.md} \\
+Security monitoring/redaction & \path{docs/98-security-monitoring-and-redaction.md} \\
+Dependency security & \path{docs/19-dependency-security.md} \\
+Modules/namespaces & \path{docs/21-modules-and-namespaces.md} \\
+Math/timing, string/list/dict/regex & \path{docs/44-math-and-timing.md}, \path{docs/46-string-builtins.md} through \path{docs/49-regular-expressions.md} \\
+Optimistic locking & \path{docs/24-optimistic-locking.md} \\
+IPv6-ready egress & \path{docs/32-ipv6-egress.md} \\
+Debian package/install & \path{docs/36-debian-package.md} \\
+Reverse proxy/multidomain/reload & \path{docs/37-multi-domain-hosting.md} through \path{docs/39-automatic-source-reload.md} \\
+Maintainability/architecture gates & \path{docs/50-maintainability-and-clean-code.md} \\
+\bottomrule
+\end{longtable}
+
+\section{Daily secure development checklist}
+
+\begin{enumerate}
+  \item Keep authority explicit: route policy, DB capability, tenant, permission/MFA and named outbound integration.
+  \item Refine untrusted input to nominal/domain types; do not confuse validation with authorization.
+  \item Use object/mutation authorization before protected writes.
+  \item Use critical contracts for operations that need permission, MFA, transaction, audit or idempotency.
+  \item For retry-sensitive transactions, capture and exhaustively handle \code{Committed}, \code{RolledBack}, and\\ \code{CommitUnknown}.
+  \item Never reintroduce raw SQL, raw HTML, arbitrary redirect/header/filename or arbitrary outbound URL shortcuts.
+  \item Keep file uploads staged/private until inspection and explicit publish.
+  \item Keep secrets behind typed secret/credential/key boundaries and use \code{redact(...)} for safe monitoring representation.
+  \item Keep DB rows, collections, files, outbound bodies and request time bounded.
+  \item Before platform release run locked Cargo metadata/check/tests, \code{./verify.sh}, supply-chain verification and release-manifest verification.
+\end{enumerate}
+
+
+\section{How to use the documentation set}
+
+Use the documentation layer that matches the question:
+
+\begin{longtable}{L{0.25\textwidth}L{0.31\textwidth}L{0.34\textwidth}}
+\toprule
+Document class & Best use & Authority \\
+\midrule
+This book & learning path and end-to-end development workflow & explanatory, aligned with canonical docs \\
+\path{docs/*.md} & feature contracts, invariants and focused examples & canonical topic documentation \\
+\path{docs/hu/*.md} & Hungarian companions for day-to-day development/operations & translated companion where present \\
+\path{SECURITY-STATUS.md} & current high-level security architecture/status & current architecture summary \\
+\path{RUST_FIRST_LANGUAGE_POLICY.md} & language/backend direction and native execution boundary & current language policy \\
+\path{history/development-notes/} & historical iterations, experiments and superseded design context & non-normative history \\
+\bottomrule
+\end{longtable}
+
+If sources disagree, prefer the current canonical feature document and verified compiler/runtime behavior, then update the stale text. Historical notes explain design history; they are not current syntax or deployment instructions.
+
+\section{Task-oriented reading paths}
+
+For common work, the following reading order is faster than scanning the repository numerically:
+
+\begin{itemize}
+  \item \textbf{Build a CRUD application:} Chapters 3--7, then the forms, optimistic-locking and domain-type documents.
+  \item \textbf{Build a JSON/API service:} Chapter 9, bounded JSON, typed HTTP metadata and public error boundary.
+  \item \textbf{Add authentication-sensitive mutations:} Chapter 7, function permissions, MFA elevation, critical-operation contracts and idempotency.
+  \item \textbf{Accept files/images:} Chapter 8 plus the safe upload state-machine document.
+  \item \textbf{Call external services:} Chapter 13 plus secure routing/egress and typed outbound integration documents.
+  \item \textbf{Prepare production:} Chapters 15--23, production configuration policy, supply-chain provenance, recovery and the production checklist.
+  \item \textbf{Investigate a security invariant:} start with \path{SECURITY-STATUS.md}, then follow the focused document named for that invariant.
+\end{itemize}
+
+\section{Executable companion examples}
+
+The book intentionally contains both complete programs and focused fragments. For code you want to copy, modify, or use as a regression fixture, start with a repository example that participates in project verification:
+
+\begin{longtable}{L{0.27\textwidth}L{0.31\textwidth}L{0.32\textwidth}}
+\toprule
+Task & Verified companion & What to study \\
+\midrule
+Small modular application & \path{examples/starter-project/} & modules, typed pages/actions, CSRF and typed route helpers \\
+CRUD and typed SQL & \path{examples/crud/app.vrn} & \code{Vec<T>}, \code{Option<T>}, transactions, validation and object authorization \\
+Authentication policy & \path{examples/auth/app.vrn} & authenticated route policy and session-aware application flow \\
+Files and uploads & \path{examples/upload/app.vrn} & typed upload boundary and safe file handling \\
+JSON/API & \path{examples/json-api/app.vrn} & typed JSON request/response and API route behavior \\
+Components/layouts & \path{examples/components/app.vrn} & components, layouts and typed HTML composition \\
+Wiki/CMS & \path{examples/wiki/main.vrn} & slugged content, Markdown rendering, layouts and mutation flow \\
+SQL-backed Markdown & \path{examples/markdown-sql-cache/} & typed ID lookup, server-side safe Markdown rendering and optional public response cache \\
+Optimistic locking & \path{examples/optimistic-locking/main.vrn} & versioned updates and conflict handling \\
+Outbound integration & \path{examples/outbound-native/app.vrn} & named, typed outbound calls and egress boundary \\
+Security events & \path{examples/typed-security-events/} & typed security-event emission and monitoring boundary \\
+\bottomrule
+\end{longtable}
+
+A short listing in the book may deliberately omit unrelated declarations so the concept remains visible. Such a fragment is explanatory, not a promise that the fragment alone forms a complete program. The companion paths above are the preferred copy/paste starting points. Verification-only rejection cases belong under \path{tests/fixtures/}, not in the learner example catalog; \path{tests/manifests/} contains corpus metadata. The \path{tools/check-book-velran-examples.sh} guard protects the book against known legacy syntax, missing route policy, missing example paths and English/Hungaria Velran-listing drift.
+
+\section{Keeping examples trustworthy}
+
+Documentation examples follow production-source rules: current Rust-like syntax, explicit route policy, typed/bounded input, compiler-owned SQL, no raw HTML/redirect/egress shortcuts, and native-only execution. Prefer a matching verified \path{examples/} fixture when available. A documentation change is complete only after language-corpus review and EN/HU structural parity checks.
+
+\section{Practice: choose the right authority}
+\paragraph{Exercise mode: operational scenario.} Use the operational-scenario method defined in the preface.
+
+For a language question, identify whether the answer belongs in the compiler-verified language surface, the web framework contract, deployment documentation, or historical notes. Use the most authoritative current source first and treat translated or historical material according to its stated role.
+
+\section{Common mistake: resolving documentation conflicts by guessing}
+When two documents disagree, do not silently combine them. Prefer the canonical current specification or verified behavior, then update the stale document so the conflict does not remain for the next reader.
+
+\section{Reader checkpoint: Secure Notes}
+Pick one design decision from Secure Notes and locate the current authoritative documentation that supports it. This is a practical test that the documentation map is usable, not merely complete.

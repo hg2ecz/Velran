@@ -1,0 +1,27 @@
+# chapter<TAB>example path<TAB>purpose
+03	examples/a-z-products/main.vrn	end-to-end minimal application
+05	examples/crud/app.vrn	CRUD and object-authorized mutation
+05	examples/forms/app.vrn	typed forms and validation
+05	examples/optimistic-locking/main.vrn	concurrent edit conflict handling
+05	examples/prg-flash/app.vrn	post-redirect-get and flash state
+07	examples/auth/app.vrn	route authentication and role policy
+07	examples/object-authorization/app.vrn	object-level authorization
+07	examples/mfa-elevation/main.vrn	MFA elevation flow
+07	examples/critical-operations/main.vrn	critical operation contracts
+08	examples/upload/app.vrn	general upload handling
+08	examples/media/app.vrn	validated media handling
+08	examples/typed-multipart/main.vrn	typed multipart request boundary
+09	examples/json-api/app.vrn	JSON API and CORS-facing route shape
+09	examples/typed-query-form/main.vrn	typed query/form structs
+09	examples/json-typed-response/app.vrn	typed JSON response boundary
+10	examples/static-assets/app.vrn	static asset integration
+11	examples/module-namespaces/main.vrn	module namespaces and qualified calls
+11	examples/starter-project/main.vrn	multi-file starter project
+12	examples/wiki/main.vrn	wiki application
+12	examples/news-site/main.vrn	multi-file CMS/news application
+13	examples/outbound-native/app.vrn	named outbound integration capability
+15	examples/resource-profile/app.vrn	bounded request/resource profile
+15	examples/rate-limit/app.vrn	rate limiting policy
+15	examples/typed-security-events/main.vrn	typed security event handling
+
+11	examples/secure-notes/main.vrn	canonical multi-file Secure Notes running project

@@ -1,0 +1,19 @@
+struct EchoInput {
+    name: String,
+    age: i64,
+    active: bool,
+    tags: Vec<String>,
+}
+
+#[action]
+fn echoApi(ctx: ActionContext, input: Json<EchoInput>) -> Result<Json, PageError> {
+    let clean_name = input.name.trim();
+    let tag_count = input.tags.len();
+    return Ok(json(clean_name));
+}
+
+route echoApi POST "/api/echo"
+    json EchoInput
+    validate name length 1 100 age range 0 150 tags items 1 64
+    auth user
+    => echoApi;

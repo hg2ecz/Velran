@@ -1,0 +1,352 @@
+\chapter{The \code{server.toml} configuration reference}
+
+\noindent\textbf{Learning path: Complete path / reference.} Search this chapter when configuring the server; it is not required as linear reading.\par\medskip
+
+\noindent\textbf{First reading.} Learn precedence/fail-closed rules, the production baseline, and which trust domain owns each setting. Use the option tables as deployment reference.\par\medskip
+
+Earlier chapters used server configuration in a task-oriented way. This chapter gives the current production configuration from an operator's perspective in one place. The reference is based on the actual parser and \code{config/server.toml.sample}; if they ever differ, parser behavior is authoritative.
+
+\section{Loading, precedence, and fail-closed rules}
+
+Recommended production startup:
+
+\begin{lstlisting}
+velran-server \\
+  --config /usr/local/etc/velran/server.toml
+\end{lstlisting}
+
+Precedence is:
+
+\begin{lstlisting}
+built-in defaults < server.toml < explicit CLI override
+\end{lstlisting}
+
+The TOML file is trusted configuration, but parsing remains fail-closed:
+
+\begin{itemize}
+  \item unknown section or key: startup error;
+  \item duplicate key or table: TOML parse error;
+  \item the config file must be a regular non-symlink file;
+  \item maximum size is 1 MiB;
+  \item filesystem paths coming from TOML must be absolute;
+  \item secrets must not appear in plaintext fields: DB/Redis/LDAP/local-auth credentials are supplied only through \code{*_file} references.
+\end{itemize}
+
+Validate without starting a listener:
+
+\begin{lstlisting}
+velran-server \\
+  --config /usr/local/etc/velran/server.toml \\
+  --check-config
+\end{lstlisting}
+
+Inspect the secret-free effective view:
+
+\begin{lstlisting}
+velran-server \\
+  --config /usr/local/etc/velran/server.toml \\
+  --print-effective-config
+\end{lstlisting}
+
+\section{How to read the tables}
+
+\textbf{Built-in default} means the value that applies with no configuration. The \textbf{production sample} is the recommended starting value in \code{config/server.toml.sample}. They are not always identical: the sample deliberately opts into larger production budgets in several places.
+
+\section{[server] and [tls]}
+
+\begin{longtable}{L{0.28\textwidth}L{0.20\textwidth}L{0.42\textwidth}}
+\toprule
+Key & Built-in default & Meaning / production note \\
+\midrule
+\path{server.app} & none & Absolute path to the application's \code{main.vrn}. Sample: \code{/srv/velran/current/main.vrn}. \\
+\path{server.listen} & \code{127.0.0.1:8080} & Listener address. Usually loopback behind a reverse proxy; may be public for direct TLS. \\
+\path{server.insecure_dev_cookies} & \code{false} & Development HTTP only. Keep \code{false} in production. \\
+\path{server.unix_socket} & none & Optional absolute Unix-domain socket path; Unix only and requires \path{server.behind_proxy=true}. \\
+\path{server.behind_proxy} & \code{false} & Enables explicit trusted reverse-proxy semantics. Cannot be combined with backend TLS. \\
+\path{server.expected_build_id} & none & Optional 64-lowercase-hex deployment pin. Startup fails closed if the running server build ID differs. \\
+\path{tls.cert_file} & none & Absolute path to the TLS certificate chain. \\
+\path{tls.key_file} & none & Absolute path to the TLS private key. \\
+\path{tls.handshake_timeout_ms} & \code{5000} & TLS handshake timeout ceiling. \\
+\path{tls.http_redirect_listen} & none & Optional HTTP listener used only for HTTPS redirects. \\
+\path{tls.public_host} & none & Canonical/public host for redirect and Host/Origin validation; also required in trusted HTTPS reverse-proxy mode. \\
+\bottomrule
+\end{longtable}
+
+\subsection*{Behind a reverse proxy}
+
+Behind Apache or Nginx, Velran typically does not listen on a public interface:
+
+\begin{lstlisting}
+[server]
+app = "/srv/velran/current/main.vrn"
+listen = "127.0.0.1:8080"
+insecure_dev_cookies = false
+
+[tls]
+public_host = "www.example.com"
+\end{lstlisting}
+
+The proxy terminates public TLS. Velran certificate/key settings are omitted, but \path{tls.public_host} is still required for trusted Host/Origin pinning. The \path{web.trusted_proxy_cidrs} list defines which upstreams may supply authoritative forwarding metadata. In this production mode, a non-TLS Velran listener is allowed only on loopback.
+
+\section{[database], [redis], and [auth]}
+
+\begin{longtable}{L{0.34\textwidth}L{0.18\textwidth}L{0.38\textwidth}}
+\toprule
+Key & Default & Meaning \\
+\midrule
+\path{database.url_file} & none & Secret file containing the DB URL. There is no plaintext \code{database.url}. \\
+\path{database.allow_insecure} & \code{false} & Explicitly permits an unencrypted remote DB connection; normally do not use in production. \\
+\path{redis.url_file} & none & Redis URL from a secret file. \\
+\path{redis.allow_insecure} & \code{false} & Explicitly permits insecure Redis. \\
+\path{auth.ldap_url} & none & LDAP/LDAPS endpoint. \\
+\path{auth.ldap_search_base} & none & LDAP search base. \\
+\path{auth.ldap_username_attribute} & \code{uid} & LDAP attribute used as the login name. \\
+\path{auth.ldap_service_bind_dn_file} & none & Service bind DN from a secret file. \\
+\path{auth.ldap_service_bind_password_file} & none & Bind password from a secret file. \\
+\path{auth.totp_secrets_file} & none & TOTP secret-store file. \\
+\path{auth.roles_file} & none & External role-mapping file. \\
+\path{auth.memberships_file} & none & Optional tenant/user membership authority file. Absolute path; loaded as trusted local policy input. \\
+\path{auth.local_auth_db_url_file} & none & Local-auth identity-store URL from a secret file. \\
+\path{auth.require_totp} & \code{false} & Whether TOTP is required after a successful first factor. \\
+\path{auth.login_max_attempts} & \code{8} & Maximum source+principal password failures per window. \\
+\path{auth.login_principal_max_attempts} & \code{16} & Maximum password failures for one principal across sources. \\
+\path{auth.login_source_max_attempts} & \code{64} & Maximum authentication failures from one source across principals. \\
+\path{auth.mfa_max_attempts} & \code{5} & Maximum second-factor failures per source+principal/principal window. \\
+\path{auth.login_window_secs} & \code{300} & Authentication abuse-control window in seconds. \\
+\bottomrule
+\end{longtable}
+
+Do not configure LDAP and local auth as two parallel primary identity sources in one deployment. Keep identity authority unambiguous. Redis contains session, cache, and rate-limit runtime state; it is not the user source of truth.
+
+\section{[web]}
+
+\begin{longtable}{L{0.34\textwidth}L{0.18\textwidth}L{0.38\textwidth}}
+\toprule
+Key & Default & Meaning \\
+\midrule
+\path{web.trusted_proxy_cidrs} & empty list & Only these source addresses may provide authoritative forwarded client/protocol metadata. \\
+\path{web.allow_missing_origin} & \code{false} & Policy for unsafe requests without Origin. The production default is fail-closed. \\
+\path{web.cors_origins} & empty list & Exact-origin allowlist. Wildcards are not valid for credentialed CORS. \\
+\path{web.cors_allow_credentials} & \code{false} & Allows cross-origin session cookies/credentials; must be considered together with CSRF policy. \\
+\path{web.webhook_secrets_dir} & none & Absolute non-symlink directory containing verified-webhook secrets. Required when the application declares verified webhook routes. \\
+\path{web.egress_policy_file} & none & Absolute outbound-integration/egress policy file. Required when application code declares outbound integration effects. \\
+\bottomrule
+\end{longtable}
+
+\section{[storage] and [static\_assets]}
+
+\begin{longtable}{L{0.34\textwidth}L{0.18\textwidth}L{0.38\textwidth}}
+\toprule
+Key & Built-in default & Meaning \\
+\midrule
+\path{storage.data_root} & none & AppFs runtime-data root. Sample: \code{/srv/velran/data}. \\
+\path{storage.fs_mode} & \code{rwc} & AppFs capability mode. Grant only the operations that are required. \\
+\path{storage.max_upload_bytes} & 16 MiB & Maximum bytes for one upload. \\
+\path{storage.max_image_pixels} & 40,000,000 & Decoded image pixel ceiling. \\
+\path{static_assets.root} & none & Read-only static root. Sample: \code{/srv/velran/current/public}. \\
+\path{static_assets.url_prefix} & \code{/assets/} & URL prefix for the static namespace. \\
+\path{static_assets.max_asset_bytes} & 8 MiB & Maximum size of one static asset. \\
+\path{static_assets.max_age_secs} & \code{300} & Cache lifetime for non-fingerprinted assets. \\
+\path{static_assets.immutable_max_age_secs} & \code{31536000} & Cache lifetime for fingerprinted immutable assets. \\
+\path{static_assets.precompressed} & \code{true} & Use pre-generated Brotli/gzip variants. \\
+\bottomrule
+\end{longtable}
+
+Do not use the same directory for \code{data_root} and the static root: one is mutable application state, the other is a release-owned read-only artifact.
+
+\section{[lifecycle], [observability], and [logging]}
+
+\begin{longtable}{L{0.36\textwidth}L{0.18\textwidth}L{0.36\textwidth}}
+\toprule
+Key & Default & Meaning \\
+\midrule
+\path{lifecycle.health_live_path} & \code{/health/live} & Process liveness endpoint. \\
+\path{lifecycle.health_ready_path} & \code{/health/ready} & Dependency-aware readiness endpoint. \\
+\path{lifecycle.health_dependency_timeout_ms} & \code{1000} & Timeout for readiness dependency probes. \\
+\path{lifecycle.shutdown_grace_ms} & \code{30000} & Graceful-shutdown drain window. \\
+\path{observability.metrics_listen} & none & Prometheus listener; sample: \code{127.0.0.1:9090}. \\
+\path{observability.allow_public_metrics} & \code{false} & Explicitly allows a public metrics listener. \\
+\path{observability.access_log} & \code{true} & Emit HTTP access events. \\
+\path{logging.server_file} & none & Error/system log file. \\
+\path{logging.access_file} & none & Access log file. \\
+\path{logging.audit_file} & none & Security/user-activity audit log. \\
+\path{logging.stderr} & \code{true} & Stderr log output. \\
+\bottomrule
+\end{longtable}
+
+The operator creates the parent log directory. An existing log target must not be a symlink or non-regular file. In behind-proxy mode \code{SIGHUP} reopens logs and transactionally rebuilds domain/application hosting state; process-level settings still require restart.
+
+\section{[rate\_limit] and [cache]}
+
+\begin{longtable}{L{0.34\textwidth}L{0.18\textwidth}L{0.38\textwidth}}
+\toprule
+Key & Default & Meaning \\
+\midrule
+\path{rate_limit.policies_file} & none & Route rate-limit policy file. Sample: \path{/usr/local/etc/velran/rate-limits.toml}. \\
+\path{rate_limit.allow_memory} & \code{false} & Explicitly allows in-memory fallback. Keep false for multi-instance production. \\
+\path{cache.max_ttl_secs} & \code{3600} & Maximum route TTL for public cache. \\
+\path{cache.max_entries} & \code{10000} & In-memory cache entry ceiling. \\
+\path{cache.max_bytes} & 64 MiB & Total in-memory cache byte ceiling. \\
+\path{cache.allow_memory} & \code{false} & Explicitly allows memory cache without Redis. \\
+\path{cache.singleflight_wait_timeout_ms} & \code{5000} & Maximum waiter time for a coalesced public-cache fill; zero is rejected. \\
+\bottomrule
+\end{longtable}
+
+When multiple \code{velran-server} instances run, shared session/cache/rate-limit state must be carried by Redis. Memory fallback is appropriate only deliberately, usually in a single-instance environment.
+
+
+\section{[native]}
+
+Native execution is the production execution path; configuration controls the trusted compiler invocation and cache, not application-supplied arbitrary compiler flags.
+
+\begin{longtable}{L{0.34\textwidth}L{0.18\textwidth}L{0.38\textwidth}}
+\toprule
+Key & Default & Meaning \\
+\midrule
+\path{native.enabled} & \code{true} & Enables native execution. Current application activation requires the native path. \\
+\path{native.required} & \code{false} & Fail startup/activation if no native shard can be built and loaded. Production sample sets \code{true}. \\
+\path{native.rustc} & discovered & Optional absolute trusted \code{rustc} path; otherwise use configured environment/PATH discovery. \\
+\path{native.cache_dir} & app-local & Optional absolute native artifact cache directory. Cache hits remain integrity/hash verified. \\
+\path{native.optimization} & \code{release} & \code{interactive} or \code{release}; production uses \code{release}. \\
+\path{native.target_cpu} & none & Optional validated CPU baseline, for example \code{native} for a host-local cache. \\
+\path{native.cpu_features} & none & Optional validated feature list such as \code{+sse2,+avx2}; pin only when deployment compatibility is understood. \\
+\path{native.debug_rustc_repro} & \code{false} & Diagnostic reproduction aid; do not enable as a normal production setting. \\
+\bottomrule
+\end{longtable}
+
+Security rule: performance settings may change code generation, but they do not bypass verified lowering, package/capability checks, or native-cache integrity verification.
+
+\section{[reload]}
+
+\begin{longtable}{L{0.34\textwidth}L{0.18\textwidth}L{0.38\textwidth}}
+\toprule
+Key & Default & Meaning \\
+\midrule
+\path{reload.enabled} & \code{true} & Enables the shared source-graph watcher. \\
+\path{reload.poll_interval_ms} & \code{1000} & Metadata polling interval. \\
+\path{reload.debounce_ms} & \code{250} & Debounce interval before compiling a candidate generation. \\
+\path{reload.debug_compile_errors} & \code{false} & Development diagnostic output while the last valid generation keeps serving. Production security policy rejects this mode. \\
+\bottomrule
+\end{longtable}
+
+\section{[limits]}
+
+Request and runtime limits are defense-in-depth controls. The sample sets several values explicitly so the operator makes an auditable production-budget decision.
+
+\begin{longtable}{L{0.36\textwidth}L{0.20\textwidth}L{0.34\textwidth}}
+\toprule
+Key & Built-in default & Sample / meaning \\
+\midrule
+\path{limits.max_header_bytes} & 16 KiB & Sample uses the same value. \\
+\path{limits.max_body_bytes} & 256 KiB & Same in sample; uploads also have a separate storage limit. \\
+\path{limits.max_connections} & \code{4096} & Concurrent-connection ceiling. \\
+\path{limits.max_requests_per_connection} & \code{100} & Keep-alive request ceiling. \\
+\path{limits.read_timeout_ms} & \code{5000} & Request read timeout. \\
+\path{limits.request_timeout_ms} & \code{15000} & Total request budget. \\
+\path{limits.write_timeout_ms} & \code{5000} & Response write timeout. \\
+\path{limits.max_header_count} & \code{64} & Header-count ceiling. \\
+\path{limits.max_form_fields} & \code{64} & Maximum number of form fields. \\
+\path{limits.max_form_field_bytes} & 8 KiB & Byte ceiling for one form field. \\
+\path{limits.max_json_depth} & \code{32} & Maximum nested JSON depth at the bounded JSON boundary. \\
+\path{limits.max_json_string_bytes} & 64 KiB & Maximum decoded bytes in one JSON string. \\
+\path{limits.max_json_array_items} & \code{4096} & Maximum items in one JSON array. \\
+\path{limits.max_json_object_fields} & \code{1024} & Maximum fields in one JSON object. \\
+\path{limits.max_instructions} & \code{100000} & Sample: \code{5000000}. Verified execution/instruction budget; increases should be audited. \\
+\path{limits.max_runtime_alloc_bytes} & 32 MiB & Sample: 256 MiB. Runtime allocation ceiling. \\
+\path{limits.session_ttl_secs} & \code{28800} & 8 hours. \\
+\path{limits.max_sessions} & \code{100000} & Session ceiling. \\
+\path{limits.max_process_memory_bytes} & none & Sample: 1 GiB; process address-space limit. \\
+\path{limits.resource_profiles_file} & none & Sample: \path{/usr/local/etc/velran/resource-profiles.toml}. \\
+\bottomrule
+\end{longtable}
+
+\subsection*{Why separate request, runtime, and process limits?}
+
+\code{max_body_bytes} limits network input, \code{max_runtime_alloc_bytes} limits runtime-accounted allocations for one request, and \code{max_process_memory_bytes} limits the entire process address space. None replaces the others.
+
+\section{[cgroup]}
+
+Cgroup controls add a Linux production defense-in-depth layer above process-level limits.
+
+\begin{longtable}{L{0.34\textwidth}L{0.18\textwidth}L{0.38\textwidth}}
+\toprule
+Key & Default & Meaning \\
+\midrule
+\path{cgroup.dir} & none & Absolute path to an already prepared cgroup directory. \\
+\path{cgroup.memory_max_bytes} & none & Cgroup memory ceiling; the systemd sample does not set this. \\
+\path{cgroup.memory_swap_max_bytes} & none & Optional swap ceiling for delegated-cgroup deployments. \\
+\path{cgroup.cpu_percent} & none & Optional CPU budget percentage for delegated-cgroup deployments. \\
+\path{cgroup.pids_max} & none & Optional PID/thread ceiling for delegated-cgroup deployments. \\
+\bottomrule
+\end{longtable}
+
+Creating and delegating the cgroup directory is an operator task; the server is not a system-administration tool. In the repository's systemd baseline, the service manager is the cgroup authority (\code{MemoryMax}, \code{CPUQuota}, \code{TasksMax}), so the \code{[cgroup]} section is intentionally not enabled. Use Velran-side cgroup writes only with a separately delegated writable cgroup v2 directory. Do not configure both authorities at once.
+
+\section{Production baseline}
+
+A typical minimum configuration behind a reverse proxy:
+
+\begin{lstlisting}
+[server]
+app = "/srv/velran/current/main.vrn"
+listen = "127.0.0.1:8080"
+insecure_dev_cookies = false
+
+[tls]
+public_host = "www.example.com"
+
+[database]
+url_file = "/run/secrets/velran/database-url"
+
+[redis]
+url_file = "/run/secrets/velran/redis-url"
+
+[web]
+trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
+allow_missing_origin = false
+
+[storage]
+data_root = "/srv/velran/data"
+
+[logging]
+server_file = "/var/log/velran/server.log"
+access_file = "/var/log/velran/access.log"
+audit_file = "/var/log/velran/audit.log"
+stderr = true
+
+[limits]
+resource_profiles_file = "/usr/local/etc/velran/resource-profiles.toml"
+\end{lstlisting}
+
+This is only a baseline. Auth, static assets, metrics, rate limiting, TLS, and cgroup settings must match the deployment topology.
+
+
+\section{Automatic source reload}
+
+The global \code{[reload]} section defines \code{enabled}, \code{poll_interval_ms}, \code{debounce_ms}, and the development-only \code{debug_compile_errors}. Each multi-domain entry may override them in \code{[domains.reload]}. The default policy enables metadata polling. A single shared supervisor watches the compiler-reported source graph with \code{mtime + size}, including the configured logical entrypoint path for atomic symlink deployments. Failed candidates leave the old generation active; successful commits atomically replace only the affected domain and invalidate its public-cache generations. Use \code{--no-source-reload} for a process-wide maintenance override.
+
+\section{Change workflow}
+
+For production configuration changes, this book uses one recommended order:
+
+\begin{enumerate}
+  \item modify the version-controlled configuration template;
+  \item change secrets in separate files, not in TOML;
+  \item run \code{velran-server --check-config};
+  \item inspect the secret-free \code{--print-effective-config} summary;
+  \item perform a controlled restart;
+  \item verify live/ready endpoints, logs, metrics, and audit output.
+\end{enumerate}
+
+\code{SIGHUP} is a bounded hosting reload in behind-proxy mode, not a general process reconfiguration mechanism. Application source changes normally need neither SIGHUP nor restart: the \code{[reload]} supervisor watches the entrypoint and transitive module graph and transactionally swaps a successfully compiled domain generation.
+
+\section{Practice: review configuration by trust domain}
+\paragraph{Exercise mode: operational scenario.} Use the operational-scenario method defined in the preface.
+
+Group configuration into listener/TLS, storage, authentication/session, resource limits, egress, observability, and native build/runtime concerns. Review each group with the owner who understands its failure mode rather than treating the file as one flat list of keys.
+
+\section{Common mistake: copying a large configuration and changing only obvious values}
+A copied setting may carry assumptions about proxies, paths, limits, or credentials that do not match the new environment. Start from the documented minimum and add only settings whose operational meaning is understood.
+
+\section{Operator checkpoint: Secure Notes}
+Produce the minimal production configuration for Secure Notes and annotate which values are environment-specific. Keep secrets in referenced files and verify the final configuration with the server's check mode before deployment.

@@ -1,0 +1,5 @@
+#[action]
+fn bad(ctx: ActionContext, file: Upload) -> Result<Redirect, PageError> {
+    return Ok(redirect(bad()));
+}
+route bad POST "/bad" upload file<Upload> to "../outside" public => bad;

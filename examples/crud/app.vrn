@@ -1,0 +1,138 @@
+model Product {
+    id: i64
+    name: String
+    price: i64
+}
+
+#[query]
+fn listProducts(db: Db, offset: i64) -> Result<Vec<Product>, DbError> sql {
+    SELECT id, name, price
+    FROM products
+    ORDER BY id
+    LIMIT 100 OFFSET :offset
+}
+
+#[query]
+fn findProduct(db: Db, id: i64) -> Result<Option<Product>, DbError> sql {
+    SELECT id, name, price
+    FROM products
+    WHERE id = :id
+}
+
+#[query]
+fn loadProduct(db: Db, id: i64) -> Result<Product, DbError> sql {
+    SELECT id, name, price
+    FROM products
+    WHERE id = :id
+}
+
+#[query]
+fn createProduct(tx: Transaction, name: String, price: i64) -> Result<(), DbError> sql {
+    INSERT INTO products(name, price)
+    VALUES (:name, :price)
+}
+
+#[query]
+fn updateProduct(tx: Transaction, id: i64, name: String, price: i64) -> Result<(), DbError> mutates Product by id sql {
+    UPDATE products
+    SET name = :name, price = :price
+    WHERE id = :id
+}
+
+#[query]
+fn deleteProduct(tx: Transaction, id: i64) -> Result<(), DbError> mutates Product by id sql {
+    DELETE FROM products
+    WHERE id = :id
+}
+
+#[page]
+fn products(ctx: PageContext, db: Db, page: i64, pageSize: i64) -> Result<Html, PageError> {
+    let offset = (page - 1) * pageSize;
+    let products = listProducts(db, offset)?;
+
+    return Ok(html {
+        <main>
+            <h1>Products</h1>
+
+            <form method="post" @action(create)>
+                <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+                <label>Name <input name="name" maxlength="100"></label>
+                <label>Price <input name="price"></label>
+                <button type="submit">Create</button>
+            </form>
+
+            <ul>
+                @for product in products {
+                    <li>
+                        #{{ product.id }} — {{ product.name }} — {{ product.price }}
+                        <a @href(product, product.id)>View/edit</a>
+                        <form method="post" @action(delete, product.id)>
+                            <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+                            <button type="submit">Delete</button>
+                        </form>
+                    </li>
+                }
+            </ul>
+
+            <a @href(products, page + 1, pageSize)>Next page</a>
+        </main>
+    });
+}
+
+#[page]
+fn product(ctx: PageContext, db: Db, id: i64) -> Result<Html, PageError> {
+    let product = findProduct(db, id)?;
+
+    return Ok(html {
+        <main>
+            <h1>Product lookup</h1>
+            @if product {
+                <article>
+                    <h2>{{ product.name }}</h2>
+                    <p>ID: {{ product.id }}</p>
+                    <p>Price: {{ product.price }}</p>
+                    <form method="post" @action(update, product.id)>
+                        <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+                        <label>Name <input name="name"></label>
+                        <label>Price <input name="price"></label>
+                        <button type="submit">Update</button>
+                    </form>
+                </article>
+            }
+        </main>
+    });
+}
+
+#[action]
+fn create(ctx: ActionContext, db: Db, name: String, price: i64) -> Result<Redirect, PageError> {
+    transaction db {
+        createProduct(tx, name, price)?;
+    }
+    return Ok(redirect(products(1, 20)));
+}
+
+#[action]
+fn update(ctx: ActionContext, db: Db, id: i64, name: String, price: i64) -> Result<Redirect, PageError> {
+    let product = loadProduct(db, id)?;
+    authorize product authenticated;
+    transaction db {
+        updateProduct(tx, product.id, name, price)?;
+    }
+    return Ok(redirect(products(1, 20)));
+}
+
+#[action]
+fn delete(ctx: ActionContext, db: Db, id: i64) -> Result<Redirect, PageError> {
+    let product = loadProduct(db, id)?;
+    authorize product authenticated;
+    transaction db {
+        deleteProduct(tx, product.id)?;
+    }
+    return Ok(redirect(products(1, 20)));
+}
+
+route products GET "/products" query page<i64> pageSize<i64> validate page range 1 100000 pageSize range 1 100 public => products;
+route product GET "/products/:id<i64>" public => product;
+route create POST "/products" form name<String> price<i64> validate name length 1 100 price range 0 100000000 auth user => create;
+route update POST "/products/:id<i64>" form name<String> price<i64> validate name length 1 100 price range 0 100000000 auth user => update;
+route delete POST "/products/:id<i64>/delete" auth user => delete;

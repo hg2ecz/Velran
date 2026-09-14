@@ -1,0 +1,42 @@
+model MarkdownDocument {
+    id: i64
+    title: String
+    body: String
+}
+
+#[query]
+fn markdownDocumentById(db: Db, id: i64) -> Result<MarkdownDocument, DbError> sql {
+    SELECT id, title, body
+    FROM markdown_documents
+    WHERE id = :id
+}
+
+#[page]
+fn markdownDocument(
+    ctx: PageContext,
+    db: Db,
+    id: i64
+) -> Result<Html, PageError> {
+    let document = markdownDocumentById(db, id)?;
+    return Ok(html {
+        <main>
+            <article>
+                <h1>{{ document.title }}</h1>
+                <div class="markdown-body">
+                    @markdown(document.body)
+                </div>
+            </article>
+        </main>
+    });
+}
+
+// No response cache. Every request loads the current Markdown from SQL and renders it.
+route markdownDocumentLive GET "/documents/:id<i64>" public => markdownDocument;
+
+// Optional public response cache. The route parameter is part of the cache identity,
+// so /documents-cached/1 and /documents-cached/2 are distinct cache entries.
+// Remove "cache public ttl 120" when fresh-on-every-request behavior is required.
+route markdownDocumentCached GET "/documents-cached/:id<i64>"
+    public
+    cache public ttl 120
+    => markdownDocument;

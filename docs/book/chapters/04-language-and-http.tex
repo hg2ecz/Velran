@@ -1,0 +1,470 @@
+\chapter{Language essentials and HTTP boundaries}
+
+\noindent\textbf{Learning path: Fast path: core.} Learn the minimum Rust-like language and HTTP surface needed for daily work.\par\medskip
+
+\rustbridgeblock{Use Rust-like \code{let}, \code{let mut}, assignment, \code{Vec<T>}, \code{Option<T>}, \code{String}, scalar types, methods, and \code{match}.}{Velran owns the verified web surface: attributed callables, route/input declarations, capabilities, HTML/JSON boundaries, and the subset that can be lowered safely.}{Ordinary compute syntax is not a competing DSL. When a normal Rust-shaped expression is accepted, prefer it instead of searching for a Velran-specific spelling.}
+
+
+The A-to-Z example already showed the main building blocks. On a first reading, focus on modules, typed values, handlers, routes, optional/list values, and safe HTML; return to the detailed arithmetic/text catalogue when you need it. Working rule: \emph{parse and normalize at the boundary, compute in typed values, persist through explicit queries, and render as late as possible}.
+
+\section{Source structure and statement boundaries}
+
+\subsection*{Modules}
+
+\code{main.vrn} is the entry point of the module graph:
+
+\begin{lstlisting}[language=Velran]
+mod models;
+mod queries;
+mod components;
+mod pages;
+mod actions;
+\end{lstlisting}
+
+\code{mod} loads an application-root-relative module without injecting its declarations into the global namespace. Across module boundaries, ordinary library items use qualified names such as \code{models::Article} and are private by default; explicit \code{pub} exposes structs, enums, pure functions, inherent methods, or struct fields. Web authority remains route/capability-owned, and \code{pub mod} re-export semantics are handled separately from item visibility.
+
+\subsection*{Module namespaces and cross-module calls}
+
+A module declaration adds one application-root-relative source module to the explicit source graph; it does not copy that module's declarations into the current scope. The canonical mapping is direct:
+
+\begin{lstlisting}
+models.vrn              -> models
+catalog/queries.vrn     -> catalog::queries
+catalog/pages.vrn       -> catalog::pages
+\end{lstlisting}
+
+For example, an entry point may load several modules:
+
+\begin{lstlisting}[language=Velran]
+mod models;
+mod catalog::queries;
+mod catalog::pages;
+
+route catalogIndex GET "/catalog"
+    public => catalog::pages::index;
+\end{lstlisting}
+
+Across a module boundary, use the qualified name. For example:
+
+\begin{lstlisting}[language=Velran]
+let recent = catalog::queries::recent(db);
+// type across a module boundary: models::Article
+\end{lstlisting}
+
+The declaration in \code{catalog/queries.vrn} is reached through its qualified module name. A type from \code{models.vrn} is likewise referenced as \code{models::Article}. Inside a declaration's own module, the short local name remains valid. This keeps local code concise while making dependencies between source modules visible.
+
+Module loading remains explicit and confined to the application/package root: there is no \code{mod.vrn} fallback, automatic directory discovery, \code{../}, \code{./}, or wildcard import. Rust-like namespace roots \code{crate::}, \code{self::}, and \code{super::} are supported inside the verified module graph. A narrow explicit import form, \code{use path as alias;}, is supported. Package-root module re-export is intentionally narrower than Rust: \code{pub use path as alias;} may expose only an already-public module namespace; wildcard re-export, item re-export, private-module re-export, and private transitive-dependency re-export fail closed.
+
+Language operations such as \code{text.trim()}, \code{x.sin()}, and \code{values.len()} use Rust-like method syntax where the operation naturally belongs to a value. Framework helpers remain explicit functions only where Velran adds a web-safety contract, such as \code{splitBounded(...)}. These are not application-module declarations and therefore remain unqualified.
+
+
+\subsection*{Rust-style structs, inherent methods, and constructors}
+
+For ordinary pure/domain computation, prefer the Rust-shaped object model rather than inventing a second object syntax. Public visibility is explicit and private by default:
+
+\begin{lstlisting}[language=Velran]
+pub struct Summary {
+    pub length: i64,
+    hidden: i64,
+}
+
+impl Summary {
+    pub fn new(length: i64) -> Self {
+        return Self { length, hidden: 0 };
+    }
+
+    pub fn length_value(&self) -> i64 {
+        return self.length;
+    }
+}
+
+let summary = Summary::new(42);
+let n = summary.length_value();
+\end{lstlisting}
+
+Associated functions such as \code{Type::new(...)} and \code{Self} in an inherent \code{impl} use the same verified pure/native lowering path as ordinary functions. Public method signatures are visibility-checked recursively, so a public API cannot leak a private struct through a parameter or return type (including nested result/option forms).
+
+The current safe surface deliberately keeps general mutation narrower than Rust: mutable/owned receivers (for example \code{\&mut self} or consuming \code{self}), trait implementations, and generic implementations remain fail-closed until the compiler can prove the required ownership/alias semantics without weakening transaction, authorization, tenant-isolation, or idempotency boundaries.
+
+\subsection*{Local packages and explicit dependencies}
+
+A workspace can use local packages declared by \code{velran.toml}. Dependencies are path-pinned and resolved as a bounded, cycle-checked DAG; there is no package registry, Git dependency, build script, or ambient network resolution in the language package layer. A direct dependency is visible through its package namespace, while a transitive dependency stays private to the package that declared it unless an explicitly permitted public module namespace is re-exported.
+
+\begin{lstlisting}
+[package]
+name = "demo_app"
+kind = "app"
+entry = "main.vrn"
+
+[dependencies]
+textkit = { path = "../libs/textkit" }
+\end{lstlisting}
+
+Library visibility and web authority are separate concepts. \code{pub} can expose a Rust-like library API; it cannot grant route/page/action/query/integration/filesystem/network authority. Package libraries remain subject to the compiler-owned capability boundary (including the fail-closed library web-authority rule).
+
+\subsection*{Rust syntax versus framework-owned web syntax}
+
+A useful rule is to learn one Rust-like compute language and then learn only the web-specific additions Velran must own. The boundary is intentionally visible:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}L{0.30\textwidth}YY@{}}
+\toprule
+Area & Prefer Rust-like form & Velran-owned boundary \\
+\midrule
+Functions and locals & \code{fn}, \code{let}, \code{let mut}, direct assignment & \callable{page}, \callable{action}, \callable{query} \\
+Values and collections & \code{i64}, \code{f32}, \code{String}, \code{Vec<T>}, \code{Option<T>} & domain types, bounded request types and capability types \\
+Control flow & \code{if}, \code{while}, exhaustive \code{match}, \code{?} & instruction/allocation budgets and fail-closed verification \\
+Web/data boundary & ordinary typed expressions & \code{route}, \code{html}, \code{sql}, \code{transaction}, validation/auth/cache policy \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+This split is not an invitation to bypass the framework. Rust-like syntax is accepted only when it can preserve the same verified, bounded web semantics through native lowering.
+
+\subsection*{Statement terminators}
+
+Velran uses an explicit semicolon as the terminator for simple statements. Newlines are whitespace, not statement boundaries; there is no automatic semicolon insertion. This keeps multiline expressions deterministic and makes generated/audited code unambiguous.
+
+\begin{lstlisting}[language=Velran]
+let subtotal = price
+    * quantity
+    + shipping;
+let mut retries = 0;
+retries = retries + 1;
+authorize article owner authorUsername or role Publisher;
+return Ok(json(subtotal));
+\end{lstlisting}
+
+Block statements and block declarations are closed by their brace and do not take a trailing semicolon:
+
+\begin{lstlisting}[language=Velran]
+let mut state = 0;
+if ready {
+    state = 1;
+}
+while state < 3 {
+    state = state + 1;
+}
+\end{lstlisting}
+
+The same rule applies inside a transaction: a standalone mutating query call and a business-audit statement are simple statements and therefore end in \code{;}. Top-level block declarations such as \code{model}, \callable{page}, \callable{action}, \callable{query}, and control-flow blocks do not use \code{;}. Non-block top-level declarations do: both \code{mod path;} and \code{route ... => handler;} are terminated explicitly with \code{;}. A multiline route is complete only at that final terminator.
+
+\section{Typed computation for web application code}
+
+\subsection*{Expressions and arithmetic}
+
+Velran expressions use explicit precedence. From tighter to looser: unary \code{!}; multiplication, division and remainder; addition and subtraction; shifts; comparisons; bitwise AND/XOR/OR; logical AND; logical OR. Parentheses should be used whenever they make intent clearer.
+
+\begin{lstlisting}[language=Velran]
+let total = 12 + 3 * 4;
+let remainder = 17 % 5;
+let shifted = 3 << 2;
+let masked = 12 & 10;
+let allowed = ready && authorized;
+let fallback = cached || fresh;
+let denied = !allowed;
+\end{lstlisting}
+
+The operator contract is deliberately typed:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}l l Y@{}}
+\toprule
+\textbf{Operands} & \textbf{Operators} & \textbf{Result} \\
+\midrule
+\code{i64}, same type & \texttt{+ - * / \%} & checked \code{i64}. \\
+\code{f32}, same type & \texttt{+ - * / \%} & \code{f32}; result must remain finite. \\
+\code{Decimal}, same type & \texttt{+ - * / \%} & checked \code{Decimal}. \\
+\code{i64}, same type & \texttt{<< >> \& \textasciicircum{} |} & shift/bitwise \code{i64}. \\
+\code{bool}, same type & \texttt{\&\& ||} & \code{bool}; short-circuit evaluation. \\
+\code{bool} & \code{!} & logical negation. \\
+\code{String}, same type & \code{+} & \code{String} concatenation, allocation-budgeted. \\
+Numeric, same type & \code{< <= > >=} & \code{bool}. \\
+Same supported scalar type & \code{== !=} & \code{bool}. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+There is no implicit mixing of \code{i64}, \code{f32}, and \code{Decimal}. Convert an integer explicitly with \code{value as f32} when floating-point computation is required. Numeric overflow, division/remainder by zero, invalid shifts, or a non-finite \code{f32} result fail closed rather than silently wrapping or propagating NaN/Infinity.
+
+The numeric builtins include:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}l l Y@{}}
+\toprule
+\textbf{Function} & \textbf{Type} & \textbf{Purpose} \\
+\midrule
+\code{x.sin()}, \code{x.cos()} & \code{f32 -> f32} & Trigonometric functions. \\
+\code{x.sqrt()} & \code{f32 -> f32} & Square root; invalid domain fails. \\
+\code{x.abs()} & \code{i64 -> i64} or \code{f32 -> f32} & Absolute value. \\
+\code{x.ln()}, \code{x.log10()} & \code{f32 -> f32} & Natural/base-10 logarithm. \\
+\code{x.log(base)} & \code{f32, f32 -> f32} & Logarithm with explicit base. \\
+\code{x.exp()} & \code{f32 -> f32} & Exponential function. \\
+\code{x.powf(y)} & \code{f32, f32 -> f32} & Floating-point power. \\
+\code{x.round()/x.floor()/x.ceil()} & \code{f32 -> f32} & Rounding operations. \\
+\code{x as f32} & \code{i64 -> f32} & Explicit integer-to-\code{f32} conversion. \\
+\code{monotonicNanos()} & \code{() -> i64} & Process-local monotonic nanosecond counter. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+All \code{f32} builtin results must remain finite. Invalid-domain operations fail instead of creating NaN or infinity.\par
+\code{monotonicNanos()} is for elapsed-time measurement, not wall-clock timestamps; public-cache output that depends on it is rejected.
+
+\subsection*{Practical arithmetic patterns}
+
+Web code rarely needs advanced mathematics everywhere, but a few numeric patterns recur constantly. Keep them typed and visible rather than hiding them in string conversions or SQL fragments.
+
+For pagination, compute an offset from validated integers:
+
+\begin{lstlisting}[language=Velran]
+let pageSize = 25;
+let offset = (page - 1) * pageSize;
+\end{lstlisting}
+
+For flags and compact integer masks, bitwise operations are available, but they should represent a real integer-domain contract rather than replace readable booleans. Use \code{&&} and \code{||} for business conditions because they short-circuit:
+
+\begin{lstlisting}[language=Velran]
+let mayPublish = authenticated
+    && ownsArticle
+    && !locked;
+\end{lstlisting}
+
+Use \code{Decimal} for money. Use \code{f32} only when floating-point behavior is part of the problem, such as geometry, signal processing, statistics, or explicit math functions. Never convert monetary values to \code{f32} merely to reuse a math builtin.
+
+\subsection*{String and text functions}
+
+String operations are typed and Unicode-aware, and are lowered into bounded native execution:
+
+\begin{lstlisting}[language=Velran]
+let cleaned = text.trim();
+let left = text.trim_start();
+let right = text.trim_end();
+let normalized = cleaned.to_lowercase();
+let chars = cleaned.chars().count();
+let rewritten = normalized.replace(" ", "-");
+let part = substring(cleaned, 1, 3);
+let first = indexOf(cleaned, "vrn");
+let last = lastIndexOf(cleaned, "a");
+let ch = charAt("Velran", 1);
+let repeated = "vrn".repeat(3);
+let parts = splitBounded(rewritten, "-", 4096);
+\end{lstlisting}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}Y Y@{}}
+\toprule
+\textbf{Function} & \textbf{Signature} \\
+\midrule
+\code{text.chars().count()} & \code{String -> i64} \\
+\code{text.trim()/trim\_start()/trim\_end()} & \code{String -> String} \\
+\code{text.to\_lowercase()/to\_uppercase()} & \code{String -> String} \\
+\code{text.contains(needle)} & \code{String, String -> bool} \\
+\code{text.starts\_with(part) / text.ends\_with(part)} & \code{String, String -> bool} \\
+\code{text.replace(search, replacement)} & \code{String, String, String -> String} \\
+\code{splitBounded(text, delimiter, maxItems)} & \code{String, String, i64 -> Vec<String>} \\
+\code{substring(text, start[, length])} & \code{String, i64[, i64] -> String} \\
+\code{indexOf/lastIndexOf(text, needle)} & \code{String, String -> i64} \\
+\code{charAt(text, index)} & \code{String, i64 -> String} \\
+\code{text.repeat(count)} & \code{String, i64 -> String} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\code{text.chars().count()}, \code{substring}, \code{indexOf}, \code{lastIndexOf}, and \code{charAt} use Unicode scalar-value positions rather than UTF-8 byte offsets. Missing searches return \code{-1}; invalid negative/out-of-range indices fail closed. \code{replace} rejects an empty search string. \code{splitBounded} rejects an empty delimiter, requires a compile-time item limit in the supported range, and fails rather than silently truncating when that bound would be exceeded. \code{repeat} is allocation-budgeted before materializing its result. \code{Vec<String>} remains a typed compute collection with \code{parts.len()} and checked \code{parts[index]} access.
+
+For bounded regular-expression work, Velran also provides \code{regexMatch}, \code{regexReplace}, and \code{regexCaptures}. Regex patterns and runtime work remain subject to validation and resource limits.
+
+\subsection*{Practical text-handling patterns}
+
+Treat text manipulation as boundary work. Normalize user-facing search/filter input before comparing it, but keep the original value when the exact spelling matters to the domain.
+
+\begin{lstlisting}[language=Velran]
+let queryText = q.trim();
+let normalizedQuery = queryText.to_lowercase();
+let hasVelran = normalizedQuery.contains("velran");
+\end{lstlisting}
+
+Use \code{replace} for deterministic substitutions, not for general parsing:
+
+\begin{lstlisting}[language=Velran]
+let displayTag = tag.trim().replace("_", " ");
+\end{lstlisting}
+
+When slicing or locating text, remember that Velran uses Unicode scalar-value positions rather than UTF-8 byte offsets. This makes \code{substring}, \code{charAt}, and the index functions suitable for application text without exposing byte-level encoding details. For structured identifiers such as URLs, slugs, emails, dates, or UUIDs, prefer the dedicated Velran types and validators instead of rebuilding their rules with string functions.
+
+\subsection*{Choosing the right tool in application code}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}l Y@{}}
+\toprule
+\textbf{Web-development task} & \textbf{Preferred Velran approach} \\
+\midrule
+Normalize search/filter text & \code{trim}, then \code{lower}/\code{upper} only when comparison should ignore case. \\
+Replace a known token & \code{replace}; do not use regex unless pattern matching is actually required. \\
+Parse email, URL, slug, date, UUID & Use the dedicated typed value and validation path, not ad-hoc string parsing. \\
+Money/totals & \code{Decimal}. \\
+Pagination/counters & \code{i64} with checked arithmetic. \\
+Business conditions & \code{bool} with short-circuit \code{&&}, \code{||}, and \code{!}. \\
+Scientific/statistical math & \code{f32} and explicit math builtins; check that floating point is appropriate for the domain. \\
+Elapsed-time measurement & \code{monotonicNanos()}, never as a wall-clock timestamp. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{Domain values and handler code}
+
+\subsection*{Models and business types}
+
+\begin{lstlisting}[language=Velran]
+model Article {
+    id: i64
+    slug: Slug
+    title: String
+    body: String
+}
+\end{lstlisting}
+
+Common types include \code{String}, \code{i64}, and \code{bool}, as well as \code{Date}, \code{DateTime}, \code{Uuid}, \code{Decimal}, and \code{Slug}. Use \code{Decimal} for money rather than floating-point values.
+
+\subsection*{Page and action}
+
+A page contains GET-like presentation logic:
+
+\begin{lstlisting}[language=Velran]
+#[page]
+fn show(ctx: PageContext, db: Db, id: i64)
+    -> Result<Html, PageError> {
+    let article = articleById(db, id)?;
+    return Ok(html { <h1>{{ article.title }}</h1> });
+}
+\end{lstlisting}
+
+An action handles state-changing requests:
+
+\begin{lstlisting}[language=Velran]
+#[action]
+fn create(ctx: ActionContext, db: Db, title: String)
+    -> Result<Redirect, PageError> {
+    transaction db {
+        insertArticle(tx, title)?;
+    }
+    return Ok(redirect(adminArticles()));
+}
+\end{lstlisting}
+
+The example assumes a GET route named \code{adminArticles}; redirect targets are route calls, not copied URL strings.
+
+\subsection*{Variables and error propagation}
+
+\code{let} introduces an immutable typed local value. Use Rust-like \code{let mut} when the value must change, then use ordinary assignment such as \code{count = count + 1} or \code{samples[i] = value}. The static type cannot change, bounds checks and resource accounting remain enforced, and the legacy \code{set} syntax is rejected. The \code{?} operator propagates an error from a typed \code{Result}.
+
+\subsection*{Enum and exhaustive match}
+
+Use an enum for a closed set of choices rather than free-form text. This gives a stronger contract in forms, routes, JSON, and domain logic. Enums are also closed sum types: when control flow depends on a variant, use an exhaustive \code{match}.
+
+\begin{lstlisting}[language=Velran]
+enum PublishState {
+    Draft
+    Review
+    Published
+}
+
+match state {
+    Draft => { return Ok(json("draft")); }
+    Review => { return Ok(json("review")); }
+    Published => { return Ok(json("published")); }
+}
+\end{lstlisting}
+
+There is no wildcard fallthrough for this security-relevant form. Adding a new variant therefore makes old matches fail compilation until the new state is handled explicitly. Later, the transaction chapter uses exactly this property for \code{CommitUnknown}.
+
+\subsection*{Object}
+
+Related model/query/page operations can be grouped under a domain object. This is particularly useful in larger applications because it defines a clear domain API boundary.
+
+\section{Routing, typed input, and HTML}
+
+\subsection*{Route}
+
+\begin{lstlisting}[language=Velran]
+route article GET "/article/:slug<Slug>" public => article;
+\end{lstlisting}
+
+The path parameter type is declared in the route. Invalid input never reaches the handler as a typed value.
+
+\subsection*{HTML escaping}
+
+\begin{lstlisting}[language=Velran]
+return Ok(html {
+    <h1>{{ article.title }}</h1>
+});
+\end{lstlisting}
+
+\code{{ ... }} is HTML-escaped. A string read from the database is no exception. There is no raw-HTML API.
+
+\subsection*{Lists and optional values}
+
+A list must be iterated, and an optional model may be dereferenced only after an explicit presence check. The compiler does not allow a \code{Vec<Model>} or an unchecked \code{Option<Model>} to behave like a single record.
+
+\begin{lstlisting}[language=Velran]
+@for article in articles {
+    <li>{{ article.title }}</li>
+}
+
+@if article {
+    <h1>{{ article.title }}</h1>
+}
+\end{lstlisting}
+
+The database chapter explains the exact runtime query-cardinality contract, including the fact that a \code{Option<Model>} result is an error if the query returns more than one row.
+
+\subsection*{Typed URLs}
+
+\begin{lstlisting}[language=Velran]
+<a @href(article, article.slug)>Open</a>
+<form method="post" @action(deleteArticle, article.id)>
+\end{lstlisting}
+
+\subsection*{Prefer route helpers}
+
+Do not duplicate your own application-route URLs as hand-written strings. In HTML, \code{@action(...)} is the preferred form for POST targets and \code{@href(...)} for links, because the route name and typed parameters remain the source of truth. Built-in runtime endpoints -- such as \code{/__velran/auth/logout} -- are naturally not application route helpers.
+
+Do not build a dynamic \code{href="{{ value }}"} link. A route helper knows both the destination and the parameter type.
+
+\subsection*{Components and layouts}
+
+\begin{lstlisting}[language=Velran]
+#[layout]
+fn Main(title: String) -> Html {
+    html {
+        <html>
+            <head><title>{{ title }}</title></head>
+            <body><main>@content</main></body>
+        </html>
+    }
+}
+\end{lstlisting}
+
+Inside a page:
+
+\begin{lstlisting}[language=Velran]
+return Ok(html {
+    @layout(Main, article.title) {
+        <article><h1>{{ article.title }}</h1></article>
+    }
+});
+\end{lstlisting}
+
+A layout may contain exactly one \code{@content} slot; components and layouts can only access their explicit typed parameters.
+
+\section{Practice: classify syntax by owner}
+\paragraph{Exercise mode: guided.} Use the guided method defined in the preface.
+
+Review a page, action, query, route, component, and ordinary expression. For each construct, decide whether it is ordinary Rust-like syntax or a Velran framework-owned web boundary. This distinction is useful when guessing syntax: prefer Rust-like forms unless the construct represents a security, HTTP, resource, or framework contract.
+
+\section{Common mistake: inventing convenience syntax}
+Do not assume undocumented aliases such as legacy callable forms or custom collection spellings. The language deliberately converges on Rust syntax where possible, while keeping only the framework constructs needed to make web boundaries explicit and verifiable.
+
+\section{Running project checkpoint: Secure Notes}
+Define the note list page and create action using current callable attributes, typed route inputs, and explicit access policy. Keep business data in typed values rather than unstructured strings passed between handlers.

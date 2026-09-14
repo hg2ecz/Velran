@@ -1,0 +1,8 @@
+# A fejlesztoi pelda kedveert minden pathot abszolutra kell cserelni.
+[server]
+app = "/ABS/PATH/examples/a-z-products/main.vrn"
+listen = "127.0.0.1:8080"
+insecure_dev_cookies = true
+
+[database]
+url_file = "/ABS/PATH/examples/a-z-products/dev-db-url"

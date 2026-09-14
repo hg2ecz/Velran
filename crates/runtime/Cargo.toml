@@ -1,0 +1,15 @@
+[package]
+name = "runtime"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+authors = ["Zsolt Krüpl"]
+
+[dependencies]
+chrono = { workspace = true, default-features = false, features = ["std", "clock"] }
+uuid = { workspace = true, features = ["std", "v4"] }
+rust_decimal = { workspace = true, default-features = false, features = ["std"] }
+regex = { workspace = true }
+url = { workspace = true }
+language-core = { path = "../language-core" }
+tokio = { workspace = true, features = ["sync"] }

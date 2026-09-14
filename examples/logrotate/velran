@@ -1,0 +1,29 @@
+# Example only. Retention must follow the organization's documented legal/risk policy.
+/var/log/velran/server.log /var/log/velran/access.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 velran velran
+    sharedscripts
+    postrotate
+        systemctl kill -s HUP --kill-who=main velran.service >/dev/null 2>&1 || true
+    endscript
+}
+
+# Audit/user-activity usually warrants a longer local retention and central forwarding.
+/var/log/velran/audit.log {
+    daily
+    rotate 90
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 velran velran
+    sharedscripts
+    postrotate
+        systemctl kill -s HUP --kill-who=main velran.service >/dev/null 2>&1 || true
+    endscript
+}

@@ -1,0 +1,76 @@
+\documentclass[11pt,a4paper,openany]{book}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[hungarian]{babel}
+\input{../velran-book-style}
+
+% Hungarian running-head convention: "1. fejezet", not "Fejezet 1".
+% Keep section marks unchanged; only localize the chapter mark order.
+\makeatletter
+\renewcommand{\chaptermark}[1]{%
+  \markboth{%
+    \ifnum\c@secnumdepth>\m@ne
+      \thechapter.\ fejezet\quad
+    \fi
+    #1}{}%
+}
+\makeatother
+\hypersetup{unicode=true,hidelinks,pdftitle={Velran - a security-first web application language and server with Rust syntax},pdfauthor={Zsolt Krüpl}}
+
+\setcounter{tocdepth}{1}
+\begin{document}
+\frontmatter
+\begin{titlepage}
+\centering
+\vspace*{0.16\textheight}
+{\Huge\bfseries Velran\par}
+\vspace{1.6em}
+{\Large Rust szintaxisú webalkalmazás-fejlesztő nyelv és szerver, ahol a biztonság az első.\par}
+\vspace{2.0em}
+{\large Webalkalmazás-fejlesztői kézikönyv\par}
+\vfill
+{\normalsize Zsolt Krüpl\par}
+\vspace{0.7em}
+{\small Security-first kiadás -- 2026. szeptember\par}
+{\small Ellenőrzött fejlesztési mérföldkő\par}
+\end{titlepage}
+\input{chapters/00-eloszo}
+\tableofcontents
+\mainmatter
+\part{Első lépések: gondolkodásmód és működő alkalmazás}
+\input{chapters/01-model-szemlelet}
+\input{chapters/02-telepites-topologiak}
+\input{chapters/03-a-z-minimalis-webalkalmazas}
+
+\part{Alap webalkalmazás-fejlesztés}
+\input{chapters/04-nyelv-http}
+\input{chapters/05-adatbevitel-crud-formok}
+\input{chapters/06-adatbazis-melyebben}
+\input{chapters/07-auth-security}
+\input{chapters/08-fajlok-media}
+\input{chapters/09-json-api-cors}
+\input{chapters/10-static-assets-frontend}
+\input{chapters/11-nagyobb-alkalmazasok}
+
+\part{Alkalmazott fejlesztés, integráció és assurance}
+\input{chapters/12-wiki-cms}
+\input{chapters/13-kulso-integraciok-egress}
+\input{chapters/14-teszteles-hibak}
+\input{chapters/15-security-hardening}
+
+\part{Production és üzemeltetés}
+\input{chapters/16-cache-redis-skalazas}
+\input{chapters/17-observability}
+\input{chapters/18-production}
+\input{chapters/19-backup-restore-disaster-recovery}
+
+\part{Referencia és operátori gyorssegédlet}
+\input{chapters/20-cli-workflow}
+\input{chapters/21-server-toml-referencia}
+\input{chapters/22-referencia}
+\appendix
+\input{chapters/23-fuggelek-production-checklist}
+\backmatter
+\chapter*{Zárszó}
+A könyv célja, hogy a webfejlesztő a nyelvi elemeket ne elszigetelt szintaxisként, hanem egy működő webalkalmazás részeként tanulja meg. A részletes magyar, feature-szintű referencia a projekt \code{docs/hu/} könyvtárában található; ez a könyv a napi fejlesztési útvonalat adja.
+\end{document}

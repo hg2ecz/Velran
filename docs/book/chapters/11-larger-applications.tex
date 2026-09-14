@@ -1,0 +1,303 @@
+\chapter{Organizing larger applications}
+
+\noindent\textbf{Learning path: Complete path / scale-up chapter.} Read when a single-module application starts becoming difficult to change safely.\par\medskip
+
+\rustbridgeblock{Module decomposition, qualified names, explicit dependencies, and keeping related code together follow familiar Rust design instincts.}{Velran resolves an application-root source graph, adds domain \code{object} namespaces, and keeps HTTP \code{route} policy separate from source/module structure.}{Do not relearn modularity. Use familiar module boundaries; learn only the extra distinction between source location, domain namespace, and external HTTP exposure.}
+
+
+As an application grows, change locality matters more than file count. Use \code{mod} for source structure and \code{object} for domain API namespaces; keep HTTP exposure in \code{route}.
+
+\section{Three separate questions}
+
+Treat the structure of a larger application as three distinct layers:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}l Y@{}}
+\toprule
+\textbf{Tool} & \textbf{Responsibility} \\
+\midrule
+\code{mod} & In which file or source module does the code live? \\
+\code{object} & Which business concept owns the model, query, page, or action? \\
+\code{route} & What HTTP surface and what auth/cache/rate-limit policy expose it? \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+This separation is deliberate. A domain object does not automatically receive a database, current user, filesystem, or network access, and a module does not imply HTTP policy.
+
+\section{\code{mod} is not textual include}
+
+A small multi-file project might look like:
+
+\begin{lstlisting}
+myapp/
+|-- main.vrn
+|-- models.vrn
+|-- queries.vrn
+|-- components.vrn
+|-- pages.vrn
+|-- actions.vrn
+|-- migrations/
+`-- public/
+\end{lstlisting}
+
+The entry point:
+
+\begin{lstlisting}[language=Velran]
+mod models;
+mod queries;
+mod components;
+mod pages;
+mod actions;
+\end{lstlisting}
+
+\code{mod} is not C-style textual inclusion and it does not inject declarations into a global namespace. The compiler loads, validates, and compiles the explicit source graph into one program. A module owns a namespace: declarations from \code{queries.vrn}, for example, are referenced as \code{queries::name} across module boundaries. Module paths are application-root relative, so nested source files must be loaded explicitly with paths such as \code{mod article::admin;}.
+
+\section{When should you switch to feature-based structure?}
+
+Splitting by technical type -- \code{models.vrn}, \code{queries.vrn}, \code{pages.vrn} -- is a good first step, but in a larger application it can mean opening five or six files for one feature change. At that point, organize by business area instead:
+
+\begin{lstlisting}
+main.vrn
+article.vrn
+article/
+|-- admin.vrn
+`-- components.vrn
+account.vrn
+account/
+`-- profile.vrn
+invoice.vrn
+invoice/
+`-- admin.vrn
+routes.vrn
+migrations/
+public/
+\end{lstlisting}
+
+Then \code{main.vrn} becomes mostly application composition:
+
+\begin{lstlisting}[language=Velran]
+mod article;
+mod article::admin;
+mod article::components;
+mod account;
+mod account::profile;
+mod invoice;
+mod invoice::admin;
+mod routes;
+\end{lstlisting}
+
+The goal is change locality: one business change should stay mostly inside one feature directory.
+
+\section{Domain object: a business namespace, not an OOP class}
+
+\code{object} groups related business names inside a domain namespace. For example:
+
+\needspace{30\baselineskip}
+\begin{lstlisting}[language=Velran]
+object Article {
+    model {
+        id: i64
+        slug: Slug
+        title: String
+        body: String
+        authorUsername: String
+    }
+
+    #[query]
+fn bySlug(db: Db, slug: Slug)
+        -> Result<Article, DbError> sql {
+        SELECT id, slug, title, body, authorUsername
+        FROM articles
+        WHERE slug = :slug
+    }
+
+    #[page]
+fn show(ctx: PageContext, db: Db, slug: Slug)
+        -> Result<Html, PageError> {
+        let article = Article.bySlug(db, slug)?;
+        return Ok(html {
+            <article>
+                <h1>{{ article.title }}</h1>
+                @markdown(article.body)
+            </article>
+        });
+    }
+}
+\end{lstlisting}
+
+Usage becomes expressive:
+
+\begin{lstlisting}[language=Velran]
+let article = Article.bySlug(db, slug)?;
+\end{lstlisting}
+
+Short domain names become natural too, for example \path{Invoice.approve}, \path{Invoice.cancel}, and \path{UserAccount.disable}.
+
+\subsection*{What may an object contain?}
+
+A framework domain object can group operations around one model. The following is only a structural sketch, not standalone compilable Velran source:
+
+\begin{lstlisting}
+object Article {
+    model { ... }
+    #[query]
+fn bySlug(...) ...
+    #[page]
+fn show(...) ...
+    #[action]
+fn publish(...) ...
+    #[component]
+fn Card(...) ...
+    #[layout]
+fn EditorLayout(...) ...
+}
+\end{lstlisting}
+
+Exactly one model block belongs to a framework domain \code{object}. This construct groups framework-owned model/query/page/action names; it is separate from the Rust-like \code{struct} + inherent \code{impl} surface used for ordinary pure/domain values. Framework objects still do not imply inheritance, hidden capabilities, virtual dispatch, or reflection. For Rust-like values, associated constructors (for example \code{Type::new}) and immutable \code{&self} methods are supported; general mutable/owned receivers remain intentionally fail-closed.
+
+
+\section{Package boundaries for reusable application code}
+
+When code must be reused across applications or isolated behind a stable library boundary, move it into a local package instead of stretching the application module graph indefinitely. Each package has its own \code{velran.toml}, private-by-default API, and bounded local dependency graph. Direct dependencies are explicit path dependencies; transitive dependencies stay encapsulated rather than becoming ambient application namespaces.
+
+Use \code{pub struct}, \code{pub fn}, public inherent methods, and the narrow package-root module re-export when designing the library surface. Keep framework authority in the application: a reusable library cannot gain HTTP routes, actions, database/network authority, or other web capabilities merely through \code{pub}. This makes package decomposition an architectural boundary, not a capability-escalation mechanism.
+
+\section{Dependencies remain explicit}
+
+The domain namespace does not hide capabilities. This is good:
+
+\needspace{11\baselineskip}
+\begin{lstlisting}[language=Velran]
+#[query]
+fn byId(db: Db, id: i64)
+    -> Result<Article, DbError> sql {
+    SELECT id, slug, title, body, authorUsername
+    FROM articles
+    WHERE id = :id
+}
+\end{lstlisting}
+
+An action receives the capabilities it needs just as explicitly. The following is intentionally abbreviated structural code; the concrete typed state-changing query is shown in the CRUD and business-audit sections:
+
+\needspace{12\baselineskip}
+\begin{lstlisting}
+#[action]
+fn publish(ctx: ActionContext, db: Db, id: i64)
+    -> Result<Redirect, PageError> {
+    let article = Article.byId(db, id)?;
+    authorize article owner authorUsername or role Publisher;
+    // ... state transition inside a transaction ...
+    return Ok(redirect(adminArticles()));
+}
+\end{lstlisting}
+
+The handler signature still reveals database access. The same principle applies to AppFs, auth, and named network egress: a domain object must not become a hidden service locator.
+
+\section{Why should routes remain top-level?}
+
+Routes deliberately do not disappear entirely into objects:
+
+\begin{lstlisting}[language=Velran]
+route articleShow GET "/article/:slug<Slug>"
+    public cache public ttl 60
+    => article::Article.show;
+
+route articlePublish POST "/admin/article/:id<i64>/publish"
+    auth role Publisher
+    invalidate cache articleShow
+    => article::Article.publish;
+\end{lstlisting}
+
+A route registry or code review can then see in one place:
+
+\begin{itemize}
+  \item URL and HTTP method;
+  \item authentication/authorization requirement;
+  \item cache policy and invalidation;
+  \item rate limit or resource profile;
+  \item the global route name used in logs and audit.
+\end{itemize}
+
+A domain member name may be short and locally meaningful, such as \code{Article.publish} inside its own module; from a separate \code{routes.vrn}, use \code{article::Article.publish}. The route name should remain globally descriptive, such as \code{articlePublish}.
+
+\section{Recommended naming convention}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}l l Y@{}}
+\toprule
+\textbf{Element} & \textbf{Form} & \textbf{Example} \\
+\midrule
+object & PascalCase business noun & \code{Article}, \code{Invoice}, \code{UserAccount} \\
+member & camelCase, short inside domain & \code{bySlug}, \code{publish}, \code{approve} \\
+route & globally auditable name & \code{articleShow}, \code{invoiceApprove} \\
+module & feature or technical unit & \code{article}, \code{account}, \code{routes} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{One possible CMS structure}
+
+A medium-size CMS might use:
+
+\needspace{18\baselineskip}
+\begin{lstlisting}
+main.vrn
+routes.vrn
+article.vrn            # Article object + base queries
+article/
+|-- admin.vrn          # edit/publish
+`-- components.vrn     # Card, lists
+media.vrn
+media/
+`-- admin.vrn
+account.vrn
+migrations/
+public/
+`-- app.css
+\end{lstlisting}
+
+Public and admin HTTP policy remain in the route layer. The article feature keeps the article business model and its operations together.
+
+\section{What not to do}
+
+\subsection*{Do not create one file per declaration}
+
+Overly small modules create more navigation than structure. A fifty-line feature does not need eight files.
+
+\subsection*{Do not build a hidden ``service'' layer}
+
+If an operation uses DB, AppFs, or auth context, keep that visible in the typed signature. One of Velran's strengths is precisely that capability boundaries are explicit.
+
+\subsection*{Do not duplicate route policy inside handlers}
+
+Route-level auth, cache, rate limit, and resource policy are declarative contracts. Domain-specific object authorization naturally remains in the handler because it depends on the business record.
+
+\subsection*{Do not use free-form String for business state}
+
+If a domain has \code{Draft}, \code{Review}, \code{Published}, or \code{Cancelled} states, use an enum. Project structure helps most when the domain contract is typed too.
+
+\section{Refactoring path: from one file to a larger application}
+
+You do not need to design the final directory hierarchy on day one. A good evolutionary path is:
+
+\begin{enumerate}
+  \item Start with one \code{main.vrn} while the application is small.
+  \item Separate model/query/page/action groups when the file becomes hard to navigate.
+  \item If one feature is scattered across many technical files, switch to feature-based modules.
+  \item If too many global business names appear, group them under \code{object} namespaces.
+\end{enumerate}
+
+\section{Verified companion examples}
+For module structure, use \path{examples/module-namespaces/main.vrn}; for a generic multi-file starting point, use \path{examples/starter-project/main.vrn}; and for the running project in this book, use \path{examples/secure-notes/main.vrn}. All three are compiler-checked and therefore better copy/paste sources than shortened architectural sketches.
+
+\section{Practice: refactor by change locality}
+\paragraph{Exercise mode: independent.} Use the independent method defined in the preface.
+
+Pick one feature and identify every file that changes when the feature changes. If a small business change requires edits across many unrelated technical layers, consider regrouping the code around the feature or domain object. Refactor only after the dependency direction is clear.
+
+\section{Common mistake: modularizing by file count alone}
+Useful modules own coherent contracts and reduce concepts that must be held at once; avoid both giant files and artificial one-function modules.
+
+\section{Running project checkpoint: Secure Notes}
+Move Secure Notes from the initial single-file shape into a structure that keeps note-specific models, queries, pages/actions, and policies easy to find. Preserve the same externally visible routes and security behavior while improving change locality.

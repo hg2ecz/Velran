@@ -1,0 +1,28 @@
+#[page]
+fn uploadForm(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {
+        <h1>Upload</h1>
+        <form method="post" @action(uploadFile) enctype="multipart/form-data">
+            <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+            <input type="file" name="file">
+            <button type="submit">Upload</button>
+        </form>
+    });
+}
+
+#[action]
+fn uploadFile(ctx: ActionContext, file: Upload) -> Result<Json, PageError> {
+    let savedPath = file.path;
+    let originalName = file.filename;
+    let byteCount = file.bytes;
+    return Ok(json(byteCount));
+}
+
+#[page]
+fn uploaded(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {<h1>Upload complete</h1>});
+}
+
+route uploadForm GET "/upload" public => uploadForm;
+route uploadFile POST "/upload" upload file<Upload> to "uploads" public => uploadFile;
+route uploaded GET "/uploaded" public => uploaded;

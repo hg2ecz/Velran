@@ -1,0 +1,50 @@
+enum ArticleStatus {
+    Draft
+    Review
+    Published
+    Archived
+}
+
+object Article {
+    model {
+        id: i64
+        slug: Slug
+        title: String
+        status: ArticleStatus
+    }
+
+    #[query]
+fn bySlug(db: Db, slug: Slug) -> Result<Article, DbError> sql {
+        SELECT id, slug, title, status FROM articles WHERE slug = :slug
+    }
+
+    #[query]
+fn byId(db: Db, id: i64) -> Result<Article, DbError> sql {
+        SELECT id, slug, title, status FROM articles WHERE id = :id
+    }
+
+    #[query]
+fn setStatus(tx: Transaction, id: i64, status: ArticleStatus) -> Result<(), DbError> mutates Article by id sql {
+        UPDATE articles SET status = :status WHERE id = :id
+    }
+
+    #[page]
+fn show(ctx: PageContext, db: Db, slug: Slug) -> Result<Json, PageError> {
+        let article = Article.bySlug(db, slug)?;
+        return Ok(json(expose(article, id, slug, title, status)));
+    }
+
+    #[action]
+fn publish(ctx: ActionContext, db: Db, id: i64) -> Result<Json, PageError> {
+        let article = Article.byId(db, id)?;
+        authorize article authenticated;
+        let status = ArticleStatus::Published;
+        transaction db {
+            Article.setStatus(tx, article.id, status)?;
+        }
+        return Ok(json(status));
+    }
+}
+
+route articleShow GET "/cikk/:slug<Slug>" public => Article.show;
+route articlePublish POST "/admin/cikk/:id<i64>/publish" auth role Publisher => Article.publish;

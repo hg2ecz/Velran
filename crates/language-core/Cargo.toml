@@ -1,0 +1,14 @@
+[package]
+name = "language-core"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+authors = ["Zsolt Krüpl"]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+chrono = { workspace = true, default-features = false, features = ["std"] }
+uuid = { workspace = true, features = ["std"] }
+rust_decimal = { workspace = true, default-features = false, features = ["std"] }

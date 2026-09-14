@@ -1,0 +1,64 @@
+\documentclass[11pt,a4paper,openany]{book}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\input{velran-book-style}
+\hypersetup{unicode=true,hidelinks,pdftitle={Velran - a security-first web application language and server with Rust syntax},pdfauthor={Zsolt Krüpl}}
+
+\setcounter{tocdepth}{1}
+\begin{document}
+\frontmatter
+\begin{titlepage}
+\centering
+\vspace*{0.16\textheight}
+{\Huge\bfseries Velran\par}
+\vspace{1.6em}
+{\Large a security-first web application language and server with Rust syntax.\par}
+\vspace{2.0em}
+{\large Web Application Developer Guide\par}
+\vfill
+{\normalsize Zsolt Krüpl\par}
+\vspace{0.7em}
+{\small Security-first edition -- September 2026\par}
+{\small Verified Development Milestone\par}
+\end{titlepage}
+\input{chapters/00-preface}
+\tableofcontents
+\mainmatter
+\part{Getting started: a mental model and a working application}
+\input{chapters/01-model-centered-thinking}
+\input{chapters/02-installation-topologies}
+\input{chapters/03-a-to-z-minimal-web-application}
+
+\part{Core web application development}
+\input{chapters/04-language-and-http}
+\input{chapters/05-data-entry-crud-forms}
+\input{chapters/06-database-deep-dive}
+\input{chapters/07-authentication-and-authorization}
+\input{chapters/08-files-and-media}
+\input{chapters/09-json-api-and-cors}
+\input{chapters/10-static-assets-and-frontend}
+\input{chapters/11-larger-applications}
+
+\part{Applied development, integration, and assurance}
+\input{chapters/12-wiki-and-cms}
+\input{chapters/13-external-integrations-and-egress}
+\input{chapters/14-testing-and-errors}
+\input{chapters/15-security-hardening}
+
+\part{Production and operations}
+\input{chapters/16-cache-redis-and-scaling}
+\input{chapters/17-observability}
+\input{chapters/18-production-deployment}
+\input{chapters/19-backup-restore-disaster-recovery}
+
+\part{Reference and operator quick guide}
+\input{chapters/20-cli-workflow}
+\input{chapters/21-server-toml-reference}
+\input{chapters/22-reference-map}
+\appendix
+\input{chapters/23-production-appendix}
+\backmatter
+\chapter*{Closing note}
+The purpose of this book is to teach the language features as parts of a working web application rather than as isolated syntax. Detailed feature-level reference material remains available in the project's \code{docs/} directory; this book provides the day-to-day development path.
+\end{document}

@@ -1,0 +1,5 @@
+#[page]
+fn bad(ctx: PageContext, value: String) -> Result<Html, PageError> {
+    return Ok(html { <a href="{{ value }}">bad</a> });
+}
+route bad GET "/bad/:value<String>" public => bad;

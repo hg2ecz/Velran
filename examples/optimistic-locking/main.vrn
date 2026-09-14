@@ -1,0 +1,40 @@
+model Article {
+    id: i64
+    title: String
+    version: i64
+}
+
+#[query]
+fn articleById(db: Db, id: i64) -> Result<Article, DbError> sql {
+    SELECT id, title, version FROM articles WHERE id = :id
+}
+
+#[query]
+fn updateArticle(tx: Transaction, id: i64, title: String, version: i64) -> Result<Changed, DbError> mutates Article by id sql {
+    UPDATE articles
+    SET title = :title, version = version + 1
+    WHERE id = :id AND version = :version
+}
+
+#[action]
+fn articleUpdate(ctx: ActionContext, db: Db, id: i64, title: String, version: i64) -> Result<Redirect, PageError> {
+    let article = articleById(db, id)?;
+    authorize article authenticated;
+    transaction db {
+        updateArticle(tx, article.id, title, version)?;
+    }
+    return Ok(redirect(articlesIndex()));
+}
+
+route articleUpdate POST "/articles/:id<i64>"
+    form title<String> version<i64>
+    auth role Editor
+    => articleUpdate;
+
+
+#[page]
+fn articlesIndex(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {<main><h1>Articles</h1></main>});
+}
+
+route articlesIndex GET "/articles" auth role Editor => articlesIndex;

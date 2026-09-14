@@ -1,0 +1,9 @@
+#[layout]
+fn Main(title: String) -> Html {
+    html {
+        <html>
+            <head><title>{{ title }}</title></head>
+            <body><main>@content</main></body>
+        </html>
+    }
+}

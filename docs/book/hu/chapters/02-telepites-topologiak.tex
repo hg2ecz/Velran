@@ -1,0 +1,362 @@
+\chapter{Telepítés, binárisok és futtatási topológiák}\label{ch:telepites}
+
+\noindent\textbf{Tanulási út: Gyors út: alap.} Juss el ismételhető helyi check/build/run workflow-ig; első olvasáskor hagyd későbbre a backend belső részleteit.\par\medskip
+
+\section{Build a forrásból}
+
+A kiinduló release forráscsomag Rust workspace. A két telepíthető program előállításához a szokásos release build:
+
+\begin{lstlisting}[language=bash]
+cargo build --locked --release
+\end{lstlisting}
+
+A repository saját teljes önellenőrzése a \code{./verify.sh}; ezt akkor futtasd, amikor magát a Velran forrásfát validálod vagy release-eled. Egy alkalmazás használatához nem ez az első lépés.
+
+A \code{--locked} biztosítja, hogy a build a release-hez tartozó \code{Cargo.lock} függőséggráfot használja. Ha csak a két futtatható program kell:
+
+\begin{lstlisting}[language=bash]
+cargo build --locked --release -p velran-server -p velran-cli
+\end{lstlisting}
+
+A build után a két fontos program:
+
+\begin{lstlisting}
+target/release/velran-server
+target/release/velran-cli
+\end{lstlisting}
+
+\begin{itemize}
+  \item \code{velran-server}: a Velran alkalmazás fordítását és HTTP(S) kiszolgálását végző hosszú életű service process;
+  \item \code{velran-cli}: operátori/adminisztratív program, például auth- és migrációs műveletekhez.
+\end{itemize}
+
+A két bináris szerepe szándékosan különbözik: a reverse proxy kizárólag a \code{velran-server} processhez kapcsolódik. A \code{velran-cli} nem webserver és nem kell publikus vagy proxy mögötti listener.
+
+\subsection*{Futtatási követelmény: a rustc a Velran runtime toolchain része}
+
+Minden olyan gépen, amely Velran alkalmazást futtat, rendelkezésre kell állnia egy használható \code{rustc} fordítónak. A Velrannak nincs interpreter- vagy VM-fallbackje: az alkalmazás backendje az ellenőrzött Velran kódot safe Rust kóddá alakítja, majd a \code{rustc} állítja elő a szerver által aktivált immutable natív \code{cdylib}-et. Ezért önmagában a \code{velran-server} telepítése \code{rustc} nélkül nem elegendő sem alkalmazásaktiváláshoz, sem source reloadhoz.
+
+Alapértelmezésben a szerver az aktív toolchainből ismeri fel a \code{rustc}-t. Production telepítésnél a \code{server.toml} \code{[native]} szekciójában explicit, abszolút compiler-útvonal is megadható. A Cargo magának a Velrannak a forrásból történő buildjéhez kell; az alkalmazás-végrehajtási backend közvetlenül a \code{rustc}-t hívja.
+
+\subsection*{Amit az alkalmazás aktiválásáról kezdetben tudnod kell}
+
+Normál webfejlesztéshez először csak ezt a szabályt jegyezd meg: a Velran egy teljes candidate alkalmazást ellenőriz és fordít le, mielőtt az leválthatná az aktuálisan aktív verziót. Ha a candidate hibás, az utolsó ismert jó verzió szolgál tovább. Nincs interpreter- vagy VM-fallback, amely a nem támogatott alkalmazáskódot csendben futtatná.
+
+Az első alkalmazások elkészítéséhez nem kell ismerned a natív compiler pipeline részleteit. Ezek szándékosan később, az ``A motorháztető alatt'' részben és a production fejezetben jelennek meg.
+
+Fejlesztés közben elegendő lehet:
+
+\begin{lstlisting}[language=bash]
+cargo check --workspace
+cargo test --workspace
+\end{lstlisting}
+
+\section{A binárisok telepítési helye}
+
+Production gépen ne a Cargo \code{target/} könyvtárából futtasd tartósan a szolgáltatást. Kézi/forrásos telepítésnél a könyv a \code{/usr/local/bin} alá teszi a binárisokat, a \code{/usr/local/etc/velran} alá a géphez tartozó konfigurációt; így ezek elkülönülnek a disztribúció által kezelt fájloktól.
+
+Egy egyszerű, jól auditálható elrendezés:
+
+\begin{lstlisting}
+/usr/local/bin/velran-server
+/usr/local/bin/velran-cli
+/usr/local/etc/velran/server.toml
+/srv/velran/current/
+/srv/velran/data/
+/run/secrets/velran/
+/var/log/velran/
+\end{lstlisting}
+
+Telepítés például:
+
+\begin{lstlisting}[language=bash]
+sudo install -d -m 0755 /usr/local/bin
+sudo install -d -m 0755 /usr/local/etc/velran
+sudo install -m 0755 target/release/velran-server /usr/local/bin/velran-server
+sudo install -m 0755 target/release/velran-cli    /usr/local/bin/velran-cli
+sudo install -m 0644 config/server.toml.sample \\
+  /usr/local/etc/velran/server.toml
+\end{lstlisting}
+
+A \code{/usr/local/bin} a szokásos rendszer-PATH része, ezért külön symlinkre nincs szükség. A könyv példáiban a valódi binárisneveket, \code{velran-server} és \code{velran-cli}, használjuk.
+
+
+\subsection*{Debian csomag esetén szándékosan más az elrendezés}
+
+A fenti elrendezés a kézi/forrásból telepítésre vonatkozik. Ha a Velran Debian csomagból kerül a gépre, a fájlokat a \code{dpkg} kezeli, ezért a Debian filesystem-konvenció érvényes, nem a lokális adminisztrátori \code{/usr/local} prefix:
+
+\begin{lstlisting}
+/usr/bin/velran-server
+/usr/bin/velran-cli
+/etc/velran/server.toml
+/usr/lib/systemd/system/velran.service
+\end{lstlisting}
+
+A csomag Debian/Ubuntu build gépen így készíthető és telepíthető:
+
+\begin{lstlisting}[language=bash]
+make deb
+sudo dpkg -i dist/velran_1.0.0-1_amd64.deb
+\end{lstlisting}
+
+A csomag szándékosan nem indítja el automatikusan a szolgáltatást: telepítsd az alkalmazást és a secreteket, állítsd be és validáld az \code{/etc/velran/server.toml} fájlt, majd engedélyezd az \code{velran.service} unitot. Csomagolt telepítésnél \code{/usr} és \code{/etc}, kézi telepítésnél \code{/usr/local} a helyes. A teljes folyamat: \code{docs/hu/36-debian-csomag.md}.
+
+\section{Első alkalmazás}
+
+Ajánlott minimális projekt:
+
+\begin{lstlisting}
+myapp/
+|-- main.vrn
+|-- pages.vrn
+`-- public/
+\end{lstlisting}
+
+\code{main.vrn}:
+
+\begin{lstlisting}[language=Velran]
+mod pages;
+\end{lstlisting}
+
+\code{pages.vrn}:
+
+\begin{lstlisting}[language=Velran]
+#[page]
+fn home(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {
+        <main><h1>Hello Velran</h1></main>
+    });
+}
+
+route home GET "/" public => home;
+\end{lstlisting}
+
+Fejlesztői indítás közvetlenül a workspace-ből:
+
+\begin{lstlisting}[language=bash]
+cargo run -p velran-server -- \\
+  --app /abs/path/myapp/main.vrn \\
+  --listen 127.0.0.1:8080 \\
+  --insecure-dev-cookies
+\end{lstlisting}
+
+Ugyanez a lefordított release binárissal:
+
+\begin{lstlisting}[language=bash]
+/usr/local/bin/velran-server \\
+  --app /abs/path/myapp/main.vrn \\
+  --listen 127.0.0.1:8080 \\
+  --insecure-dev-cookies
+\end{lstlisting}
+
+Az \code{--insecure-dev-cookies} csak lokális developmentre való.
+
+\section{A konfigurációból elsőre csak a minimum kell}
+
+A könyv ezen pontján még nem cél a teljes \code{server.toml} megtanulása. Kezdőként elég három dolgot szétválasztani:
+
+\begin{itemize}
+  \item az \emph{alkalmazáskód} mondja meg, milyen modellek, queryk, oldalak és route-ok léteznek;
+  \item a \emph{szerverkonfiguráció} mondja meg, hol hallgat a process, milyen külső erőforrásokat érhet el, és milyen operátori limitek érvényesek;
+  \item a \emph{secret fájlok} tartalmazzák azokat az érzékeny értékeket, amelyek nem kerülhetnek sem az alkalmazáskódba, sem plaintext TOML-ba.
+\end{itemize}
+
+Az A--Z fejezet egy minimális development konfigurációt ad. A production-specifikus kulcsokat akkor vezetjük be, amikor már van mit üzemeltetni; a teljes kulcs/default/sample referencia a könyv végén található. Első olvasáskor tehát ne próbáld a teljes konfigurációs felületet memorizálni.
+
+\subsection*{A motorháztető alatt: natív alkalmazásaktiválás}
+
+Első olvasáskor ezt a részt nyugodtan átugorhatod. Belsőleg az aktiválási út tudatosan lépcsőzetes, hogy az ellenőrzés azelőtt történjen meg, hogy az új kód éles generációvá válhatna:
+
+\begin{lstlisting}
+.vrn forras
+  -> parser + security/type verification
+  -> verified executable intermediate representation (IR)
+  -> generalt safe Rust
+  -> rustc
+  -> immutable cdylib generation
+  -> atomic activation
+\end{lstlisting}
+
+A generált alkalmazás-Rust tiltja az unsafe kódot. A nem támogatott konstrukció fail-closed hibát ad interpreter/VM kerülőút helyett. Source reload közben a hibás candidate ezért nem váltja le az utolsó ismert jó generációt. A natív compiler cache a változatlan, ellenőrzött source/toolchain/policy identity újrafordítását kerüli el.
+
+\section{Production process és reverse proxy}
+
+Apache vagy Nginx mögött a tipikus adatút:
+
+\begin{lstlisting}
+Internet
+   |
+   | HTTPS :443
+   v
+Apache vagy Nginx
+   |
+   | HTTP 127.0.0.1:8080
+   v
+/usr/local/bin/velran-server
+   |
+   +-- /usr/local/etc/velran/server.toml
+   +-- /srv/velran/current/main.vrn
+   +-- DB / Redis / AppFs
+\end{lstlisting}
+
+A proxy nem indítja és nem helyettesíti a Velran processzt. A \code{velran-server} külön service-ként fusson, például systemd alatt, a proxy pedig a loopback listenerre továbbítsa a kéréseket. A \code{velran-cli} csak operátori parancsok idejére indul el.
+
+Egyszerű systemd \code{ExecStart} részlet:
+
+\begin{lstlisting}
+ExecStart=/usr/local/bin/velran-server \\
+  --config /usr/local/etc/velran/server.toml
+\end{lstlisting}
+
+A process felhasználója ne legyen \code{root}; csak a szükséges alkalmazás-, secret-, data- és log-fájlokhoz kapjon jogosultságot. Ha a TLS-t Apache vagy Nginx terminálja, a Velran listener maradjon loopbacken, például \code{127.0.0.1:8080}.
+
+\section{Futtatási topológiák részletesen}
+
+A binárisok helye és a processzek szerepe ugyanaz marad, akár a Velran terminálja a TLS-t, akár Apache vagy Nginx áll előtte. A különbség a listener, a TLS-termináció és a trusted proxy határ konfigurációja.
+
+\section{Közvetlen, egydomaines HTTPS}
+
+Ha a Velran szerver maga terminálja a TLS-t, a publikus listener lehet például 443:
+
+\begin{lstlisting}
+[server]
+app = "/srv/velran/current/main.vrn"
+listen = "0.0.0.0:443"
+insecure_dev_cookies = false
+
+[tls]
+cert_file = "/run/secrets/velran/tls-fullchain.pem"
+key_file = "/run/secrets/velran/tls-key.pem"
+handshake_timeout_ms = 5000
+http_redirect_listen = "0.0.0.0:80"
+public_host = "www.example.com"
+\end{lstlisting}
+
+A \code{public_host} trusted konfigurációból jön. HTTP-ről HTTPS-re csak GET/HEAD kérés redirectelhető.
+
+Mivel a közvetlen minta 80/443 portot használ, unprivileged systemd service esetén a processnek célzott \code{CAP_NET_BIND_SERVICE} capability kell. Ne futtasd emiatt rootként. Reverse proxy mögött, például \code{127.0.0.1:8080} listenerrel ez a capability nem szükséges.
+
+\section{Apache reverse proxy mögött}
+
+Ebben a felállásban az Apache kezeli a publikus TLS-t, a Velran pedig csak loopback interfészen hallgat. Példa Velran config:
+
+\begin{lstlisting}
+[server]
+app = "/srv/velran/current/main.vrn"
+listen = "127.0.0.1:8080"
+insecure_dev_cookies = false
+
+[tls]
+public_host = "www.example.com"
+
+[web]
+trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
+allow_missing_origin = false
+cors_origins = []
+cors_allow_credentials = false
+\end{lstlisting}
+
+Reverse proxy módban nincs Velran oldali certificate/key, de a \code{tls.public_host} továbbra is szükséges: ez a böngésző által látott canonical host trusted forrása, amelyhez a Host és az Origin/Referer ellenőrzés kötődik. A production plain HTTP upstream csak loopback listeneren, explicit trusted proxy listával és ilyen public hosttal engedett. Minden normál proxied kérésnek trusted proxytól származó \code{X-Forwarded-Proto: https} (vagy ekvivalens szabványos \code{Forwarded: proto=https}) metadata-t kell hordoznia.
+
+Az Apache VirtualHost minimális mintája:
+
+\begin{lstlisting}
+<VirtualHost *:443>
+    ServerName www.example.com
+
+    SSLEngine on
+    SSLCertificateFile /etc/letsencrypt/live/www.example.com/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/www.example.com/privkey.pem
+
+    ProxyPreserveHost On
+    ProxyPass        / http://127.0.0.1:8080/
+    ProxyPassReverse / http://127.0.0.1:8080/
+
+    RequestHeader set X-Forwarded-Proto "https"
+</VirtualHost>
+\end{lstlisting}
+
+Ehhez tipikusan a \code{proxy}, \code{proxy_http}, \code{headers}, \code{ssl} modulok szükségesek. A forwarding headereket a Velran csak a \code{trusted_proxy_cidrs} tartományból fogadja el; ezért ne tegyél tág, például teljes internetet lefedő trusted proxy CIDR-t a configba.
+
+A port 80-as VirtualHost feladata lehet kizárólag az Apache-s HTTPS redirect:
+
+\begin{lstlisting}
+<VirtualHost *:80>
+    ServerName www.example.com
+    Redirect permanent / https://www.example.com/
+</VirtualHost>
+\end{lstlisting}
+
+\section{Nginx reverse proxy mögött}
+
+Az Nginx topológia ugyanazt a trust modellt használja: a publikus TLS-t az Nginx kezeli, a Velran pedig loopbacken hallgat. A Velran oldali \code{server.toml} megegyezhet az Apache példában látottal.
+
+Minimális Nginx server block:
+
+\begin{lstlisting}
+server {
+    listen 443 ssl;
+    server_name www.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/www.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/www.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+    }
+}
+\end{lstlisting}
+
+A példában egyetlen közvetlen reverse proxy van, ezért az \code{X-Forwarded-For} értéke a proxy által látott klienscím, az \code{X-Forwarded-Proto} pedig \code{https}. Ne engedd, hogy az internet felől érkező tetszőleges forwarding header authority legyen. A Velran csak a pontos \code{trusted_proxy_cidrs} tartományból érkező forwarding headert fogadja el.
+
+A HTTP listener feladata lehet csak a HTTPS redirect:
+
+\begin{lstlisting}
+server {
+    listen 80;
+    server_name www.example.com;
+    return 301 https://$host$request_uri;
+}
+\end{lstlisting}
+
+\section{Ajánlott production könyvtárstruktúra}
+
+\begin{lstlisting}
+/usr/local/bin/velran-server
+/usr/local/bin/velran-cli
+/srv/velran/releases/2026-09-04.1/
+/srv/velran/current -> /srv/velran/releases/2026-09-04.1
+/srv/velran/data/
+/usr/local/etc/velran/server.toml
+/run/secrets/velran/
+/var/log/velran/
+\end{lstlisting}
+
+A bináris, a release és a konfiguráció legyen runtime read-only. Az alkalmazás csak a deklarált data/log helyekre írjon.
+
+\section{Első ellenőrzés}
+
+Mielőtt forgalmat adnál a szerverre:
+
+\begin{lstlisting}[language=bash]
+/usr/local/bin/velran-server \\
+  --config /usr/local/etc/velran/server.toml \\
+  --check-config
+\end{lstlisting}
+
+Ez listener nélkül ellenőrzi többek között a konfigurációt, a secret-file referenciákat, az alkalmazás fordíthatóságát és a TLS fájlokat.
+
+\section{Gyakorlat: ellenőrizd a telepítési határokat}
+\paragraph{Gyakorlási mód: vezetett.} Használd az előszóban meghatározott vezetett módszert.
+
+Egy tesztgépen azonosítsd a binárist, az immutable release-fát, a konfigurációt, a secret fájlokat, az alkalmazásadatot és a logokat. Ellenőrizd, hogy a service account csak a szándékosan írható adat- és loghelyekre tud írni. Listener nyitása előtt futtasd a \code{--check-config} ellenőrzést.
+
+\section{Tipikus hiba: a konfigurációt alkalmazásadatként kezeljük}
+A konfiguráció és a secret ne sodródjon együtt a módosuló alkalmazásállapottal. A read-only release-fa és konfiguráció jóval egyszerűbbé teszi a rollbacket, a felülvizsgálatot és az incidenskezelést.
+
+\section{Folyamatos mintaprojekt: Secure Notes}
+A Secure Notes esetén döntsd el, hol él az alkalmazás release artefaktuma, hol van a tartós adatbázis vagy adatkönyvtár, és mely secretek érkeznek fájlból ahelyett, hogy forráskódba kerülnének. Ezeket az útvonalakat még a feature-ök megvalósítása előtt rögzítsd.

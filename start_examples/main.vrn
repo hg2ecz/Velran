@@ -1,0 +1,56 @@
+mod getpost;
+mod calculator;
+mod catalog;
+
+// === Simplest example ===
+// http://<server>:<port>/
+
+#[page]
+fn simplest(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {
+        <!doctype html>
+        <html lang="hu">
+            <head>
+                <meta charset="utf-8">
+                <title>Velran</title>
+            </head>
+            <body>
+                <h1>Velran példák</h1>
+                <p>A szerver működik. Válassz egy példát:</p>
+
+                <ul>
+                    <li><a href="contact">GET + POST űrlap</a></li>
+                    <li><a href="calculator?a=12&amp;b=5">Egyszerű számológép</a></li>
+                    <li><a href="catalog?tax=27">Termék kalkulátor</a></li>
+                    <li><a href="hello/Peter">Paraméterezett köszönés</a></li>
+                </ul>
+            </body>
+        </html>
+    });
+}
+
+route home GET "/" public => simplest;
+
+// === Example with get parameter ===
+// http://<server>:<port>/hello/Peter
+
+#[page]
+fn hello_with_name(ctx: PageContext, name: String) -> Result<Html, PageError> {
+    return Ok(html {
+        <!doctype html>
+        <html lang="hu">
+            <head>
+                <meta charset="utf-8">
+                <title>Köszönés</title>
+            </head>
+            <body>
+                <h1>Szia, {{name}}!</h1>
+                <p>Ez már egy paraméterezett Velran oldal.</p>
+            </body>
+        </html>
+    });
+}
+
+route hello GET "/hello/:name<String>" public => hello_with_name;
+// Types: String, Email, Url, Slug, i64, bool, Date, DateTime, Uuid, Decimal, Image
+// Slug a subset of String. This usable a keyword with filtered character set (validated).

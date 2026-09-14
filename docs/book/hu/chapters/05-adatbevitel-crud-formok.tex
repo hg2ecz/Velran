@@ -1,0 +1,275 @@
+\chapter{Adatbevitel: typed SQL, CRUD, formok és PRG}
+
+\noindent\textbf{Tanulási út: Gyors út: alap.} Adj bounded formokat és CRUD-ot az alkalmazáshoz az authorization és transaction határok gyengítése nélkül.\par\medskip
+
+\rustbridgeblockhu{A typed értékek, structok, \code{Option}/\code{Result}, összehasonlítások és normál vezérlés maradnak a business rule-ok nyelve.}{A route form deklaráció, validációs boundok, transaction capability, authorization proof és typed redirect definiálja a védett mutation-határt.}{Ne írd át a business validációt framework-mágiává. A domain logika maradjon Rust-szerű, Velran-elemet ott használj, ahol adat trust- vagy effect-határon lép át.}
+
+
+\invariantblock{Biztonsági invariáns: input korlátozása effect előtt}{A request adatát kezeld nem megbízhatóként mindaddig, amíg a várt típusra nem parse-oltad, szükség szerint nem normalizáltad, és explicit boundokkal nem validáltad. Ez adatbázis-módosítás, fájlírás, redirect-cél vagy más protected effect előtt történjen meg.}
+
+\diagnosticblockhu{Verifier diagnostic}{SEC-A01-005}{Egy mutation query úgy kapott objektumkulcsot, hogy nincs authorization proof az adott model/key párra.}{Töltsd be az objektumot, authorize-old, majd az authorize-olt kulcsot (vagy változatlan lokális aliasát) add át a mutationnek.}
+
+A CRUD módosítás egy ciklust követ: olvasás, typed form input, validáció, autorizáció, tranzakciós módosítás, majd redirect és újraolvasás. A kulcskülönbség: a \emph{valid input még nem authorized input}.
+
+\section{A request-életciklus alkalmazása CRUD módosításra}
+
+Egy tipikus szerkesztési kérésnél a hétlépcsős modell konkrétan így olvasható:
+
+\begin{lstlisting}
+POST /notes/42
+  -> parse: Form<NoteEdit>
+  -> validate: title/body bounds
+  -> authenticate: user session required
+  -> authorize: load note 42, prove ownership/permission
+  -> transaction: optimistic-lock update + audit
+  -> response: typed redirect to GET
+\end{lstlisting}
+
+Három szabály a legfontosabb. A validáció soha nem bizonyít authorizationt. Az authentication soha nem bizonyít objektumtulajdont. A tranzakció előtt sikeres read soha nem helyettesíti a mutationben végrehajtott authoritative concurrency checket. Ha ezeket külön tartod, sok CRUD sérülékenység nem tud egyszerű formhibának álcázódni.
+
+\section{Typed SQL és CRUD}
+
+\subsection*{Lekérdezés}
+
+\begin{lstlisting}[language=Velran]
+#[query]
+fn articleBySlug(db: Db, slug: Slug)
+    -> Result<Article, DbError> sql {
+    SELECT id, slug, title, body
+    FROM articles
+    WHERE slug = :slug
+}
+\end{lstlisting}
+
+Az SQL szöveg statikus és compiler-owned. Felhasználói érték csak typed bindként, például \code{:slug}, kerülhet bele.
+
+\subsection*{Mutáció transactionben}
+
+\begin{lstlisting}[language=Velran]
+#[query]
+fn articleById(db: Db, id: i64)
+    -> Result<Article, DbError> sql {
+    SELECT id, slug, title, body
+    FROM articles
+    WHERE id = :id
+}
+
+#[query]
+fn updateArticle(
+    tx: Transaction,
+    id: i64,
+    title: String,
+    body: String
+) -> Result<(), DbError> mutates Article by id sql {
+    UPDATE articles
+    SET title = :title, body = :body
+    WHERE id = :id
+}
+\end{lstlisting}
+
+Az action betölti az objectet, létrehozza az authorization proofot, és csak ezután használja az autorizált object kulcsát a mutációhoz:
+
+\begin{lstlisting}[language=Velran]
+#[action]
+fn update(
+    ctx: ActionContext,
+    db: Db,
+    id: i64,
+    title: String,
+    body: String
+) -> Result<Redirect, PageError> {
+    let article = articleById(db, id)?;
+    authorize article authenticated;
+    transaction db {
+        updateArticle(tx, article.id, title, body)?;
+    }
+    return Ok(redirect(adminArticles()));
+}
+\end{lstlisting}
+
+Hétköznapi lokális tranzakciónál siker esetén commit, ismert adatbázishibánál rollback történik. A \code{Transaction} capability nem escape-elhet a blokkból. Retry-sensitive critical műveletnél viszont explicit transaction outcome-ot kell kezelni ahelyett, hogy minden hibáról rollbacket feltételeznénk; a \code{CommitUnknown} szemantikát a \ref{ch:db-deep-dive-hu}. fejezet részletezi.
+
+\subsection*{Portable adatbázis-séma}
+
+A V1 SQLite, PostgreSQL és MariaDB irányban is hordozható mintát céloz. \code{Date}, \code{DateTime}, \code{Uuid} és \code{Decimal} portable reprezentációja canonical text lehet.
+
+\subsection*{Migration}
+
+A szerver nem migrál automatikusan startupkor. Ajánlott folyamat:
+
+\begin{lstlisting}
+migrate verify
+migrate apply
+migrate verify
+\end{lstlisting}
+
+A migration credential legyen elkülönítve a normál application runtime credentialtől.
+
+
+\section{Formok, validáció és PRG}
+
+\subsection*{Named form schema}
+
+\begin{lstlisting}[language=Velran]
+form ArticleForm {
+    title<String>
+    body<String>
+    published<bool>
+    validate title length 2 200 body length 1 200000
+}
+\end{lstlisting}
+
+Route:
+
+\begin{lstlisting}[language=Velran]
+route articleCreate POST "/admin/articles"
+    form ArticleForm
+    auth role Editor
+    => create;
+\end{lstlisting}
+
+A handler paramétersorrendje és típusa kövesse a form mezőit.
+
+\subsection*{Hibás beküldés}
+
+Named formnál a hiányzó kötelező mező, a mezőszintű typed decode hiba vagy a deklarált validation hibája 422 \emph{Unprocessable Content}. A runtime a mezőértékeket escape-elve tölti vissza, mezőhibát ad és CSRF tokent illeszt a formba. Ismeretlen vagy duplikált mező viszont 400, mert az request-schema megsértése.
+
+Ez szándékosan más, mint az inline form- vagy JSON-schema: ott a typed decode/validation hibája request-contract sértésként \code{400}. Named formot akkor használj, amikor a hibát ugyanazon felhasználói űrlapon, mezőszintű visszajelzéssel akarod kezelni.
+
+\subsection*{Sikeres POST és PRG}
+
+Sikeres módosítás után redirectet adj vissza; így a böngésző GET-tel tölti be a céloldalt. Ez a Post/Redirect/Get minta megszünteti a véletlen újraküldés tipikus problémáját.
+
+\subsection*{Egyszerű teljes form-action minta}
+
+\begin{lstlisting}[language=Velran]
+#[action]
+fn create(
+    ctx: ActionContext,
+    db: Db,
+    title: String,
+    body: String,
+    published: bool
+) -> Result<Redirect, PageError> {
+    let articleSlug = slug(title);
+    transaction db {
+        insertArticle(tx, articleSlug, title, body)?;
+    }
+    return Ok(redirect(adminArticles()));
+}
+\end{lstlisting}
+
+A checkbox-szerű hiányzó \code{bool} mező named form esetén \code{false}.
+
+\subsection*{Gyakorlati döntési sorrend}
+
+Állapotváltoztató form tervezésénél és review-jánál ezt a sorrendet használd:
+
+\begin{enumerate}
+  \item decode és validation a route/form boundaryn;
+  \item meglévő rekord módosításánál töltsd be a cél objectet;
+  \item hozd létre az object/permission/tenant authorization proofot;
+  \item a megfelelő transaction vagy critical-operation contract alatt módosíts;
+  \item typed GET route helperre redirectelj;
+  \item csak azt a cache-t invalidáld, amelyet a módosítás ténylegesen elavulttá tett.
+\end{enumerate}
+
+Ez a sorrend kizár egy gyakori hibát: a jól formázott identifier vagy form önmagában nem bizonyítja, hogy a hívó módosíthatja a hivatkozott objectet.
+
+
+\section{Teljes szerkesztési ciklus: validáció, authorization, konkurencia}
+
+Létrehozó formnál gyakran elég a validáció és a tranzakció. Meglévő üzleti object szerkesztésénél azonban megjelenik egy harmadik kérdés: a felhasználónak megjelenített példány a POST beérkezésére már elavulhat. A Velran ezeket a kérdéseket külön kezeli; egy sikeres validáció nem válik automatikusan minden további lépés bizonyítékává.
+
+Gyakorlati edit-flow:
+
+\begin{enumerate}
+  \item a request dekódolása a deklarált form-típusokra;
+  \item mező- és cross-field validáció;
+  \item az aktuális object betöltése és authorization proof létrehozása;
+  \item a beküldött verzió ellenőrzése optimistic-locking mutációval;
+  \item a módosítás és szükség esetén a business audit commitja ugyanabban a tranzakcióban;
+  \item siker után redirect egy GET route-ra.
+\end{enumerate}
+
+A verzióellenőrzés magába a mutációba tartozik. Egy külön ``létezik-e még ez a verzió?'' SELECT újra race-t hozna létre az ellenőrzés és az írás között.
+
+\begin{lstlisting}[language=Velran]
+model Article {
+    id: i64
+    title: String
+    version: i64
+}
+
+#[query]
+fn updateArticle(
+    tx: Transaction,
+    id: i64,
+    title: String,
+    version: i64
+) -> Result<Changed, DbError> mutates Article by id sql {
+    UPDATE articles
+    SET title = :title, version = version + 1
+    WHERE id = :id AND version = :version
+}
+\end{lstlisting}
+
+A \code{Changed} azt jelenti, hogy pontosan egy sornak kell módosulnia. Nulla érintett sor stale szerkesztést jelent és conflict lesz belőle, nem pedig valaki újabb módosításának csendes felülírása. Egynél több sor a mutáció saját invariantjának megsértése, ezért adatbázishiba.
+
+\subsection*{Négy boundary, amit nem szabad összemosni}
+
+\begin{longtable}{L{0.20\textwidth}L{0.31\textwidth}L{0.39\textwidth}}
+\toprule
+Boundary & Kérdés & Tipikus eredmény \\
+\midrule
+Request schema & Szerkezetileg megengedett-e a request? & ismeretlen/duplikált mező: 400 \\
+Named-form validation & A felhasználó javíthatja-e ezt az értéket? & field/type/deklarált validation hiba: 422 \\
+Authorization & Cselekedhet-e ez a principal ezen az objecten? & fail closed a mutáció előtt \\
+Concurrency invariant & Még aktuális-e a beküldött állapot? & stale optimistic-lock verzió: 409 \\
+\bottomrule
+\end{longtable}
+
+Review közben ez a szétválasztás különösen hasznos: a 422 nem authorization döntés, és a sikeres authorization sem bizonyítja, hogy egy régi böngészőfül még a legfrissebb adatbázis-állapotot tartalmazza.
+
+\section{Adatbázis-invariantok és felhasználóbarát validáció}
+
+Az application validation javíthatja a visszajelzést, de az authoritative uniqueness helye az adatbázis. Ha slugnak, emailnek, külső azonosítónak vagy hasonló értéknek egyedinek kell lennie, ezt adatbázis \code{UNIQUE} constraint kényszerítse ki. Preflight SELECT használható barátságosabb hibaüzenethez, de nem helyettesítheti a constraintet, mert két párhuzamos request egyszerre is átmehet a preflight ellenőrzésen.
+
+Általánosabban is ez a minta: presentation-orientált ellenőrzés a request boundaryn, domain refinement typed/domain értékekben, authorization a védett effect előtt, race-sensitive integritás pedig az adatbázisban vagy más authoritative platform-primitívben.
+
+\section{Mutációs review-checklist}
+
+CRUD mutáció elfogadása előtt ellenőrizd:
+
+\begin{itemize}
+  \item a route explicit access policyval rendelkezik;
+  \item a request mezők typed és bounded értékek;
+  \item object-level authorization előtt betöltöd a célobjectet;
+  \item SQL-be érték csak typed bindon keresztül kerül;
+  \item az állapotmódosítás a megfelelő transaction/critical-operation contract alatt fut;
+  \item ahol lost update számít, a konkurens szerkesztés optimistic lockingot használ;
+  \item a uniqueness és más race-sensitive invariant authoritative módon van kikényszerítve;
+  \item rekonstruálandó üzleti módosításnál a business audit tranzakciós;
+  \item siker után PRG történik, nem mutable POST response renderelése;
+  \item a cache invalidáció szűk, és csak a ténylegesen módosított adathoz kötődik.
+\end{itemize}
+
+\section{Ellenőrzött companion példák}
+A fejezet copy/paste szempontból elsődleges, compilerrel ellenőrzött repository-programjai:
+\begin{itemize}
+  \item \path{examples/crud/app.vrn} -- CRUD és objektumszintű autorizáció;
+  \item \path{examples/forms/app.vrn} -- típusos formok és validáció;
+  \item \path{examples/optimistic-locking/main.vrn} -- elavult szerkesztés elleni védelem;
+  \item \path{examples/prg-flash/app.vrn} -- PRG és flash állapot.
+\end{itemize}
+
+\section{Gyakorlat: tervezz szerkesztési ütközést}
+\paragraph{Gyakorlási mód: támogatott.} Használd az előszóban meghatározott támogatott módszert.
+
+Szimulálj két böngésző-sessiont, amelyek ugyanazt a rekordot nyitják meg. Az A session ment először, majd a B session elavult adatot küld vissza. Döntsd el, hol utazik a verzió, hol derül ki az eltérés, milyen HTTP eredmény születik, és mit lát ezután a felhasználó.
+
+\section{Tipikus hiba: csak a tranzakció előtt validálunk}
+Az alkalmazásszintű validáció jobb hibaüzeneteket ad, de a race-sensitive invariánsoknak továbbra is kell authoritative enforcement pont. Uniqueness, tulajdonosfüggő módosítás és optimistic concurrency akkor is maradjon helyes, ha két kérés szinte egyszerre fut.
+
+\section{Folyamatos mintaprojekt: Secure Notes}
+Használd az \path{examples/secure-notes/checkpoints/05-crud/main.vrn} compilerrel ellenőrzött snapshotot. Adj szerkesztést és törlést a Secure Notes-hoz. Legyen explicit a tulajdonosi ellenőrzés, szerkesztésnél használj optimistic lockingot, a módosítás maradjon a megfelelő tranzakciós határon belül, siker után pedig PRG-vel térj vissza.

@@ -1,0 +1,45 @@
+[Unit]
+Description=Velran application
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=velran
+Group=velran
+WorkingDirectory=/srv/velran/current
+ExecStartPre=/usr/local/bin/velran-server --config /usr/local/etc/velran/server.toml --check-config
+ExecStart=/usr/local/bin/velran-server --config /usr/local/etc/velran/server.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=45s
+
+# Process/service hard ceilings. Velran request/profile limits remain lower soft ceilings.
+MemoryMax=1G
+MemorySwapMax=0
+CPUQuota=200%
+TasksMax=256
+LimitNOFILE=8192
+
+# This starter server.toml binds direct TLS on 80/443 while the service runs
+# unprivileged. Keep only the capability required to bind privileged ports.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+# Writable paths required by the runtime. Keep program/config read-only.
+ReadWritePaths=/srv/velran/data /var/log/velran
+
+[Install]
+WantedBy=multi-user.target

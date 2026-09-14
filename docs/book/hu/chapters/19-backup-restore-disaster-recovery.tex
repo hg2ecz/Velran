@@ -1,0 +1,292 @@
+\chapter{Backup, restore és disaster recovery}\label{ch:recovery}
+
+\noindent\textbf{Tanulási út: Gyors út: production alap.} Definiáld a helyreállíthatóságot, mielőtt a production adat pótolhatatlanná válik.\par\medskip
+
+A backup akkor értékes, ha az alkalmazás \textbf{bizonyíthatóan újraindítható egy ismert recovery pontból}. Az üzleti állapot application DB-n, local-auth identity store-on és AppFs-en is átnyúlhat, ezért előre rögzítsd a teljes recovery state-et, a konzisztencia-határt és a restore bizonyításának módját.
+
+\section{Először készíts state inventoryt}
+
+Production előtt írd össze, mi tartozik az alkalmazás állapotához. Tipikusan:
+
+\begin{itemize}
+  \item application database;
+  \item local-auth SQLite DB, ha local auth használatban van;
+  \item AppFs \code{data_root}, például feltöltött média és más runtime adat;
+  \item az immutable release azonosítója és artifact hash-e;
+  \item a migration set és checksumok;
+  \item a trusted config/policy fájlok verziója vagy hash-e;
+  \item a backup időpontja, az alkalmazásverzió és a DB backend.
+\end{itemize}
+
+A secret fájlok külön secret-management boundaryhoz tartoznak. A recovery runbooknak tudnia kell, honnan állíthatók helyre a szükséges DB-, Redis-, TLS- vagy LDAP-credentialök, de \textbf{secret érték ne kerüljön plaintext release- vagy backup-manifestbe}.
+
+\section{Mi nem üzleti source of truth?}
+
+A V1 Redis-használat session-, rate-limit- és public-cache állapot. Ezeket ne kezeld üzleti backup részeként.
+
+Disaster recovery után biztonságos és elfogadható baseline az üres Redis:
+
+\begin{itemize}
+  \item a sessionök megszűnnek, ezért a felhasználók újra belépnek;
+  \item a public cache újraépül;
+  \item a rate-limit ablakok újraindulnak.
+\end{itemize}
+
+Ha ugyanaz a Redis cluster más alkalmazás üzleti adatait is tárolja, annak mentése már annak a rendszernek a saját backup-contractja.
+
+\section{RPO és RTO: a technikai mentés előtt üzleti döntés}
+
+Két számot még a backup implementálása előtt rögzíteni kell:
+
+\begin{description}
+  \item[RPO -- Recovery Point Objective] legfeljebb mennyi adatvesztés fogadható el;
+  \item[RTO -- Recovery Time Objective] mennyi idő alatt kell helyreállnia a szolgáltatásnak.
+\end{description}
+
+Ha például az RPO 24 óra, egy napi backup elvileg elegendő lehet. Ha az RPO néhány perc, már DB-szintű WAL/binlog/PITR vagy más infrastruktúra kellhet. A Velran runtime nem tud szervezeti RPO/RTO-t kitalálni; ezt az operatornak kell a backup technológiára lefordítania.
+
+\section{A V1 biztonságos baseline: kontrollált maintenance backup}
+
+A DB és az AppFs együtt alkothat üzleti állapotot. Egy DB sor például hivatkozhat egy feltöltött képre. Külön időpontban készült DB dump és AppFs tar ezért nem automatikusan konzisztens recovery point.
+
+A legegyszerűbb auditálható V1 baseline:
+
+\begin{lstlisting}
+traffic drain
+-> SIGTERM / graceful shutdown
+-> stopped state verified
+-> application DB backup
+-> local-auth DB backup, if used
+-> AppFs data_root snapshot
+-> recovery manifest + hashes
+-> service start
+-> readiness
+\end{lstlisting}
+
+Ez rövid írási szünettel jár, viszont világos konzisztenciahatárt ad. Online backup csak akkor nevezhető konzisztensnek, ha a DB/storage infrastruktúra ugyanahhoz a recovery ponthoz kötött snapshotot biztosít, vagy az alkalmazás adatmodellje bizonyíthatóan tolerálja az eltérő snapshot-időpontokat. A runtime önmagában nem ígér distributed snapshotot.
+
+\section{Application DB: a backend saját backup eszközét használd}
+
+A Velran nem próbálja elrejteni a natív adatbázis-backup mechanizmusokat. Az operator a választott backend támogatott eszközével dolgozzon, lehetőleg külön backup credentialdel.
+
+\subsection*{PostgreSQL}
+
+Egy tipikus logikai backup:
+
+\begin{lstlisting}
+pg_dump --format=custom --no-owner --no-acl \
+  --file app.dump "$DATABASE_URL"
+\end{lstlisting}
+
+Izolált restore-próbához:
+
+\begin{lstlisting}
+createdb velran_restore_test
+pg_restore --no-owner --no-acl \
+  --dbname velran_restore_test app.dump
+\end{lstlisting}
+
+A production secretet ne tedd shell historyba. Nagy adatbázisnál fizikai backup és PITR lehet jobb választás; annak runbookja már a PostgreSQL platform része.
+
+\subsection*{MariaDB}
+
+Tranzakcionális InnoDB schema esetén tipikus logikai mentés:
+
+\begin{lstlisting}
+mariadb-dump --single-transaction \
+  --routines --triggers app > app.sql
+\end{lstlisting}
+
+Restore izolált adatbázisba:
+
+\begin{lstlisting}
+mariadb velran_restore_test < app.sql
+\end{lstlisting}
+
+A \code{--single-transaction} nem tesz nem tranzakcionális táblákat varázsütésre konzisztenssé. Vegyes schema esetén maradjon a kontrollált maintenance baseline.
+
+\subsection*{SQLite}
+
+Élő SQLite adatbázist ne nevezz backupnak csak azért, mert \code{cp}-vel lemásoltad. Használd a SQLite backup mechanizmusát vagy stopped állapotban fájlrendszer-snapshotot.
+
+\begin{lstlisting}
+sqlite3 /srv/velran/data/app.db \
+  ".backup '/backup/app.db'"
+\end{lstlisting}
+
+A restore-próba mindig külön test pathra történjen; ne production DB-n próbáld ki, hogy működik-e a mentés.
+
+\section{A local-auth DB külön security backup}
+
+Local auth használatakor az identity store külön SQLite boundary. Password hash, TOTP secret és recovery hash is lehet benne, ezért backupját \textbf{secretként} kezeld.
+
+\begin{lstlisting}
+sqlite3 /srv/velran/auth/users.db \
+  ".backup '/backup/local-auth.db'"
+\end{lstlisting}
+
+A backup legyen titkosított storage-on, szűk hozzáféréssel és dokumentált retentionnel. Restore után ellenőrizd a fájl és a parent directory ownership/permission értékeit is. Az identity store elvesztése nem rekonstruálható az application DB-ből.
+
+\section{AppFs: a teljes data root tartós állapot lehet}
+
+Ne csak a HTTP-n publikált media alkönyvtárat mentsd. A deklarált AppFs \code{data_root} teljes tartalma lehet recovery state.
+
+Stopped baseline mellett például:
+
+\begin{lstlisting}
+tar -C /srv/velran -cpf data-root.tar data
+\end{lstlisting}
+
+Restore után őrizd meg vagy állítsd vissza a szükséges ownership/permission értékeket. A service user csak a konfigurációban deklarált writable rootokat írhassa; symlinkkel ne lazítsd az AppFs confinementet.
+
+\section{Minden recovery ponthoz tartozzon manifest}
+
+A backup objektumok önmagukban nem mondják meg, melyik release-hez és migration állapothoz tartoznak. Készíts secretmentes manifestet:
+
+\begin{lstlisting}
+backup_id=2026-09-04T180000Z
+release_id=2026-09-04.1
+server_sha256=...
+app_source_sha256=...
+migrations_sha256=...
+config_sha256=...
+db_backend=postgresql
+app_db_backup_sha256=...
+local_auth_backup_sha256=...
+data_root_backup_sha256=...
+\end{lstlisting}
+
+A manifest hashokat és azonosítókat tartalmazzon, ne credential-értékeket. A mellékelt \code{deploy/release-record.sh} read-only módon segít a release/source/migration/config állapot rögzítésében.
+
+\section{Restore drill: a backup bizonyítása}
+
+A sikeres backup job még nem bizonyít recovery képességet. Rendszeresen, izolált környezetben restore-próbát kell futtatni.
+
+\begin{lstlisting}
+new empty restore DB
+-> application DB restore
+-> local-auth restore, if used
+-> AppFs restore into separate root
+-> select exact immutable release
+-> restore-test config on isolated host/port
+-> velran-server --check-config
+-> velran-cli check main.vrn
+-> velran-cli migrate verify
+-> start velran-server on isolated listener
+-> /health/live + /health/ready
+-> application-specific smoke test
+-> log and audit verification
+\end{lstlisting}
+
+A \code{deploy/restore-verify.sh} a nem mutáló config/source/migration ellenőrzések egy részét automatizálja. Nem indít production listenert és nem futtat \code{migrate apply}-t.
+
+A drill eredményét dátummal, backup ID-val és release ID-val dokumentáld. A ``backup elkészült'' nem release gate; a szervezet RPO/RTO elvárásához illő, friss restore-evidence kell.
+
+\section{Upgrade előtt legyen recovery döntés}
+
+Egy kontrollált production upgrade ajánlott sorrendje:
+
+\begin{lstlisting}
+immutable release artifact + hashes
+-> migration verify
+-> compatibility decision
+-> consistent backup + recent restore evidence
+-> migration apply
+-> migration verify
+-> atomic release switch
+-> controlled restart
+-> live + ready + smoke
+-> logs + metrics + audit review
+\end{lstlisting}
+
+A migration kompatibilitását release-szinten rögzíteni kell. A kulcskérdés: a régi alkalmazás fut-e az új schema mellett?
+
+\section{Expand/contract tartja nyitva a gyors rollback ablakot}
+
+Ha az új schema backward-compatible, egy hibás application release visszakapcsolható a korábbi immutable artifactra DB restore nélkül.
+
+Ajánlott minta:
+
+\begin{enumerate}
+  \item \textbf{expand}: új nullable/defaultolt oszlop, tábla vagy index úgy, hogy a régi alkalmazás tovább fusson;
+  \item deployold az új alkalmazást;
+  \item ha kell, végezz kontrollált adat-backfillt;
+  \item csak későbbi release-ben \textbf{contract}: távolítsd el a régi oszlopot/constraintet, amikor a rollback window már lezárult.
+\end{enumerate}
+
+Destruktív rename/drop vagy azonnali inkompatibilis shape-váltás bezárhatja az app-only rollback lehetőségét. Ezt release előtt explicit jelöld.
+
+\section{Rollback és restore két külön művelet}
+
+\subsection*{Hibás alkalmazás, backward-compatible schema}
+
+\begin{lstlisting}
+traffic drain
+-> previous immutable release
+-> controlled restart
+-> live + ready + smoke
+\end{lstlisting}
+
+Ilyenkor nincs DB restore, ezért a hiba után létrejött üzleti adat megmarad.
+
+\subsection*{Hibás alkalmazás, de forward fix lehetséges}
+
+Preferáld az új immutable release-t vagy forward migrationt. Ne köss automatikus reverse SQL-t a release symlink visszaváltásához.
+
+\subsection*{Schema vagy adat sérült}
+
+Ez már disaster recovery:
+
+\begin{lstlisting}
+stop writes
+-> choose and record recovery point
+-> restore DB + auth DB + AppFs consistently
+-> select matching release and config
+-> verify + smoke
+-> controlled return to traffic
+\end{lstlisting}
+
+A recovery point után keletkezett írások elveszhetnek. Ez üzleti incidensdöntés, nem technikai részlet: az adatvesztési ablakot explicit vállalni és dokumentálni kell.
+
+\section{Tiltott rövidítések}
+
+\begin{itemize}
+  \item élő SQLite DB egyszerű \code{cp} másolatát backupnak nevezni;
+  \item csak az application DB-t menteni, ha AppFs is üzleti állapot;
+  \item restore-próba nélkül sikeresnek tekinteni a backupot;
+  \item automatikus down migrationt kötni application rollbackhez;
+  \item production DB-n restore-próbát végezni;
+  \item migration credentialt átadni a normál application service-nek;
+  \item secret értéket release- vagy backup-manifestbe írni;
+  \item Redis session/cache restore-t a disaster recovery feltételévé tenni.
+\end{itemize}
+
+\section{Production recovery checklist}
+
+Egy rendszer akkor tekinthető recovery-readynek, ha legalább az alábbiak igazak:
+
+\begin{enumerate}
+  \item a state inventory dokumentált;
+  \item az RPO és RTO rögzített;
+  \item a backup titkosítási, retention- és hozzáférési policy ismert;
+  \item van azonosítható, friss sikeres restore drill;
+  \item a release migration kompatibilitása dokumentált;
+  \item az app-only rollback eljárás próbált;
+  \item a destruktív restore tulajdonosa és jóváhagyási útja ismert;
+  \item Redis elvesztésének hatása elfogadott;
+  \item a recovery runbookból nem hiányzik a release/config/secret visszaállítási forrás;
+  \item incidens után live, ready, smoke, log és audit ellenőrzés is történik.
+\end{enumerate}
+
+A recovery legfontosabb elve: \textbf{a mentés nem fájl, hanem bizonyított visszaállítási képesség}. Ha a restore drill nem fut, az RPO/RTO csak feltételezés.
+
+\section{Gyakorlat: restore-t bizonyíts, ne backupot}
+\paragraph{Gyakorlási mód: üzemeltetési szcenárió.} Használd az előszóban meghatározott üzemeltetési módszert.
+
+Állíts vissza egy alkalmazásállapot-másolatot izolált környezetbe, majd ellenőrizd a rekordszámokat, kritikus üzleti invariánsokat, media referenciákat és az alkalmazás indulását. Mérd a restore időt, és jegyezd fel az incidenskezelést blokkoló manuális lépéseket.
+
+\section{Tipikus hiba: komponenseket mentünk közös recovery modell nélkül}
+Adatbázissorok, feltöltött fájlok, konfiguráció és release identity együtt alkothatnak egy helyreállítható állapotot akkor is, ha külön tárolódnak. A backup terv mondja meg, hogyan illeszkednek össze restore idején.
+
+\section{Folyamatos mintaprojekt: Secure Notes}
+Végezz teljes Secure Notes recovery próbát a tartós adattal és az esetleges media attachmentekkel együtt. Ellenőrizd, hogy a helyreállított generáció ugyanazokat az ownership és publication szabályokat szolgálja ki, mint a szimulált hiba előtt.

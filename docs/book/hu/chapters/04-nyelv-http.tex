@@ -1,0 +1,471 @@
+\chapter{Nyelvi alapok és HTTP-határok}
+
+\noindent\textbf{Tanulási út: Gyors út: alap.} Tanuld meg a napi munkához szükséges minimális Rust-szerű nyelvi és HTTP surface-t.\par\medskip
+
+\rustbridgeblockhu{Használd tovább a Rustból ismert lokális változókat, \code{Vec<T>}, \code{Option<T>}, \code{String}, skalárokat, metódusokat és \code{match}-et.}{A Velran tulajdona a verified web surface: callable attribútumok, route/input deklarációk, capabilityk, HTML/JSON határok és a biztonságosan lowerelhető részhalmaz.}{A hétköznapi compute-szintaxis nem rivális DSL. Ha egy normál Rust-alakú kifejezés elfogadott, azt használd, ne keress külön Velran-specifikus írásmódot.}
+
+
+Az A--Z példa már megmutatta a fő építőelemeket. Első olvasáskor koncentrálj a modulokra, typed értékekre, handlerekre, route-okra, opcionális/listaértékekre és biztonságos HTML-re; a részletes aritmetikai és szövegkezelési katalógushoz szükség esetén térj vissza. Munkaszabály: \emph{a bemenetet a határon parse-old és normalizáld, bent typed értékekkel dolgozz, explicit query-vel perzisztálj, és minél később renderelj}.
+
+\section{Forrásstruktúra és statement-határok}
+
+\subsection*{Modulok}
+
+A \code{main.vrn} a modulgráf belépési pontja:
+
+\begin{lstlisting}[language=Velran]
+mod models;
+mod queries;
+mod components;
+mod pages;
+mod actions;
+\end{lstlisting}
+
+A \code{mod} application-root relatív modult tölt be, de a deklarációit nem önti a globális névtérbe. Modulhatáron át az ordinary library-elemek kvalifikált nevet, például \code{models::Article}-t használnak, és alapból privátak; explicit \code{pub} tehet publikus API-vá structot, enumot, pure függvényt, inherent metódust vagy struct-mezőt. A webes authority továbbra is route/capability policyból származik, a \code{pub mod} re-export szemantika pedig külön modul/import kérdés.
+
+\subsection*{Modul-névterek és modulok közötti hívások}
+
+A moduldeklaráció egy application-root relatív forrásmodult vesz fel az explicit source graphba; nem másolja annak deklarációit az aktuális scope-ba. A kanonikus leképezés közvetlen:
+
+\begin{lstlisting}
+models.vrn              -> models
+catalog/queries.vrn     -> catalog::queries
+catalog/pages.vrn       -> catalog::pages
+\end{lstlisting}
+
+Egy belépési pont például több modult tölthet be:
+
+\begin{lstlisting}[language=Velran]
+mod models;
+mod catalog::queries;
+mod catalog::pages;
+
+route catalogIndex GET "/catalog"
+    public => catalog::pages::index;
+\end{lstlisting}
+
+Modulhatáron át kvalifikált nevet használj. Például:
+
+\begin{lstlisting}[language=Velran]
+let recent = catalog::queries::recent(db);
+// tipus modulhataron at: models::Article
+\end{lstlisting}
+
+A \code{catalog/queries.vrn} tehát a \code{catalog::queries} névtérhez tartozik. A deklaráció saját modulján belül a rövid lokális név továbbra is használható. Így a helyi kód rövid marad, a forrásmodulok közötti dependency viszont látható.
+
+A modulbetöltés továbbra is explicit és az application/package rooton belülre zárt: nincs \code{mod.vrn} fallback, automatikus könyvtár-discovery, \code{../}, \code{./} vagy wildcard import. A verified modulgráfon belül támogatottak a Rust-szerű \code{crate::}, \code{self::} és \code{super::} névtérgyökerek. A szűk, explicit \code{use path as alias;} import támogatott. A package-root re-export szándékosan szűkebb a Rustnál: \code{pub use path as alias;} csak már publikus modul-névteret tehet elérhetővé; wildcard, item-, private-module és private transitive-dependency re-export fail-closed módon tiltott.
+
+A nyelvi műveletek -- például \code{text.trim()}, \code{x.sin()} és \code{values.len()} -- Rust-szerű metódusszintaxist használnak, amikor a művelet természetesen egy értékhez tartozik. Framework helper csak ott marad explicit függvény, ahol a Velran webes biztonsági szerződést ad hozzá, például \code{splitBounded(...)}. Ezek nem alkalmazásmodul-deklarációk, ezért továbbra is kvalifikáció nélkül használhatók.
+
+
+\subsection*{Rust-szerű structok, inherent metódusok és konstruktorok}
+
+Normál pure/domain számításhoz a Rust-alakú objektummodellt használd, ne egy második objektumszintaxist találj ki. A visibility explicit, és alapból private:
+
+\begin{lstlisting}[language=Velran]
+pub struct Summary {
+    pub length: i64,
+    hidden: i64,
+}
+
+impl Summary {
+    pub fn new(length: i64) -> Self {
+        return Self { length, hidden: 0 };
+    }
+
+    pub fn length_value(&self) -> i64 {
+        return self.length;
+    }
+}
+
+let summary = Summary::new(42);
+let n = summary.length_value();
+\end{lstlisting}
+
+Az associated function, például \code{Type::new(...)}, illetve az inherent \code{impl}-en belüli \code{Self} ugyanazon verified pure/native lowering útvonalon halad, mint a normál függvény. A publikus metódus-aláírást a compiler rekurzívan visibility-ellenőrzi, ezért privát struct paraméteren vagy visszatérési típuson keresztül sem szivároghat ki, beleértve a beágyazott result/option alakokat is.
+
+A jelenlegi biztonságos surface tudatosan szűkebb a teljes Rustnál: az általános mutable/owned receiver (például \code{\&mut self} vagy fogyasztó \code{self}), a trait impl és a generic impl továbbra is fail-closed, amíg a compiler az ownership/alias szemantikát a transaction, authorization, tenant isolation és idempotency határok gyengítése nélkül nem tudja bizonyítani.
+
+\subsection*{Lokális package-ek és explicit dependencyk}
+
+A workspace lokális, \code{velran.toml}-lal deklarált package-eket használhat. A dependency path-pinnelt, korlátozott és ciklusellenőrzött DAG-ként oldódik fel; a nyelvi package-rétegben nincs registry, Git dependency, build script vagy ambient hálózati feloldás. A közvetlen dependency saját package-névterén keresztül látható, a tranzitív dependency pedig privát marad a deklaráló package számára, kivéve a kifejezetten engedett publikus modul-névtér re-exportot.
+
+\begin{lstlisting}
+[package]
+name = "demo_app"
+kind = "app"
+entry = "main.vrn"
+
+[dependencies]
+textkit = { path = "../libs/textkit" }
+\end{lstlisting}
+
+A library visibility és a webes authority két külön fogalom. A \code{pub} Rust-szerű library API-t tehet elérhetővé, de nem ad route/page/action/query/integration/filesystem/network jogosultságot. A library package-eket továbbra is a compiler-owned capability boundary védi, beleértve a fail-closed library web-authority szabályt.
+
+\subsection*{Rust-szintaxis és framework-owned webes szintaxis}
+
+Hasznos szabály: egy Rust-szerű compute nyelvet tanulj meg, és ehhez csak azokat a webspecifikus kiegészítéseket add hozzá, amelyeket a Velrannak kell birtokolnia. A határ szándékosan látható:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}L{0.30\textwidth}YY@{}}
+\toprule
+Terület & Rust-szerű forma & Velran-owned határ \\
+\midrule
+Függvény és lokális & \code{fn}, \code{let}, \code{let mut}, közvetlen assignment & \callable{page}, \callable{action}, \callable{query} \\
+Érték és kollekció & \code{i64}, \code{f32}, \code{String}, \code{Vec<T>}, \code{Option<T>} & domain type, bounded request type és capability type \\
+Control flow & \code{if}, \code{while}, exhaustív \code{match}, \code{?} & instruction/allocation budget és fail-closed verification \\
+Web/data boundary & normál typed kifejezés & \code{route}, \code{html}, \code{sql}, \code{transaction}, validation/auth/cache policy \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Ez a felosztás nem framework-megkerülés. Rust-szerű szintaxis csak akkor elfogadott, ha a natív lowering közben ugyanaz a verified, bounded webes szemantika megőrizhető.
+
+\subsection*{Statement terminátorok}
+
+A Velranban az egyszerű statementeket explicit pontosvessző zárja. A sortörés whitespace, nem statement-határ; nincs automatikus semicolon insertion. Ez determinisztikussá teszi a többsoros kifejezéseket és egyértelműbbé a generált, illetve auditált kódot.
+
+\begin{lstlisting}[language=Velran]
+let subtotal = price
+    * quantity
+    + shipping;
+let mut retries = 0;
+retries = retries + 1;
+authorize article owner authorUsername or role Publisher;
+return Ok(json(subtotal));
+\end{lstlisting}
+
+A blokkos statementeket és blokkos deklarációkat a kapcsos zárójel zárja, utánuk nincs pontosvessző:
+
+\begin{lstlisting}[language=Velran]
+let mut state = 0;
+if ready {
+    state = 1;
+}
+while state < 3 {
+    state = state + 1;
+}
+\end{lstlisting}
+
+Ugyanez érvényes tranzakción belül is: az önálló mutating query-hívás és a business-audit statement egyszerű statement, ezért \code{;} zárja. A top-level blokkos deklarációk -- például \code{model}, \callable{page}, \callable{action}, \callable{query} -- és a control-flow blokkok után nincs \code{;}. A blokk nélküli top-level deklarációk viszont pontosvesszősök: a \code{mod path;} és a \code{route ... => handler;} is explicit \code{;} terminátort kap. Többsoros route esetén is csak ez a záró terminátor fejezi be a deklarációt.
+
+\section{Typed számítás webalkalmazás-kódban}
+
+\subsection*{Kifejezések és aritmetika}
+
+A Velran explicit operátorprecedenciát használ. Szorosabbtól lazább felé: unáris \code{!}; szorzás, osztás és maradékképzés; összeadás és kivonás; shiftek; összehasonlítások; bitenkénti AND/XOR/OR; logikai AND; logikai OR. Ha javítja az olvashatóságot, használj zárójelet.
+
+\begin{lstlisting}[language=Velran]
+let total = 12 + 3 * 4;
+let remainder = 17 % 5;
+let shifted = 3 << 2;
+let masked = 12 & 10;
+let allowed = ready && authorized;
+let fallback = cached || fresh;
+let denied = !allowed;
+\end{lstlisting}
+
+Az operátorszerződés szigorúan typed:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}l l Y@{}}
+\toprule
+\textbf{Operandusok} & \textbf{Operátorok} & \textbf{Eredmény} \\
+\midrule
+\code{i64}, azonos típus & \code{+ - * / \%} & checked \code{i64}. \\
+\code{f32}, azonos típus & \texttt{+ - * / \%} & \code{f32}; véges eredmény szükséges. \\
+\code{Decimal}, azonos típus & \code{+ - * / \%} & checked \code{Decimal}. \\
+\code{i64}, azonos típus & \code{<< >> \& \^{} |} & shift/bitművelet, \code{i64}. \\
+\code{bool}, azonos típus & \code{\&\& ||} & \code{bool}; short-circuit kiértékelés. \\
+\code{bool} & \code{!} & logikai negáció. \\
+\code{String}, azonos típus & \code{+} & budgetelt String-konkatenáció. \\
+Numerikus, azonos típus & \code{< <= > >=} & \code{bool}. \\
+Támogatott azonos skalártípus & \code{== !=} & \code{bool}. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Nincs implicit keverés \code{i64}, \code{f32} és \code{Decimal} között. Lebegőpontos számításhoz az integert explicit \code{value as f32} hívással alakítsd át. Overflow, nullával osztás/maradékképzés, hibás shift vagy nem véges \code{f32} eredmény fail-closed hibát ad.
+
+A numerikus builtinok:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}l l Y@{}}
+\toprule
+\textbf{Függvény} & \textbf{Típus} & \textbf{Feladat} \\
+\midrule
+\code{x.sin()}, \code{x.cos()} & \code{f32 -> f32} & Trigonometrikus függvények. \\
+\code{x.sqrt()} & \code{f32 -> f32} & Négyzetgyök; hibás tartomány elutasítva. \\
+\code{x.abs()} & \code{i64 -> i64} vagy \code{f32 -> f32} & Abszolútérték. \\
+\code{x.ln()}, \code{x.log10()} & \code{f32 -> f32} & Természetes/tízes alapú logaritmus. \\
+\code{x.log(base)} & \code{f32, f32 -> f32} & Explicit alapú logaritmus. \\
+\code{x.exp()} & \code{f32 -> f32} & Exponenciális függvény. \\
+\code{x.powf(y)} & \code{f32, f32 -> f32} & Lebegőpontos hatványozás. \\
+\code{x.round()/x.floor()/x.ceil()} & \code{f32 -> f32} & Kerekítési műveletek. \\
+\code{x as f32} & \code{i64 -> f32} & Explicit integer--\code{f32} konverzió. \\
+\code{monotonicNanos()} & \code{() -> i64} & Process-lokális monoton nanoszekundum-számláló. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Minden \code{f32} eredménynek végesnek kell maradnia. A \code{(-1.0f32).sqrt()} és \code{(-1.0f32).ln()} jellegű domainhibák NaN/végtelen helyett hibát adnak. A \code{monotonicNanos()} eltelt idő mérésére való, nem falióra-időbélyeg; a tőle függő public-cache kimenetet a compiler elutasítja.
+
+\subsection*{Gyakori webes aritmetikai minták}
+
+Webalkalmazásban ritkán kell mindenhol haladó matematika, néhány numerikus minta viszont folyamatosan visszatér. Ezeket typed értékekkel és látható kóddal kezeld, ne string-konverziókba vagy SQL-részletekbe rejtsd.
+
+Lapozásnál validált integerekből számolj offsetet:
+
+\begin{lstlisting}[language=Velran]
+let pageSize = 25;
+let offset = (page - 1) * pageSize;
+\end{lstlisting}
+
+Integer flag/mask esetén használhatók a bitműveletek, de üzleti feltételekhez az olvasható boolean logika az alap. A \code{&&} és \code{||} short-circuit módon működik:
+
+\begin{lstlisting}[language=Velran]
+let mayPublish = authenticated
+    && ownsArticle
+    && !locked;
+\end{lstlisting}
+
+Pénzhez \code{Decimal}-t használj. \code{f32}-t akkor válassz, ha maga a feladat lebegőpontos: például geometria, jelfeldolgozás, statisztika vagy explicit matematikai függvény. Pénzösszeget ne alakíts \code{f32}-re csak azért, hogy math builtint lehessen rá alkalmazni.
+
+\subsection*{String- és szövegfüggvények}
+
+A string műveletek typed, Unicode-tudatos builtinok a korlátozott runtime-on belül:
+
+\begin{lstlisting}[language=Velran]
+let cleaned = text.trim();
+let left = text.trim_start();
+let right = text.trim_end();
+let normalized = cleaned.to_lowercase();
+let chars = cleaned.chars().count();
+let rewritten = normalized.replace(" ", "-");
+let part = substring(cleaned, 1, 3);
+let first = indexOf(cleaned, "vrn");
+let last = lastIndexOf(cleaned, "a");
+let ch = charAt("Velran", 1);
+let repeated = "vrn".repeat(3);
+let parts = splitBounded(rewritten, "-", 4096);
+\end{lstlisting}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}Y Y@{}}
+\toprule
+\textbf{Függvény} & \textbf{Szignatúra} \\
+\midrule
+\code{text.chars().count()} & \code{String -> i64} \\
+\code{text.trim()/trim\_start()/trim\_end()} & \code{String -> String} \\
+\code{text.to\_lowercase()/to\_uppercase()} & \code{String -> String} \\
+\code{text.contains(needle)} & \code{String, String -> bool} \\
+\code{text.starts\_with(part) / text.ends\_with(part)} & \code{String, String -> bool} \\
+\code{text.replace(search, replacement)} & \code{String, String, String -> String} \\
+\code{splitBounded(text, delimiter, maxItems)} & \code{String, String, i64 -> Vec<String>} \\
+\code{substring(text, start[, length])} & \code{String, i64[, i64] -> String} \\
+\code{indexOf/lastIndexOf(text, needle)} & \code{String, String -> i64} \\
+\code{charAt(text, index)} & \code{String, i64 -> String} \\
+\code{text.repeat(count)} & \code{String, i64 -> String} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+A \code{text.chars().count()}, \code{substring}, \code{indexOf}, \code{lastIndexOf} és \code{charAt} Unicode skalárérték-pozíciókat használ, nem UTF-8 byte indexet. Sikertelen keresésnél \code{-1} az eredmény; negatív vagy érvénytelen index fail-closed hibát ad. A \code{replace} nem enged üres keresőszöveget. A \code{splitBounded} nem enged üres delimitert, compile-time elemszám-korlátot kér a támogatott tartományban, és túllépéskor hibázik a csendes csonkolás helyett. A \code{repeat} az eredmény létrehozása előtt bekerül az allocation budgetbe. A \code{Vec<String>} typed compute collection marad \code{parts.len()} és ellenőrzött \code{parts[index]} használattal.
+
+Korlátozott reguláris kifejezéses feldolgozáshoz elérhető a \code{regexMatch}, \code{regexReplace} és \code{regexCaptures}; ezek továbbra is a validációs és resource limitek alatt futnak.
+
+\subsection*{Gyakori szövegkezelési minták}
+
+A szövegmanipulációt kezeld boundary-feladatként. Keresési és filter inputot érdemes összehasonlítás előtt normalizálni, de az eredeti értéket tartsd meg, ha a domainben számít a pontos írásmód.
+
+\begin{lstlisting}[language=Velran]
+let queryText = q.trim();
+let normalizedQuery = queryText.to_lowercase();
+let hasVelran = normalizedQuery.contains("velran");
+\end{lstlisting}
+
+A \code{replace} determinisztikus helyettesítésre való, nem általános parser helyett:
+
+\begin{lstlisting}[language=Velran]
+let displayTag = tag.trim().replace("_", " ");
+\end{lstlisting}
+
+Szeletelésnél és pozíciókeresésnél a Velran Unicode scalar-value pozíciókat használ UTF-8 byte offset helyett. Így a \code{substring}, \code{charAt} és indexfüggvények alkalmazásszövegnél nem teszik ki a fejlesztőt encoding-részleteknek. Strukturált azonosítóknál -- URL, slug, email, dátum, UUID -- viszont a dedikált Velran típusokat és validátorokat használd, ne string függvényekből építsd újra a szabályokat.
+
+\subsection*{Melyik eszközt válaszd alkalmazáskódban?}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}l Y@{}}
+\toprule
+\textbf{Webfejlesztési feladat} & \textbf{Preferált Velran megoldás} \\
+\midrule
+Keresési/filter szöveg normalizálása & \code{trim}, majd \code{lower}/\code{upper} csak akkor, ha az összehasonlítás case-insensitive. \\
+Ismert token helyettesítése & \code{replace}; regexet csak valódi mintakereséshez használj. \\
+Email, URL, slug, dátum, UUID & Dedikált typed érték és validáció, ne ad-hoc string parsing. \\
+Pénz/összegzés & \code{Decimal}. \\
+Lapozás/számlálók & \code{i64} checked aritmetikával. \\
+Üzleti feltételek & \code{bool} short-circuit \code{&&}, \code{||}, \code{!} operátorokkal. \\
+Tudományos/statisztikai matematika & \code{f32} és explicit math builtin; előbb döntsd el, hogy a lebegőpont valóban illik-e a domainhez. \\
+Eltelt idő mérése & \code{monotonicNanos()}, soha ne falióra-időbélyegként. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{Domainértékek és handlerkód}
+
+\subsection*{Modellek és üzleti típusok}
+
+\begin{lstlisting}[language=Velran]
+model Article {
+    id: i64
+    slug: Slug
+    title: String
+    body: String
+}
+\end{lstlisting}
+
+A gyakori típusok: \code{String}, \code{i64}, \code{bool}, továbbá \code{Date}, \code{DateTime}, \code{Uuid}, \code{Decimal} és \code{Slug}. Pénzhez \code{Decimal}-t használj, ne lebegőpontos számot.
+
+\subsection*{Page és action}
+
+A page GET-szerű megjelenítési logika:
+
+\begin{lstlisting}[language=Velran]
+#[page]
+fn show(ctx: PageContext, db: Db, id: i64)
+    -> Result<Html, PageError> {
+    let article = articleById(db, id)?;
+    return Ok(html { <h1>{{ article.title }}</h1> });
+}
+\end{lstlisting}
+
+Az action állapotváltoztató kérés kezelője:
+
+\begin{lstlisting}[language=Velran]
+#[action]
+fn create(ctx: ActionContext, db: Db, title: String)
+    -> Result<Redirect, PageError> {
+    transaction db {
+        insertArticle(tx, title)?;
+    }
+    return Ok(redirect(adminArticles()));
+}
+\end{lstlisting}
+
+A példa egy \code{adminArticles} nevű GET route-ot feltételez; a redirect cél route call, nem kézzel másolt URL string.
+
+\subsection*{Változók és hibaterjedés}
+
+A \code{let} immutable typed lokális értéket hoz létre. Ha az értéket módosítani kell, Rust-szerű \code{let mut} deklarációt használj, majd normál assignmentet, például \code{count = count + 1} vagy \code{samples[i] = value}. A statikus típus nem változhat, a bounds check és az erőforrás-elszámolás megmarad, a legacy \code{set} szintaxis pedig tiltott. A \code{?} a typed \code{Result} hibáját továbbítja.
+
+\subsection*{Enum és exhaustive match}
+
+Zárt választási halmazhoz ne szabad szöveget használj, hanem enumot. Ez form-, route-, JSON- és domain-contractként is erősebb. Az enum egyben zárt sum type: ha a vezérlés varianttól függ, használj exhaustive \code{match}-et.
+
+\begin{lstlisting}[language=Velran]
+enum PublishState {
+    Draft
+    Review
+    Published
+}
+
+match state {
+    Draft => { return Ok(json("draft")); }
+    Review => { return Ok(json("review")); }
+    Published => { return Ok(json("published")); }
+}
+\end{lstlisting}
+
+Ennél a security-releváns formánál nincs wildcard fallthrough. Ha új variant kerül a típusba, a régi match-ek addig nem fordulnak le, amíg az új állapot nincs explicit kezelve. A tranzakciós fejezet ugyanezt használja a \code{CommitUnknown} esetén.
+
+\subsection*{Object}
+
+Összetartozó model/query/page műveletek domain object alatt csoportosíthatók. Ez különösen nagyobb alkalmazásban segít a domain API körülhatárolásában.
+
+
+\section{HTTP- és prezentációs határ}
+
+\subsection*{Route}
+
+\begin{lstlisting}[language=Velran]
+route article GET "/cikk/:slug<Slug>" public => article;
+\end{lstlisting}
+
+A path paraméter típusa a route-ban deklarált. Hibás input nem jut el a handlerig typed értékként.
+
+\subsection*{HTML escape}
+
+\begin{lstlisting}[language=Velran]
+return Ok(html {
+    <h1>{{ article.title }}</h1>
+});
+\end{lstlisting}
+
+A \code{{ ... }} HTML-escaped. Adatbázisból érkező string sem kivétel. Raw HTML API nincs.
+
+\subsection*{Lista és optional érték}
+
+A listát iterálni kell, az optional modelt pedig explicit jelenlétvizsgálat után lehet mezőzni. A compiler nem engedi, hogy \code{Vec<Model>} vagy ellenőrizetlen \code{Option<Model>} úgy viselkedjen, mintha egyetlen rekord lenne.
+
+\begin{lstlisting}[language=Velran]
+@for article in articles {
+    <li>{{ article.title }}</li>
+}
+
+@if article {
+    <h1>{{ article.title }}</h1>
+}
+\end{lstlisting}
+
+A query-cardinality pontos futásidejű szerződését -- például hogy a \code{Option<Model>} több sor esetén hibát jelent -- az adatbázis-fejezet tárgyalja.
+
+\subsection*{Typed URL}
+
+\begin{lstlisting}[language=Velran]
+<a @href(article, article.slug)>Megnyitas</a>
+<form method="post" @action(deleteArticle, article.id)>
+\end{lstlisting}
+
+\subsection*{Preferáld a route helpereket}
+
+Saját alkalmazás-route-ok URL-jét ne másold kézzel több helyre. HTML-ben POST formhoz az \code{@action(...)} és linkhez az \code{@href(...)} a preferált minta, mert a route neve és typed paraméterei maradnak a kapcsolat forrásai. A beépített runtime endpointok -- például a \code{/__velran/auth/logout} -- természetesen nem alkalmazás-route helperek.
+
+
+Ne építs dinamikus \code{href="{{ value }}"} linket. A route helper ismeri a célt és a paramétertípust.
+
+\subsection*{Component és layout}
+
+\begin{lstlisting}[language=Velran]
+#[layout]
+fn Main(title: String) -> Html {
+    html {
+        <html>
+            <head><title>{{ title }}</title></head>
+            <body><main>@content</main></body>
+        </html>
+    }
+}
+\end{lstlisting}
+
+Page-ben:
+
+\begin{lstlisting}[language=Velran]
+return Ok(html {
+    @layout(Main, article.title) {
+        <article><h1>{{ article.title }}</h1></article>
+    }
+});
+\end{lstlisting}
+
+A layout pontosan egy \code{@content} slotot tartalmazhat; component/layout csak explicit typed paramétereket lát.
+
+\section{Gyakorlat: döntsd el, kié a szintaxis}
+\paragraph{Gyakorlási mód: vezetett.} Használd az előszóban meghatározott vezetett módszert.
+
+Nézz meg egy page-et, actiont, query-t, route-ot, komponenst és egy hétköznapi kifejezést. Mindegyiknél döntsd el, hogy normál Rust-szerű szintaxisról vagy Velran framework által birtokolt webes határról van-e szó. Ez segít új szintaxis kitalálása helyett helyesen következtetni: ahol lehet, Rust-szerű alakot várj; külön forma főleg security-, HTTP-, resource- vagy framework-contractnál indokolt.
+
+\section{Tipikus hiba: kényelmi szintaxist találunk ki}
+Ne feltételezz dokumentálatlan aliasokat, legacy callable alakokat vagy egyedi collection-típusneveket. A nyelv szándékosan közelít a Rust szintaxisához, és csak azokat a framework konstrukciókat tartja meg, amelyek a webes határokat explicitté és ellenőrizhetővé teszik.
+
+\section{Folyamatos mintaprojekt: Secure Notes}
+Definiáld a jegyzetlista page-et és a létrehozó actiont az aktuális callable attribútumokkal, típusos route inputokkal és explicit access policy-val. Az üzleti adat maradjon típusos érték, ne handlerek között továbbadott strukturálatlan string.

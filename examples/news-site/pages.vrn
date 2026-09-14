@@ -1,0 +1,28 @@
+#[page]
+fn article(ctx: PageContext, db: Db, slug: Slug) -> Result<Html, PageError> {
+    let article = queries::articleBySlug(db, slug)?;
+    return Ok(html {
+        @layout(components::Main, article.title) {
+            <article>
+                <h1>{{ article.title }}</h1>
+                @markdown(article.body)
+            </article>
+        }
+    });
+}
+
+route article GET "/cikk/:slug<Slug>" public cache public ttl 60 => pages::article;
+
+#[page]
+fn adminArticles(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {
+        @layout(components::Main, "Articles") {
+            <section>
+                <h1>Articles</h1>
+                <p>The article was saved.</p>
+            </section>
+        }
+    });
+}
+
+route adminArticles GET "/admin/articles" auth role Editor => pages::adminArticles;

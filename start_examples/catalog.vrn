@@ -1,0 +1,64 @@
+// === Calculation ===
+// http://<server>:<port>/catalog?tax=27
+
+#[page]
+fn product_form(
+    ctx: PageContext,
+    tax: i64
+) -> Result<Html, PageError> {
+    return Ok(html {
+        <h1>Termék kalkulátor</h1>
+
+        <form method="post" @action(calculate_product)>
+            <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+
+            <label>
+                Termék neve:
+                <input type="text" name="name">
+            </label>
+
+            <label>
+                Nettó ár:
+                <input type="number" name="price">
+            </label>
+
+            <label>
+                Darabszám:
+                <input type="number" name="quantity">
+            </label>
+
+            <input type="hidden" name="tax" value="{{ tax }}">
+
+            <button type="submit">Számolás</button>
+        </form>
+
+        <p>ÁFA: {{ tax }}%</p>
+    });
+}
+
+#[action]
+fn calculate_product(
+    ctx: ActionContext,
+    name: String,
+    price: i64,
+    quantity: i64,
+    tax: i64
+) -> Result<Json, PageError> {
+    let net_total = price * quantity;
+    let tax_value = net_total * tax / 100;
+    let gross_total = net_total + tax_value;
+
+    return Ok(json(gross_total));
+}
+
+route product_form GET "/catalog"
+    query tax<i64>
+    validate tax range 0 100
+    public => product_form;
+
+route calculate_product POST "/catalog/calculate"
+    form name<String> price<i64> quantity<i64> tax<i64>
+    validate price range 0 100000000
+             quantity range 1 100000
+             tax range 0 100
+    public => calculate_product;

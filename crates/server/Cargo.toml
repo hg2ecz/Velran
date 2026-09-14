@@ -1,0 +1,42 @@
+[package]
+name = "velran-server"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+authors = ["Zsolt Krüpl"]
+
+[features]
+default = ["db-sqlite", "db-postgres", "db-mysql", "redis", "ldap"]
+db-sqlite = ["data/db-sqlite"]
+db-postgres = ["data/db-postgres"]
+db-mysql = ["data/db-mysql"]
+redis = ["data/redis", "auth/redis"]
+ldap = ["auth/ldap"]
+
+[dependencies]
+runtime-abi = { path = "../runtime-abi" }
+native-runtime = { path = "../native-runtime" }
+auth = { path = "../auth", default-features = false }
+compiler = { path = "../compiler" }
+data = { path = "../data", default-features = false }
+language-core = { path = "../language-core" }
+runtime = { path = "../runtime", default-features = false }
+storage = { path = "../storage" }
+observability = { path = "../observability" }
+integrations = { path = "../integrations" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "time", "signal", "sync"] }
+
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+tokio-rustls = { workspace = true }
+
+ipnet = { workspace = true }
+
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+sha2 = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }

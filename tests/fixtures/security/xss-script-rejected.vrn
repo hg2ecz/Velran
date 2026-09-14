@@ -1,0 +1,6 @@
+#[page]
+fn home(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html { <script>alert(1)</script> });
+}
+
+route home GET "/" public => home;

@@ -1,0 +1,22 @@
+struct Summary {
+    length: i64,
+}
+
+fn makeSummary() -> Summary {
+    return Summary { length: 7 };
+}
+
+impl Summary {
+    fn length_value(&self) -> i64 {
+        return self.length;
+    }
+}
+
+#[page]
+fn home(ctx: PageContext) -> Result<Html, PageError> {
+    let summary = makeSummary();
+    let length = summary.length_value();
+    return Ok(html {<p>{{ length }}</p>});
+}
+
+route home GET "/" public => home;

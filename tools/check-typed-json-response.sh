@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+fail(){ echo "typed-json-response: $*" >&2; exit 1; }
+
+grep -Fq 'pub const RUNTIME_ABI_VERSION: u32 = 10;' crates/runtime-abi/src/lib.rs || fail 'runtime ABI must be v10'
+grep -Fq 'pub const VALUE_TYPED_JSON: u32 = 4;' crates/runtime-abi/src/lib.rs || fail 'typed JSON ABI value tag missing'
+grep -Fq 'rust-aot-50-release-stabilization' crates/compiler/src/codegen/mod.rs || fail 'codegen cache version missing'
+grep -Fq 'pub const EXECUTABLE_IR_VERSION: u16 = 25;' crates/executable-ir/src/model.rs || fail 'EIR v16 missing'
+grep -Fq 'velran-15-formal-effects' crates/language-core/src/artifact_versions.rs || fail 'language version missing'
+grep -Fq 'ReturnTypedJson' crates/language-core/src/ast.rs || fail 'typed JSON AST missing'
+grep -Fq 'NativeJsonFieldType' crates/executable-ir/src/native_scalar.rs || fail 'typed JSON native field types missing'
+grep -Fq 'typed_json_begin' crates/compiler/src/codegen/emit.rs || fail 'typed frame writer missing'
+grep -Fq 'finish_typed_json' crates/compiler/src/codegen/emit.rs || fail 'typed frame finish missing'
+grep -Fq 'decode_and_serialize' crates/server/src/typed_json_response.rs || fail 'framework decoder/serializer missing'
+grep -Fq 'MAX_FIELDS: usize = 1024' crates/server/src/typed_json_response.rs || fail 'field bound missing'
+grep -Fq 'MAX_STRING_BYTES: usize = 65_536' crates/server/src/typed_json_response.rs || fail 'string bound missing'
+grep -Fq 'MAX_ARRAY_ITEMS: usize = 4096' crates/server/src/typed_json_response.rs || fail 'array bound missing'
+grep -Fq 'v.is_finite()' crates/compiler/src/codegen/emit.rs || fail 'generated f32 finite check missing'
+grep -Fq 'value.is_finite()' crates/server/src/typed_json_response.rs || fail 'runtime f32 finite recheck missing'
+grep -Fq '!names.insert' crates/server/src/typed_json_response.rs || fail 'duplicate field rejection missing'
+grep -Fq 'BoundedWriter' crates/server/src/typed_json_response.rs || fail 'bounded framework serializer missing'
+! grep -R -q 'serde_json' crates/compiler/src/codegen crates/executable-ir/src || fail 'generated/compiler-native path must not depend on serde_json'
+grep -Fq 'Result<Json<EchoOutput>, PageError>' examples/json-typed-response/app.vrn || fail 'typed response example missing'
+grep -Fq 'Ok(Json(EchoOutput {' examples/json-typed-response/app.vrn || fail 'Rust-like struct response syntax missing'
+grep -Fq 'mod typed_json_response_tests;' crates/compiler/src/tests.rs || fail 'compiler regression tests missing'
+echo 'typed Json<T> response boundary verification passed'

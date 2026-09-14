@@ -1,0 +1,7 @@
+#[action]
+fn saveDemo(ctx: ActionContext) -> Result<Redirect, PageError> {
+    flash success "Saved";
+    return Ok(redirect(home()));
+}
+
+route saveDemo POST "/demo/save" public => actions::saveDemo;

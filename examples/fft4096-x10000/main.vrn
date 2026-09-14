@@ -1,0 +1,160 @@
+#[inline(never)]
+fn fft4096(real: &mut [f32; 4096], imag: &mut [f32; 4096]) {
+    let n = 4096;
+
+    // In-place bit-reversal permutation.
+    let mut i = 1;
+    let mut j = 0;
+    while i < n {
+        let mut bit = n / 2;
+        while j >= bit {
+            j -= bit;
+            bit /= 2;
+        }
+        j += bit;
+        if i < j {
+            let tr = real[i];
+            let ti = imag[i];
+            real[i] = real[j];
+            imag[i] = imag[j];
+            real[j] = tr;
+            imag[j] = ti;
+        }
+        i += 1;
+    }
+
+    // Iterative radix-2 Cooley-Tukey FFT.
+    let mut span = 2;
+    while span <= n {
+        let angle = -6.283185307179586f32 / span as f32;
+        let step_r = angle.cos();
+        let step_i = angle.sin();
+        let half = span / 2;
+
+        i = 0;
+        while i < n {
+            let mut wr = 1.0f32;
+            let mut wi = 0.0f32;
+            j = 0;
+            while j < half {
+                let even = i + j;
+                let odd = even + half;
+
+                let vr = real[odd] * wr - imag[odd] * wi;
+                let vi = real[odd] * wi + imag[odd] * wr;
+                let ur = real[even];
+                let ui = imag[even];
+
+                real[even] = ur + vr;
+                imag[even] = ui + vi;
+                real[odd] = ur - vr;
+                imag[odd] = ui - vi;
+
+                let next_wr = wr * step_r - wi * step_i;
+                let next_wi = wr * step_i + wi * step_r;
+                wr = next_wr;
+                wi = next_wi;
+                j += 1;
+            }
+            i += span;
+        }
+        span *= 2;
+    }
+}
+
+#[page]
+fn fft4096_x10000(ctx: PageContext) -> Result<Html, PageError> {
+    let n = 4096;
+    let runs = 10000;
+
+    let mut base_real = vec![0.0f32; 4096];
+    let mut base_imag = vec![0.0f32; 4096];
+    let mut real = vec![0.0f32; 4096];
+    let mut imag = vec![0.0f32; 4096];
+
+    let mut i = 0;
+    while i < n {
+        let sample = i as f32;
+        let size = n as f32;
+        let a64 = 6.283185307179586f32 * 64.0f32 * sample / size;
+        let a256 = 6.283185307179586f32 * 256.0f32 * sample / size;
+        base_real[i] = a64.sin() + 0.5f32 * a256.sin();
+        base_imag[i] = 0.0f32;
+        i += 1;
+    }
+
+    let batch_started = std::time::Instant::now();
+    let mut total_fft_ns = 0;
+    let mut min_fft_ns = 0;
+    let mut max_fft_ns = 0;
+    let mut checksum = 0.0f32;
+    let mut run = 0;
+
+    while run < runs {
+        // Reset outside the measured FFT function call.
+        i = 0;
+        while i < n {
+            real[i] = base_real[i];
+            imag[i] = base_imag[i];
+            i += 1;
+        }
+
+        // Keep each transform semantically distinct. This is outside the timer.
+        real[0] = base_real[0] + run as f32 * 0.0000001f32;
+
+        let started = std::time::Instant::now();
+        fft4096(&mut real, &mut imag);
+        let fft_ns = started.elapsed().as_nanos();
+
+        // Consume every result after timing so repeated calls stay observable.
+        checksum += real[64];
+        checksum += imag[64];
+        checksum += real[256];
+        checksum += imag[256];
+
+        total_fft_ns += fft_ns;
+        if run == 0 || fft_ns < min_fft_ns {
+            min_fft_ns = fft_ns;
+        }
+        if fft_ns > max_fft_ns {
+            max_fft_ns = fft_ns;
+        }
+        run += 1;
+    }
+
+    let batch_elapsed_ns = batch_started.elapsed().as_nanos();
+    let average_fft_ns = total_fft_ns / runs;
+
+    let peak64 = (real[64] * real[64] + imag[64] * imag[64]).sqrt();
+    let peak256 = (real[256] * real[256] + imag[256] * imag[256]).sqrt();
+    let mut correct = true;
+    if peak64 < 1900.0f32 {
+        correct = false;
+    }
+    if peak64 > 2200.0f32 {
+        correct = false;
+    }
+    if peak256 < 900.0f32 {
+        correct = false;
+    }
+    if peak256 > 1150.0f32 {
+        correct = false;
+    }
+
+    Ok(html {
+        <h1>Velran F32 FFT4096 x 10000 function-call benchmark</h1>
+        <p>FFT size: 4096</p>
+        <p>Runs: {{ runs }}</p>
+        <p>Summed FFT-only elapsed: {{ total_fft_ns }} ns</p>
+        <p>Average FFT elapsed: {{ average_fft_ns }} ns</p>
+        <p>Minimum FFT elapsed: {{ min_fft_ns }} ns</p>
+        <p>Maximum FFT elapsed: {{ max_fft_ns }} ns</p>
+        <p>Anti-optimization checksum: {{ checksum }}</p>
+        <p>Whole benchmark wall time including buffer reset: {{ batch_elapsed_ns }} ns</p>
+        <p>bin 64 magnitude: {{ peak64 }}</p>
+        <p>bin 256 magnitude: {{ peak256 }}</p>
+        <p>correctness window passed: {{ correct }}</p>
+    })
+}
+
+route fft4096_x10000 GET "/fft4096-x10000" public => fft4096_x10000;

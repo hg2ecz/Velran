@@ -1,0 +1,16 @@
+permission UserAdmin {
+    role Admin
+    role SecurityAdmin
+}
+
+#[action]
+fn removeUser(
+    ctx: ActionContext,
+    id: i64
+) -> Result<Json, PageError> requires UserAdmin {
+    return Ok(json(true));
+}
+
+route removeUser POST "/users/:id<i64>/remove"
+    auth permission UserAdmin
+    => removeUser;

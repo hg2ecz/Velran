@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+fail() { echo "native nominal input check: $*" >&2; exit 1; }
+
+grep -q 'pub const RUNTIME_ABI_VERSION: u32 = 10;' crates/runtime-abi/src/lib.rs || fail 'ABI v10 nominal input contract missing'
+grep -q 'Email(&' crates/runtime-abi/src/input.rs || fail 'Email host tag missing'
+grep -q 'Url(&' crates/runtime-abi/src/input.rs || fail 'Url host tag missing'
+grep -q 'Slug(&' crates/runtime-abi/src/input.rs || fail 'Slug host tag missing'
+grep -q 'DomainInt' crates/runtime-abi/src/input.rs || fail 'domain int host tag missing'
+grep -q 'DomainString' crates/runtime-abi/src/input.rs || fail 'domain string host tag missing'
+grep -q 'NativeInputType::Email' crates/executable-ir/src/native_scalar.rs || fail 'Email EIR type missing'
+grep -q 'NativeInputType::Url' crates/executable-ir/src/native_scalar.rs || fail 'Url EIR type missing'
+grep -q 'NativeInputType::Slug' crates/executable-ir/src/native_scalar.rs || fail 'Slug EIR type missing'
+grep -q 'DomainInt { domain' crates/executable-ir/src/native_scalar.rs || fail 'domain constraint EIR missing'
+grep -q 'ValidationKind::Range' crates/executable-ir/src/native_input.rs || fail 'native domain range policy missing'
+grep -q 'ValidationKind::Length' crates/executable-ir/src/native_input.rs || fail 'native domain length policy missing'
+grep -q 'Pattern' crates/executable-ir/src/native_input.rs || fail 'unsupported-domain rejection test missing'
+grep -q 'crate::domain_values::validate(program, id, value)' crates/runtime/src/request_binding.rs || fail 'route domain constraints are not enforced before native dispatch'
+grep -q 'canonical_email' crates/native-build/src/rustc_backend/abi_input_validation.rs || fail 'Email canonical boundary validation missing'
+grep -q 'canonical_slug' crates/native-build/src/rustc_backend/abi_input_validation.rs || fail 'Slug canonical boundary validation missing'
+grep -q "pub enum InputValue<'a>" crates/compiler/src/codegen/emit.rs || fail 'generated InputValue enum missing'
+grep -q "Email(&'a str)" crates/compiler/src/codegen/emit.rs || fail 'generated Email input variant missing'
+grep -q "Url(&'a str)" crates/compiler/src/codegen/emit.rs || fail 'generated Url input variant missing'
+grep -q "Slug(&'a str)" crates/compiler/src/codegen/emit.rs || fail 'generated Slug input variant missing'
+grep -q 'DomainInt(u16, i64)' crates/compiler/src/codegen/emit.rs || fail 'generated DomainInt input variant missing'
+grep -q 'DomainBool(u16, bool)' crates/compiler/src/codegen/emit.rs || fail 'generated DomainBool input variant missing'
+grep -q "DomainString(u16, &'a str)" crates/compiler/src/codegen/emit.rs || fail 'generated DomainString input variant missing'
+grep -q 'VELRAN_STATUS_MEMORY_EXCEEDED, VELRAN_STATUS_OK, VELRAN_STATUS_OUTPUT_TOO_SMALL' crates/compiler/src/codegen/emit.rs || fail 'generated support module status imports missing'
+grep -q 'input_domain_int' crates/compiler/src/codegen/emit.rs || fail 'generated domain range revalidation missing'
+grep -q 'input_domain_string' crates/compiler/src/codegen/emit.rs || fail 'generated domain length revalidation missing'
+! grep -R -n 'unsafe ' crates/compiler/src/codegen crates/executable-ir/src/native_input.rs crates/executable-ir/src/native_scalar.rs >/dev/null || fail 'unsafe escaped into verified nominal input path'
+
+printf '%s\n' 'native nominal/domain input verification passed'

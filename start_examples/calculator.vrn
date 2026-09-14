@@ -1,0 +1,41 @@
+// === Calculator ===
+// http://<server>:<port>/calculator?a=12&b=5
+
+#[page]
+fn calculator(
+    ctx: PageContext,
+    a: i64,
+    b: i64
+) -> Result<Html, PageError> {
+    let sum = a + b;
+    let difference = a - b;
+    let product = a * b;
+
+    return Ok(html {
+        <h1>Egyszerű számológép</h1>
+
+        <form method="get" action="/calculator">
+            <label>
+                A:
+                <input name="a" value="{{ a }}">
+            </label>
+
+            <label>
+                B:
+                <input name="b" value="{{ b }}">
+            </label>
+
+            <button type="submit">Számolás</button>
+        </form>
+
+        <h2>Eredmény</h2>
+
+        <ul>
+            <li>Összeg: {{ sum }}</li>
+            <li>Különbség: {{ difference }}</li>
+            <li>Szorzat: {{ product }}</li>
+        </ul>
+    });
+}
+
+route calculator GET "/calculator" query a<i64> b<i64> public => calculator;

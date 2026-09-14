@@ -1,0 +1,405 @@
+\chapter{Autentikáció, session és jogosultságkezelés}
+
+\noindent\textbf{Tanulási út: Gyors út: alap.} Válaszd külön az autentikációt, route policyt és objektumszintű authorizationt.\par\medskip
+
+\rustbridgeblockhu{Az enumok, typed azonosítók, \code{Result}, elágazások és normál domain predikátumok továbbra is alkalmasak policylogikára.}{A framework trusted principalt, route-szintű auth policyt és explicit authorization határt ad a védett objektumokhoz/effectekhez.}{Ne cseréld le a domain rule-okat framework-szókincsre. Az authentication identitást ad; a typed business rule továbbra is authorityt dönt, a Velran pedig azt kényszeríti ki, hol kell ennek bizonyítva lennie.}
+
+
+\invariantblock{Biztonsági invariáns: az identitás nem jogosultság}{Az authentication azt állapítja meg, ki a hívó. Az authorization azt, hogy ez a hívó elvégezheti-e ezt a műveletet ezen az objektumon. Az authorization a protected read vagy mutation előtt fejeződjön be.}
+
+\diagnosticblockhu{Verifier diagnostic}{SEC-A01-022}{A route identitása authenticated, de a role/permission proof nem elégíti ki a handler követelményét.}{Erősítsd a route policyt, vagy csak akkor módosítsd a handler követelményét, ha azt az üzleti authorization contract valóban megengedi.}
+
+Az authentication identitást bizonyít; az authorization azt dönti el, mit tehet a hívó. A session a trusted identityt viszi tovább a kérések között. A Velranban az alkalmazás route-policyja \code{.vrn}-ban, az identity- és session-policy pedig szerverkonfigurációban marad.
+
+\section{Hol helyezkedik el az authentication és authorization az életciklusban?}
+
+A request-életciklus segít különválasztani az identity és az objektum-authority kérdéseket:
+
+\begin{lstlisting}
+request
+  -> parse / validate
+  -> authenticate: who is calling?
+  -> authorize: may caller act on this object?
+  -> query / transaction
+  -> response
+\end{lstlisting}
+
+A route policy a széles belépési kérdést válaszolja meg. Object-, tenant-, permission-, MFA- vagy critical-operation ellenőrzés ezt tovább szűkítheti: authenticated azt jelenti, hogy van trusted principal, nem azt, hogy a művelet engedélyezett.
+
+A login authenticationt hoz létre: credential form és CSRF ellenőrzés, identity backend, session rotation, audit, redirect. A credential-policy az identity backend felelőssége, nem az objektumszintű authorizationé.
+
+\section{A teljes login útvonal}
+
+A beépített HTML login endpoint:
+
+\begin{lstlisting}
+GET  /__velran/auth/login
+POST /__velran/auth/login
+POST /__velran/auth/logout
+\end{lstlisting}
+
+Ezek szerver-endpointok, nem az alkalmazás által definiált route-ok. A GET login oldal egy sessionhöz kötött CSRF tokent ad. A POST login form pontosan a \code{_csrf}, \code{username}, \code{password} és \code{totp} mezőket várja.
+
+A sikeres login magas szinten:
+
+\begin{enumerate}
+  \item ellenőrzi a form szerkezetét és a CSRF tokent;
+  \item kanonizálja a felhasználónevet;
+  \item alkalmazza a login rate limitet;
+  \item ellenőrzi a local-auth vagy LDAP credentialt;
+  \item ha szükséges, ellenőrzi a TOTP-t vagy local auth esetén a recovery kódot;
+  \item új, autentikált sessionre rotál;
+  \item audit eseményt ír;
+  \item \code{303 See Other} válasszal a gyökérre irányít.
+\end{enumerate}
+
+A session rotation fontos: sikeres autentikáció után nem marad használatban az anonim session azonosítója. Ez session-fixation elleni alapvédelmi elem.
+
+\section{Local auth: külön identity adatbázis}
+
+Single-node alkalmazásnál használható a local auth SQLite store. Ez szándékosan nem az application DB. A Velran program typed SQL queryjei így nem férnek hozzá a credential táblákhoz.
+
+Secret file például:
+
+\begin{lstlisting}
+/run/secrets/velran/local-auth-db-url
+\end{lstlisting}
+
+Tartalma:
+
+\begin{lstlisting}
+sqlite:///srv/velran/auth/users.db?mode=rwc
+\end{lstlisting}
+
+Inicializálás:
+
+\begin{lstlisting}[language=bash]
+/usr/local/bin/velran-cli auth init \
+  --db-url-file /run/secrets/velran/local-auth-db-url
+\end{lstlisting}
+
+User létrehozásnál a jelszó nem CLI argumentumként szerepel, hanem fájlból olvasódik:
+
+\begin{lstlisting}[language=bash]
+printf '%s\n' 'a-very-long-random-password' \
+  > /run/secrets/velran/new-user-password
+chmod 600 /run/secrets/velran/new-user-password
+
+/usr/local/bin/velran-cli auth user-add \
+  --db-url-file /run/secrets/velran/local-auth-db-url \
+  --username alice \
+  --password-file /run/secrets/velran/new-user-password \
+  --role User \
+  --role Editor
+\end{lstlisting}
+
+A local store Argon2id jelszóhash-t használ, egyedi random salttal. A jelenlegi implementáció legalább 12 és legfeljebb 1024 karakteres jelszót fogad el. Ezt ne keverd össze alkalmazásoldali form-validációval: a credential-policy az identity backend felelőssége.
+
+\section{Account lifecycle operátori CLI-val}
+
+A felhasználó állapotát nem kell közvetlen SQL-lel módosítani. A CLI erre explicit műveleteket ad:
+
+\begin{lstlisting}[language=bash]
+velran-cli auth password-set --db-url-file ... \
+  --username alice --password-file ...
+
+velran-cli auth disable   --db-url-file ... --username alice
+velran-cli auth enable    --db-url-file ... --username alice
+velran-cli auth roles-set --db-url-file ... --username alice \
+  --role User --role Publisher
+\end{lstlisting}
+
+A disable nem törli a usert. Kívülről a sikertelen belépés nem árulja el, hogy rossz jelszó, nem létező user vagy tiltott account áll-e a háttérben: az ilyen különbségek account-enumeration csatornát nyithatnának.
+
+\section{Session invalidation: auth\_generation}
+
+Local auth esetén credential- vagy authorization-változás növeli az \code{auth_generation} értékét. A session a létrehozáskori generációt tárolja; eltérésnél a régi session érvénytelen és új anonim session készül.
+
+Ezért például az alábbi operátori műveletek nem csak a következő loginra hatnak:
+
+\begin{itemize}
+  \item password change;
+  \item role change;
+  \item account disable/enable;
+  \item TOTP enrollment vagy disable.
+\end{itemize}
+
+Ez különösen fontos role-visszavonásnál: nem kell megvárni a korábbi session természetes lejáratát.
+
+\section{Session store: memory vagy Redis}
+
+Development/test környezetben használható in-memory session store. Productionban, különösen több server instance esetén, Redis legyen a shared session backend.
+
+\begin{lstlisting}
+[redis]
+url_file = "/run/secrets/velran/redis-url"
+allow_insecure = false
+\end{lstlisting}
+
+Redis a Velranban több rövid életű infrastruktúra-állapotot is hordozhat:
+
+\begin{itemize}
+  \item shared session;
+  \item TOTP replay védelem;
+  \item login rate limiting;
+  \item public cache.
+\end{itemize}
+
+Redis nem üzleti source of truth. Disaster recovery után elfogadható az üres session/cache state: a felhasználók újra belépnek, a cache újraépül.
+
+\section{Cookie policy}
+
+Normál production módban a session cookie neve:
+
+\begin{lstlisting}
+__Host-velran_session
+\end{lstlisting}
+
+A szerver \code{Path=/}, \code{HttpOnly}, \code{Secure} attribútumokat használ. Alapesetben \code{SameSite=Lax}; credentialed cross-origin konfiguráció esetén \code{SameSite=None; Secure}.
+
+Developmentben az explicit \code{--insecure-dev-cookies} escape hatch miatt a cookie neve \code{velran_session}, és nincs \code{Secure}. Ezt internetre kitett production deploymentben ne használd.
+
+\section{Logout}
+
+A logout szándékosan POST művelet:
+
+\begin{lstlisting}[language=Velran]
+<form method="post" action="/__velran/auth/logout">
+    <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+    <button type="submit">Logout</button>
+</form>
+\end{lstlisting}
+
+A szerver ellenőrzi a CSRF tokent, invalidálja a régi sessiont, létrehoz egy friss anonim sessiont, új cookie-t küld, majd auditálja a logout eseményt. Így a kijelentkezés nem egyszerű kliensoldali cookie-törlés.
+
+\section{LDAP / LDAPS vállalati identityhez}
+
+Shared vagy vállalati identity esetén használható LDAP backend. Productionban LDAPS URL-t használj, a service bind credential pedig secret file-ból jöjjön.
+
+Példa konfiguráció:
+
+\begin{lstlisting}
+[auth]
+ldap_url = "ldaps://ldap.example.com:636"
+ldap_search_base = "ou=people,dc=example,dc=com"
+ldap_username_attribute = "uid"
+ldap_service_bind_dn_file = "/run/secrets/velran/ldap-bind-dn"
+ldap_service_bind_password_file = "/run/secrets/velran/ldap-bind-password"
+require_totp = true
+\end{lstlisting}
+
+Local auth és LDAP ne legyen egyszerre elsődleges identity backend ugyanabban a processben. Ezzel nincs bizonytalan backend-prioritás vagy azonos username-ek közötti névütközés.
+
+LDAP használatakor a role mapping trusted szerveroldali konfigurációból jöjjön. A kliens által küldött \code{role}, \code{username} vagy hasonló mező soha nem authorization authority.
+
+\section{TOTP és recovery code}
+
+Local auth userhez TOTP enrollment:
+
+\begin{lstlisting}[language=bash]
+/usr/local/bin/velran-cli auth totp-enroll \
+  --db-url-file /run/secrets/velran/local-auth-db-url \
+  --username alice
+\end{lstlisting}
+
+A CLI megadja az enrollmenthez szükséges secret/URI adatot és recovery kódokat. A recovery kódok a local auth DB-ben csak hashként maradnak meg, és egy sikeresen felhasznált recovery kód elfogy.
+
+TOTP kikapcsolása:
+
+\begin{lstlisting}[language=bash]
+/usr/local/bin/velran-cli auth totp-disable \
+  --db-url-file /run/secrets/velran/local-auth-db-url \
+  --username alice
+\end{lstlisting}
+
+Ha \code{require_totp = true}, az a user sem léphet be, akinek egyébként helyes a jelszava, de nincs használható második faktora.
+
+A login form \code{totp} mezőjébe hatjegyű TOTP vagy local auth esetén recovery code kerülhet. Redis backend mellett a TOTP replay állapot shared, ezért több server instance is ugyanazt a replay-védelmet látja.
+
+\section{Route authorization}
+
+Az alkalmazás route szinten három gyakori policyt deklarálhat:
+
+\begin{lstlisting}[language=Velran]
+route account GET "/account" auth user => account;
+route admin GET "/admin" auth role Admin => admin;
+route security GET "/security" auth mfa => security;
+\end{lstlisting}
+
+Jelentésük:
+
+\begin{itemize}
+  \item \code{auth user}: bármely autentikált principal;
+  \item \code{auth role Admin}: autentikált principal a trusted sessionben szereplő \code{Admin} role-lal;
+  \item \code{auth mfa}: autentikált principal sikeresen igazolt második faktorral.
+\end{itemize}
+
+HTML route-nál a nem autentikált kérés a login oldalra irányítható. JSON API-nál ugyanez nem HTML redirectként jelenik meg, hanem \code{401 Unauthorized} válaszként; ez API kliensnél kiszámíthatóbb viselkedés.
+
+\section{A principal használata az oldalon}
+
+Az autholt oldal trusted sessionadatot kap:
+
+\begin{lstlisting}[language=Velran]
+#[page]
+fn account(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {
+        <main>
+            <h1>Account</h1>
+            <p>Signed in as {{ authPrincipal }}</p>
+            <form method="post" action="/__velran/auth/logout">
+                <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+                <button type="submit">Logout</button>
+            </form>
+        </main>
+    });
+}
+
+route account GET "/account" auth user => account;
+\end{lstlisting}
+
+A \code{authPrincipal}, a session role-jai és az MFA állapot szerveroldali trusted state. Ne próbáld ezeket hidden form mezőből vagy query parameterből visszaépíteni.
+
+\section{Route role nem mindig elég}
+
+A route-level role azt mondja meg, hogy a felhasználó beléphet-e egy műveletbe. Objektumszintű authorizationnál ennél több kellhet.
+
+Példa: egy szerkesztő csak a saját draftját módosíthatja. Ilyenkor nem elég az, hogy \code{auth role Editor}: az actionnek a DB-ből olvasott objektum tulajdonosát is össze kell vetnie a trusted session principaljával.
+
+Az alapelv:
+
+\begin{center}
+\textbf{identity a sessionből, objektumállapot a DB-ből, döntés szerveroldalon}
+\end{center}
+
+A kliens által küldött \code{owner}, \code{actor} vagy \code{role} mező legfeljebb adat, nem authority.
+
+\subsection*{Az object authorization typed guard}
+
+Az \code{authorize} guard csak már betöltött, \textbf{nem optional} model recordon használható. A compiler azt is ellenőrzi, hogy az owner mező létezik és \code{String} típusú. Ezért az \code{Option<Article>} értéket visszaadó query eredményét előbb explicit módon kezelni kell; authorization nem értelmez ``nincs rekord'' állapotot.
+
+\begin{lstlisting}[language=Velran]
+let article = loadArticle(db, id)?;
+authorize article owner authorUsername or role Publisher;
+\end{lstlisting}
+
+Az ilyen guardot tartalmazó handler route-ja nem lehet public, és public cache sem kerülhet object authorization elé. A tulajdonos vagy a felsorolt trusted role engedélyez; minden más autentikált actor \code{403 Forbidden} választ kap.
+
+\section{Login rate limiting}
+
+A login külön rate-limit policyt kap. Például:
+
+\begin{lstlisting}
+[auth]
+login_max_attempts = 8
+login_principal_max_attempts = 16
+login_source_max_attempts = 64
+mfa_max_attempts = 5
+login_window_secs = 300
+\end{lstlisting}
+
+A szerver a trusted proxy szabályok után meghatározott effective client IP-t és a kanonikus usernevet használja a limiter kulcsához. Ezért reverse proxy mögött a \code{trusted_proxy_cidrs} auth security szempontból is fontos.
+
+Sikertelen credential vagy második faktor nem ad részletes hibát a kliensnek. Rate-limit esetén \code{429 Too Many Requests}, auth backend elérhetetlenségnél \code{503 Service Unavailable} a megfelelő kategória.
+
+A limiter source+principal, principal több source-on és source több principalon dimenziót is követ; MFA/recovery esetén szigorúbb stage érvényes. Ez lefedi a distributed guessinget és credential stuffingot. Shared limiter-store hiba fail closed.
+
+\section{CSRF, Origin és Fetch Metadata}
+
+Session-cookie alapú autentikációnál a böngésző automatikusan elküldi a cookie-t, ezért state-changing kérésnél CSRF-védelem kell. A Velran defense-in-depth modellje több réteget használ:
+
+\begin{itemize}
+  \item session-bound CSRF token;
+  \item same-origin Origin/Referer policy;
+  \item Fetch Metadata kontroll;
+  \item szigorú request parsing;
+  \item trusted proxy policy.
+\end{itemize}
+
+A CORS nem helyettesíti a CSRF-et. Ha külön frontend originhez credentialed CORS-t engedélyezel, az külön security policy és HTTPS-et igényel.
+
+\section{Auth audit}
+
+A login/logout események audit logba kerülnek. Hasznos mezők például a request ID, actor, outcome és effective client IP. Az audit célja eseményrekonstrukció, nem credential-debugging.
+
+Soha ne logold:
+
+\begin{itemize}
+  \item a jelszót;
+  \item TOTP secretet vagy recovery code-ot;
+  \item session ID-t vagy teljes Cookie headert;
+  \item CSRF tokent;
+  \item LDAP bind vagy DB/Redis credentialt.
+\end{itemize}
+
+A login eredménye lehet például siker, invalid credential, invalid second factor vagy rate limited; a kliensnek mutatott üzenet ettől szándékosan lehet kevésbé részletes.
+
+\section{Local auth vagy LDAP?}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}lYY@{}}
+\toprule
+ & Local auth & LDAP/LDAPS \\
+\midrule
+Identity store & külön SQLite DB & vállalati directory \\
+Tipikus deployment & single-node & shared/vállalati identity \\
+User admin & Velran CLI & directory admin workflow \\
+Role forrás & local auth store & trusted mapping \\
+TOTP & local enrollment + recovery & server-side TOTP policy/secrets \\
+Multi-instance identity & nem ez a cél & igen \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Ha az alkalmazásnak saját publikus regisztráció, emailes password reset vagy önkiszolgáló MFA enrollment kell, azt ne próbáld a meglévő operátori CLI köré vékony route-tal odabarkácsolni. Ezek token-életciklust, email securityt, rate limitet és külön recovery threat modelt igényelnek.
+
+\section{Rich text és autentikált CMS}
+
+Az autholt CMS-szerkesztői felület sem indokolja raw HTML tárolását. A szerkesztői jogosultság és a content sanitization két külön védelmi réteg. Tartalomként Markdownot tárolj, megjelenítéskor pedig a biztonságos renderert használd:
+
+\begin{lstlisting}[language=Velran]
+<article class="article-body">
+    @markdown(article.body)
+</article>
+\end{lstlisting}
+
+Az \code{@markdown} nem enged raw HTML-t, és a link targeteket allowlist szerint kezeli.
+
+\section{Production ellenőrzőlista}
+
+Mielőtt autentikációt engedsz productionben, ellenőrizd:
+
+\begin{itemize}
+  \item pontosan egy elsődleges identity backend aktív;
+  \item local auth DB elkülönül az application DB-től;
+  \item jelszó és service credential csak secret file-ból jön;
+  \item production sessionhöz Redis van, ha több server instance fut;
+  \item a cookie Secure/HttpOnly és nincs \code{--insecure-dev-cookies};
+  \item a \code{trusted_proxy_cidrs} csak a valódi Apache/Nginx proxy címét fedi;
+  \item a login limiter be van állítva;
+  \item a state-changing formok CSRF-et használnak;
+  \item role helyett objektumszintű authorization is van, ahol szükséges;
+  \item credential vagy session secret nem kerül logba;
+  \item account disable/role/TOTP változás session-visszavonását tesztelted.
+\end{itemize}
+
+\section{Ellenőrzött companion példák}
+A canonical futtatható companion példák:
+\begin{itemize}
+  \item \path{examples/auth/app.vrn} -- route-szintű authentikáció és role policy;
+  \item \path{examples/object-authorization/app.vrn} -- objektumszintű authority;
+  \item \path{examples/mfa-elevation/main.vrn} -- MFA elevation;
+  \item \path{examples/critical-operations/main.vrn} -- critical-operation contractok.
+\end{itemize}
+Így ezek az authority-mechanizmusok külön maradnak, nem mosódnak egyetlen általános ``auth'' fogalommá.
+
+\section{Gyakorlat: készíts autorizációs mátrixot}
+\paragraph{Gyakorlási mód: támogatott.} Használd az előszóban meghatározott támogatott módszert.
+
+Készíts kis táblázatot anonymous felhasználóval, hitelesített tulajdonossal, hitelesített nem tulajdonossal, privilegizált role-lal és letiltott accounttal. Sorold fel, melyik actor mit tehet egy jegyzettel. A táblázattal különítsd el a route-szintű access policy-t az objektumszintű autorizációtól.
+
+\section{Tipikus hiba: az authenticationt authorizationnek tekintjük}
+Az, hogy tudjuk, ki a hívó, nem bizonyítja, hogy hozzáférhet egy konkrét rekordhoz. A route policy adja a széles belépési szabályt; ownership-, tenant- vagy domain-specifikus ellenőrzést továbbra is a betöltött objektumon kell elvégezni.
+
+\section{Folyamatos mintaprojekt: Secure Notes}
+Használd az \path{examples/secure-notes/checkpoints/07-auth/main.vrn} snapshotot. Minden jegyzetművelethez követelj authenticationt. View, edit és delete útvonalon kényszerítsd ki az ownership szabályt. Ezután szándékosan teszteld a negatív esetet: egy érvényesen belépett felhasználó se férjen hozzá más jegyzetéhez pusztán egy azonosító kitalálásával.

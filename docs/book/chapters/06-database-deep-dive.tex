@@ -1,0 +1,438 @@
+\chapter{Database deep dive: transactions, migrations, and concurrency}\label{ch:db-deep-dive}
+
+\noindent\textbf{Learning path: Fast path: core.} Learn schema/query invariants needed by persistent applications.\par\medskip
+
+\rustbridgeblock{Function signatures, \code{Result}, \code{Vec<T>}, typed parameters, and \code{?} remain familiar.}{\code{#[query]} plus compiler-owned SQL, typed bind parameters, static row bounds, and \code{Db}/transaction capabilities make database effects reviewable.}{Do not learn string-built SQL as a Velran technique. The new concept is the verified database boundary, not a new way to concatenate queries.}
+
+
+\invariantblock{Security invariant: data is not SQL structure}{SQL structure remains compiler-owned. User-controlled values enter queries only through typed bind parameters, and result size remains explicitly bounded; validation never licenses string-built SQL.}
+
+\diagnosticblock{Compiler diagnostic}{SEC-A05-001}{The source attempts unsafe SQL construction instead of compiler-owned SQL with typed binds.}{Keep SQL structure static and move request-controlled values into typed bind parameters.}
+
+The previous chapter introduced typed SQL and CRUD. This chapter focuses on the database rules that preserve integrity across concurrent requests and releases. On a first reading, prioritize query contracts, typed binds, transactions, optimistic locking, and migrations; treat capacity, backup, and engine-selection details as later reference.
+
+\section{Three separate responsibilities}
+
+In a Velran application it is useful to separate three layers:
+
+\begin{description}
+\item[application code] declares static typed SQL queries, supplies binds, and requests transactions;
+\item[runtime] pools connections, binds parameters, applies timeouts and result limits, then validates returned rows against the declared type;
+\item[operator] owns database credentials, TLS, database capacity, backups, and the migration process.
+\end{description}
+
+The application therefore does not open arbitrary sockets to the database or build its own connection pool. \code{Db} and \code{Transaction} are the capabilities through which database work occurs.
+
+The current V1 data layer also has broad defense-in-depth limits, including a maximum pool size of 32 connections, a 5-second connection-acquire timeout, a 10-second query timeout, a 10,000-row backend result ceiling, and a 16 MiB result-size ceiling. Velran model-list queries are stricter: the compiler requires a literal \code{LIMIT}, and the compiler/runtime cap that list at 1,000 rows. These are safety ceilings, not pagination design; correct queries should still be short, paginated, and indexable.
+
+With multiple server instances, the operator must budget total database connections across all instances:
+
+\begin{lstlisting}
+total DB connections ~= number of Velran instances
+                       * pool per instance
+                       + admin/maintenance reserve
+\end{lstlisting}
+
+\section{The query return type is a contract}
+
+Query cardinality is visible in the function type:
+
+\begin{lstlisting}[language=Velran]
+#[query]
+fn articleById(db: Db, id: i64)
+    -> Result<Article, DbError> sql {
+    SELECT id, slug, title, body, version
+    FROM articles
+    WHERE id = :id
+}
+
+#[query]
+fn articleBySlug(db: Db, slug: Slug)
+    -> Result<Option<Article>, DbError> sql {
+    SELECT id, slug, title, body, version
+    FROM articles
+    WHERE slug = :slug
+}
+
+#[query]
+fn recentArticles(db: Db, offset: i64)
+    -> Result<Vec<Article>, DbError> sql {
+    SELECT id, slug, title, body, version
+    FROM articles
+    ORDER BY id DESC
+    LIMIT 100 OFFSET :offset
+}
+\end{lstlisting}
+
+The three forms mean:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}L{0.23\textwidth}YY@{}}
+\toprule
+Type & Expected result & Cardinality violation \\
+\midrule
+\code{Article} & exactly one row & 0 rows: \code{404}; multiple rows: DB error \\
+\code{Option<Article>} & zero or one row & multiple rows: DB error \\
+\code{Vec<Article>} & zero or more rows & runtime result limits apply \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+This is more than convenient notation: result shape is part of the program contract and is enforced at runtime. \code{Option<Article>} does not mean ``take the first row if one exists.'' If the query returns two or more rows, the invariant is broken and the runtime fails closed with a DB error. Similarly, an \code{Article} query returns \code{404 Not Found} for zero rows and does not arbitrarily choose a row if there are several.
+
+A \code{Vec<Model>} query must also declare a static literal row bound in SQL. The bound belongs to the reusable query contract, not to a caller-supplied \code{limit} parameter; use a fixed \code{LIMIT} and paginate with a bounded offset or another explicit access pattern.
+
+\subsection*{Make row shape explicit}
+
+The names and order of \code{SELECT} fields should match the model. Do not use \code{SELECT *} in application queries.
+
+\begin{lstlisting}[language=Velran]
+model Article {
+    id: i64
+    slug: Slug
+    title: String
+    body: String
+    version: i64
+}
+
+// good: the same five fields, in the same order
+SELECT id, slug, title, body, version
+FROM articles
+\end{lstlisting}
+
+Explicit projection matters for two reasons. First, the compiler can verify the relationship between model and query. Second, later schema expansion does not silently alter an old query's result shape.
+
+\section{Bind values; do not build SQL}
+
+Client-derived values enter SQL as typed binds:
+
+\begin{lstlisting}[language=Velran]
+#[query]
+fn findByEmail(db: Db, email: String)
+    -> Result<Option<User>, DbError> sql {
+    SELECT id, email, display_name
+    FROM users
+    WHERE email = :email
+}
+\end{lstlisting}
+
+\code{:email} is not string substitution. The runtime translates it to a backend-specific placeholder and binds it as a parameter.
+
+Do not think in terms of:
+
+\begin{lstlisting}
+// wrong approach:
+// "SELECT ... ORDER BY " + userOrder
+// "WHERE " + userFilter
+\end{lstlisting}
+
+Column names, \code{ORDER BY} direction, SQL operators, and entire WHERE fragments must not come from user input. If several sort modes are supported, choose among a small number of static queries in application code.
+
+\section{Read and mutation authority boundaries}
+
+A read query receives a \code{Db} capability. A mutating query receives a \code{Transaction}:
+
+\begin{lstlisting}[language=Velran]
+#[query]
+fn renameArticle(
+    tx: Transaction,
+    id: i64,
+    title: String
+) -> Result<(), DbError> mutates Article by id sql {
+    UPDATE articles
+    SET title = :title
+    WHERE id = :id
+}
+\end{lstlisting}
+
+The caller opens an explicit transaction block:
+
+\begin{lstlisting}[language=Velran]
+#[action]
+fn rename(
+    ctx: ActionContext,
+    db: Db,
+    id: i64,
+    title: String
+) -> Result<Redirect, PageError> {
+    let article = articleById(db, id)?;
+    authorize article authenticated;
+    transaction db {
+        renameArticle(tx, article.id, title)?;
+    }
+    return Ok(redirect(adminArticles()));
+}
+\end{lstlisting}
+
+For ordinary best-effort application code, a successful block commits and a known database failure rolls back. For retry-sensitive or critical work, do not collapse the outcome to a Boolean success/failure. Capture the transaction outcome explicitly:
+
+\begin{lstlisting}[language=Velran]
+let article = articleById(db, id)?;
+authorize article authenticated;
+let outcome = transaction db {
+    renameArticle(tx, article.id, title)?;
+};
+
+match outcome {
+    Committed => { return Ok(redirect(adminArticles())); }
+    RolledBack => { fail conflict; }
+    CommitUnknown => { fail conflict; }
+}
+\end{lstlisting}
+
+\code{CommitUnknown} means the client/runtime did not receive enough evidence to prove whether the commit took effect. It must not automatically trigger a retry. Critical idempotent transactions are compiler-required to capture and exhaustively match this outcome. \code{Transaction} still cannot escape the block, so a closed transaction handle cannot accidentally be reused.
+
+\subsection*{One business operation should be one transaction}
+
+Do not split related mutations across separate actions or separate transactions:
+
+\begin{lstlisting}[language=Velran]
+transaction db {
+    Article.publishChanged(tx, article.id, version)?;
+    audit Article article.id action publish;
+        from article.status to ArticleStatus.Published
+}
+\end{lstlisting}
+
+Here publishing and the business audit trail commit together. If the audit record cannot be written, publishing rolls back too. This prevents a state where the business change happened but its required audit record is missing.
+
+\section{Optimistic locking: do not overwrite someone else's work}
+
+In a CMS or wiki, two editors may open the same record. A simple
+
+\begin{lstlisting}
+UPDATE articles SET title = :title WHERE id = :id
+\end{lstlisting}
+
+makes the last writer win and can silently discard the first editor's changes.
+
+Use a version column and \code{Changed}:
+
+\begin{lstlisting}[language=Velran]
+model Article {
+    id: i64
+    title: String
+    version: i64
+}
+
+#[query]
+fn updateArticle(
+    tx: Transaction,
+    id: i64,
+    title: String,
+    version: i64
+) -> Result<Changed, DbError> mutates Article by id sql {
+    UPDATE articles
+    SET title = :title,
+        version = version + 1
+    WHERE id = :id AND version = :version
+}
+\end{lstlisting}
+
+At the call site, load and authorize the article first and pass \code{article.id}, not the request ID directly, into this mutation. The edit form sends the \code{version} value the user saw when opening the page. The \code{Changed} contract is strict: the mutation must affect \textbf{exactly one row}. One changed row is success; zero changed rows become \code{409 Conflict}; two or more rows become a DB error because the query violated its own invariant. \code{Changed} is only valid as the return type of a mutating query, and in V1 it cannot be combined with a \code{RETURNING} clause.
+
+With optimistic locking, if another editor saved in the meantime, \code{WHERE id = :id AND version = :version} matches zero rows and the request becomes a conflict. The correct UX is not an automatic retry. Tell the user that the data changed, load the new version, and let the user decide how to merge.
+
+Typical uses include:
+
+\begin{itemize}
+\item wiki pages and CMS articles;
+\item tickets or customer records;
+\item business objects with workflow state;
+\item rarely changed administrator configuration.
+\end{itemize}
+
+It is generally unnecessary for append-only events or database-side atomic counters.
+
+\section{Design indexes for access patterns}
+
+An index is useful not because there are many of them, but because it serves a real query.
+
+Natural CMS access patterns might justify:
+
+\begin{lstlisting}[language=SQL]
+CREATE UNIQUE INDEX articles_slug_uq
+    ON articles(slug);
+
+CREATE INDEX articles_status_id_idx
+    ON articles(status, id);
+\end{lstlisting}
+
+If the public site loads by slug, make slug unique/indexed. If the admin list filters by status and pages by identifier, a matching composite index may be appropriate.
+
+Some rules:
+
+\begin{itemize}
+\item paginate every large list;
+\item index frequently used lookup fields;
+\item align index order with WHERE/ORDER BY patterns;
+\item do not index every column automatically: indexes cost writes and storage;
+\item investigate performance with the real backend's \code{EXPLAIN} plan.
+\end{itemize}
+
+Velran typed SQL protects query shape; it does not replace the database optimizer.
+
+\section{Migration: schema is part of the release}
+
+In production, the server does not run migrations automatically at startup. This is deliberate: a schema change is a separate operator action with separate credentials and a separate failure boundary.
+
+A typical directory is:
+
+\begin{lstlisting}
+migrations/
+  0001_create_articles.sql
+  0002_articles_slug_index.sql
+  0003_articles_add_version.sql
+\end{lstlisting}
+
+File names use:
+
+\begin{lstlisting}
+NNNN_name.sql
+\end{lstlisting}
+
+Do not modify an already-applied migration. The CLI records a SHA-256 checksum and stops on mismatch.
+
+Production commands using the installed CLI:
+
+\begin{lstlisting}
+/usr/local/bin/velran-cli migrate status \
+  --dir /srv/myapp/current/migrations \
+  --db-url-file /run/secrets/migration-db-url
+
+/usr/local/bin/velran-cli migrate verify \
+  --dir /srv/myapp/current/migrations \
+  --db-url-file /run/secrets/migration-db-url
+
+/usr/local/bin/velran-cli migrate apply \
+  --dir /srv/myapp/current/migrations \
+  --db-url-file /run/secrets/migration-db-url \
+  --lock-timeout-secs 30
+\end{lstlisting}
+
+Migration credentials may have more privileges than application DML credentials. The server process should therefore not receive them.
+
+\subsection*{What does the migration CLI guarantee?}
+
+\begin{itemize}
+\item applied file name and checksum are verified;
+\item an old version number cannot silently receive a new migration later;
+\item a database-level migration lock is acquired;
+\item migration state advances only after successful application.
+\end{itemize}
+
+Backend-specific differences remain. PostgreSQL uses a transaction per migration; SQLite keeps the batch in a transaction using a \code{BEGIN IMMEDIATE} writer lock; MariaDB DDL is not transactional in every case, so partial DDL failure may require operator repair.
+
+\section{Expand/contract: preserve rollback options}
+
+A fast application rollback is straightforward only when the new schema remains compatible with the old application.
+
+For larger changes, use expand/contract:
+
+\begin{enumerate}
+\item \textbf{expand}: add a new nullable/defaulted field or a new table while keeping the old application functional;
+\item deploy the new application;
+\item perform a controlled backfill if necessary;
+\item in a later release, \textbf{contract}: remove the old field or constraint after the rollback window has closed.
+\end{enumerate}
+
+Immediate rename/drop, a new mandatory field, or an incompatible type change can create a forward-only release. Treat that as an explicit release-review decision.
+
+\section{Handling database errors}
+
+\code{DbError} is a technical error. Do not expose driver messages, SQL text, host names, or connection strings to the end user.
+
+At application level distinguish at least:
+
+\begin{description}
+\item[record not found] normal domain state, often handled with an optional query;
+\item[409 concurrent modification] optimistic-lock conflict; the user resolves it by reloading/comparing;
+\item[database unavailable] infrastructure failure; readiness may report it and the server log can be searched by request ID;
+\item[constraint/domain failure] preferably prevent it with validation, while keeping the database constraint as the final integrity boundary.
+\end{description}
+
+Do not wrap an entire mutating action in an unlimited automatic retry loop. Repeating a request may repeat side effects, and a transaction conflict is not necessarily transient.
+
+\section{SQLite, PostgreSQL, or MariaDB?}
+
+Velran V1 supports all three backends, but that does not make every SQL dialect feature portable.
+
+\begin{description}
+\item[SQLite] excellent for simple or single-host deployments; back up a live application database using an SQLite-aware method rather than plain copying the live file.
+\item[PostgreSQL] a strong default for larger or multi-instance production systems; use TLS for remote connections.
+\item[MariaDB] also supported, but account for DDL transactional differences especially during migrations.
+\end{description}
+
+Portable applications should use a common SQL subset. Use backend-specific features only deliberately, and document the backend dependency in the project.
+
+\section{Backup from a database developer's perspective}
+
+As a database developer, remember one key point here: migration and backup are separate lifecycles. Migration describes how schema changes; backup/restore proves that persistent state can be recovered. For PostgreSQL, MariaDB, and SQLite, use the backend's own consistency-aware backup method and do not assume that a plain file copy is automatically a valid backup.
+
+Full application state -- database, AppFs, local-auth store, recovery manifest, recovery point objective (RPO), recovery time objective (RTO), and restore drills -- is covered in Chapter~\ref{ch:recovery}. It matters here because schema-change planning must already know what state is available for rollback or restoration.
+
+\section{A sample CMS database layer}
+
+A small CMS might start with:
+
+\begin{lstlisting}
+Article
+  id
+  slug          UNIQUE
+  title
+  body
+  status
+  hero_image
+  version
+  created_at
+  updated_at
+
+migrations/
+  0001_create_articles.sql
+  0002_article_indexes.sql
+  0003_add_version.sql
+\end{lstlisting}
+
+Application patterns:
+
+\begin{itemize}
+\item public read: \code{Option<Article>} by slug;
+\item admin list: paginated \code{Vec<Article>};
+\item edit: \code{Changed} + \code{version};
+\item publish/archive: business mutation + audit in one transaction;
+\item schema change: separate CLI migration;
+\item before deploy: migration verify + backup/restore readiness;
+\item after deploy: readiness, logs, metrics, and smoke test.
+\end{itemize}
+
+With this model the database layer is not a separate collection of SQL snippets; it becomes part of the web application's type, concurrency, release, and recovery contract.
+
+\section{Chapter checklist}
+
+Before considering a database-backed feature complete, verify:
+
+\begin{itemize}
+\item every user value enters SQL as a typed bind;
+\item there is no \code{SELECT *}; projections match models;
+\item large lists are paginated;
+\item important lookup/sort patterns have appropriate indexes;
+\item every mutation runs with a \code{Transaction} capability;
+\item related mutations share one transaction;
+\item human-concurrently-edited records use optimistic locking;
+\item already-applied migrations are immutable;
+\item migration credentials are not available to the application server;
+\item destructive schema changes have a known rollback consequence;
+\item DB errors do not leak SQL or credentials to the client;
+\item backups have regularly proven restores.
+\end{itemize}
+
+\section{Practice: review a query as an interface}
+\paragraph{Exercise mode: supported.} Use the supported method defined in the preface.
+
+For each query in a feature, write down its input types, projected columns, cardinality expectation, ordering, and index assumption. Treat that list as an interface contract rather than as an implementation detail hidden inside SQL.
+
+\section{Common mistake: using the database only as storage}
+A production database also enforces invariants and concurrency semantics. If correctness depends on a condition remaining true under concurrent requests, encode the authoritative part in the database or transaction design rather than relying only on a prior application-side check.
+
+\section{Running project checkpoint: Secure Notes}
+Start from \path{examples/secure-notes/migrations/0001_init.sql}. Review the title/body bounds, publication-state constraint, timestamps, and owner/id index as database-level invariants. Then add pagination while preserving deterministic ordering and principal scoping; document which guarantees belong to SQL/schema design and which remain handler-level policy.

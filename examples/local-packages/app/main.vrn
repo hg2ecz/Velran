@@ -1,0 +1,6 @@
+#[page]
+fn home(ctx: PageContext) -> Result<Html, PageError> {
+    let value = textkit::answer();
+    return Ok(html {<p>{{ value }}</p>});
+}
+route home GET "/" public => home;

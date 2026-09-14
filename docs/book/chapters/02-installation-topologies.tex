@@ -1,0 +1,362 @@
+\chapter{Installation, binaries, and runtime topologies}\label{ch:installation}
+
+\noindent\textbf{Learning path: Fast path: core.} Get to a repeatable local check/build/run workflow; defer backend internals on first reading.\par\medskip
+
+\section{Build from source}
+
+The release source package is a Rust workspace. The normal release build that produces the two installable programs is:
+
+\begin{lstlisting}[language=bash]
+cargo build --locked --release
+\end{lstlisting}
+
+The repository's own full self-check is \code{./verify.sh}; run it when you validate or release the Velran source tree itself. It is not the first step required merely to use an application.
+
+\code{--locked} ensures that the build uses the dependency graph captured in the release's \code{Cargo.lock}. If you only need the two executable programs:
+
+\begin{lstlisting}[language=bash]
+cargo build --locked --release -p velran-server -p velran-cli
+\end{lstlisting}
+
+After the build, the two important programs are:
+
+\begin{lstlisting}
+target/release/velran-server
+target/release/velran-cli
+\end{lstlisting}
+
+\begin{itemize}
+  \item \code{velran-server}: the long-running service process that compiles Velran applications and serves HTTP(S);
+  \item \code{velran-cli}: an operator/administrative program for tasks such as authentication administration and migrations.
+\end{itemize}
+
+Their roles are intentionally different. A reverse proxy connects only to the \code{velran-server} process. \code{velran-cli} is not a web server and does not need a public or proxied listener.
+
+\subsection*{Runtime requirement: rustc is part of the Velran runtime toolchain}
+
+Every host that runs Velran applications must also have a usable \code{rustc}. Velran does not ship an interpreter or VM fallback: its application backend lowers verified Velran code to safe Rust and invokes \code{rustc} to produce the immutable native \code{cdylib} that is activated by the server. Installing only \code{velran-server} without an available Rust compiler is therefore insufficient for application activation or source reload.
+
+By default the server discovers \code{rustc} from the active toolchain. Production deployments may instead configure an explicit absolute compiler path in the \code{[native]} section of \code{server.toml}. Cargo is needed when building Velran itself from source; the application execution backend invokes \code{rustc} directly.
+
+\subsection*{What you need to know about application activation}
+
+For normal web development, remember only this rule: Velran verifies and compiles a complete candidate before it can replace the currently active application. If the candidate fails, the last known-good version keeps serving requests. There is no interpreter or VM fallback that silently runs unsupported application code.
+
+You do not need the native compiler pipeline to build your first application. The implementation details are intentionally deferred to the ``Under the hood'' note below and to the production chapter.
+
+During development, these may be sufficient:
+
+\begin{lstlisting}[language=bash]
+cargo check --workspace
+cargo test --workspace
+\end{lstlisting}
+
+\section{Where to install the binaries}
+
+On a production host, do not run permanently from Cargo's \code{target/}. For manual/source installs this book uses \code{/usr/local/bin} for executables and \code{/usr/local/etc/velran} for machine-local configuration, keeping them separate from distribution-managed files.
+
+A simple, auditable layout is:
+
+\begin{lstlisting}
+/usr/local/bin/velran-server
+/usr/local/bin/velran-cli
+/usr/local/etc/velran/server.toml
+/srv/velran/current/
+/srv/velran/data/
+/run/secrets/velran/
+/var/log/velran/
+\end{lstlisting}
+
+For example:
+
+\begin{lstlisting}[language=bash]
+sudo install -d -m 0755 /usr/local/bin
+sudo install -d -m 0755 /usr/local/etc/velran
+sudo install -m 0755 target/release/velran-server /usr/local/bin/velran-server
+sudo install -m 0755 target/release/velran-cli    /usr/local/bin/velran-cli
+sudo install -m 0644 config/server.toml.sample \
+  /usr/local/etc/velran/server.toml
+\end{lstlisting}
+
+\code{/usr/local/bin} is normally already part of the system PATH, so no additional symlink is necessary. The examples in this book use the actual binary names, \code{velran-server} and \code{velran-cli}.
+
+
+\subsection*{Debian package installation is intentionally different}
+
+The layout above is for manual/source installation. If Velran is installed through a Debian package, the files are owned by \code{dpkg}, so Debian filesystem conventions apply instead of the local-administrator \code{/usr/local} prefix:
+
+\begin{lstlisting}
+/usr/bin/velran-server
+/usr/bin/velran-cli
+/etc/velran/server.toml
+/usr/lib/systemd/system/velran.service
+\end{lstlisting}
+
+Build the package on a Debian/Ubuntu build host with:
+
+\begin{lstlisting}[language=bash]
+make deb
+sudo dpkg -i dist/velran_1.0.0-1_amd64.deb
+\end{lstlisting}
+
+The package deliberately does not start the service automatically: deploy the application and secrets, configure and validate \code{/etc/velran/server.toml}, then enable \code{velran.service}. Package-managed files use \code{/usr} and \code{/etc}; manual installs use \code{/usr/local}. See \path{docs/36-debian-package.md} for the full workflow.
+
+\section{Your first application}
+
+A minimal recommended project is:
+
+\begin{lstlisting}
+myapp/
+|-- main.vrn
+|-- pages.vrn
+`-- public/
+\end{lstlisting}
+
+\code{main.vrn}:
+
+\begin{lstlisting}[language=Velran]
+mod pages;
+\end{lstlisting}
+
+\code{pages.vrn}:
+
+\begin{lstlisting}[language=Velran]
+#[page]
+fn home(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {
+        <main><h1>Hello Velran</h1></main>
+    });
+}
+
+route home GET "/" public => home;
+\end{lstlisting}
+
+Start it directly from the workspace during development:
+
+\begin{lstlisting}[language=bash]
+cargo run -p velran-server -- \
+  --app /abs/path/myapp/main.vrn \
+  --listen 127.0.0.1:8080 \
+  --insecure-dev-cookies
+\end{lstlisting}
+
+The same command using the installed release binary is:
+
+\begin{lstlisting}[language=bash]
+/usr/local/bin/velran-server \
+  --app /abs/path/myapp/main.vrn \
+  --listen 127.0.0.1:8080 \
+  --insecure-dev-cookies
+\end{lstlisting}
+
+\code{--insecure-dev-cookies} is for local development only.
+
+\section{At first, learn only the minimum configuration}
+
+At this point in the book the goal is not to learn the entire \code{server.toml}. As a beginner, it is enough to distinguish three things:
+
+\begin{itemize}
+  \item the \emph{application code} defines the models, queries, pages, and routes that exist;
+  \item the \emph{server configuration} defines where the process listens, which external resources it may access, and what operator-controlled limits apply;
+  \item \emph{secret files} hold sensitive values that must not live in application source or plaintext TOML.
+\end{itemize}
+
+The A-to-Z chapter provides a minimal development configuration. Production-specific keys are introduced only after there is an application worth operating; the complete key/default/sample reference is near the end of the book. On a first reading, do not try to memorize the full configuration surface.
+
+\subsection*{Under the hood: native application activation}
+
+This subsection is optional on a first reading. Internally, activation is deliberately staged so that verification happens before new code can become live:
+
+\begin{lstlisting}
+.vrn source
+  -> parser + security/type verification
+  -> verified executable intermediate representation (IR)
+  -> generated safe Rust
+  -> rustc
+  -> immutable cdylib generation
+  -> atomic activation
+\end{lstlisting}
+
+Generated application Rust forbids unsafe code. Unsupported constructs fail closed instead of taking an interpreter/VM path. During source reload, a failed candidate therefore leaves the last known-good generation active. The native compiler cache avoids rebuilding an unchanged verified source/toolchain/policy identity.
+
+\section{Production process and reverse proxy}
+
+Behind Apache or Nginx, the typical request path is:
+
+\begin{lstlisting}
+Internet
+   |
+   | HTTPS :443
+   v
+Apache or Nginx
+   |
+   | HTTP 127.0.0.1:8080
+   v
+/usr/local/bin/velran-server
+   |
+   +-- /usr/local/etc/velran/server.toml
+   +-- /srv/velran/current/main.vrn
+   +-- DB / Redis / AppFs
+\end{lstlisting}
+
+The proxy neither starts nor replaces the Velran process. Run \code{velran-server} as a separate service, for example under systemd, and let the proxy forward requests to its loopback listener. \code{velran-cli} runs only for operator commands.
+
+A simple systemd \code{ExecStart} fragment is:
+
+\begin{lstlisting}
+ExecStart=/usr/local/bin/velran-server \
+  --config /usr/local/etc/velran/server.toml
+\end{lstlisting}
+
+The process user should not be \code{root}; grant access only to the required application, secret, data, and log files. If TLS is terminated by Apache or Nginx, keep the Velran listener on loopback, for example \code{127.0.0.1:8080}.
+
+\section{Runtime topologies in detail}
+
+The binary locations and process roles stay the same whether Velran terminates TLS itself or runs behind Apache or Nginx. The difference is the listener, TLS termination, and trusted-proxy boundary configuration.
+
+\section{Direct single-domain HTTPS}
+
+When Velran terminates TLS itself, a public listener may use port 443:
+
+\begin{lstlisting}
+[server]
+app = "/srv/velran/current/main.vrn"
+listen = "0.0.0.0:443"
+insecure_dev_cookies = false
+
+[tls]
+cert_file = "/run/secrets/velran/tls-fullchain.pem"
+key_file = "/run/secrets/velran/tls-key.pem"
+handshake_timeout_ms = 5000
+http_redirect_listen = "0.0.0.0:80"
+public_host = "www.example.com"
+\end{lstlisting}
+
+\code{public_host} comes from trusted configuration. Only GET/HEAD requests may be redirected from HTTP to HTTPS.
+
+Because this direct configuration binds ports 80/443, an unprivileged systemd service needs the narrow \code{CAP_NET_BIND_SERVICE} capability. Do not run the service as root merely to bind these ports. Behind a reverse proxy, with a listener such as \code{127.0.0.1:8080}, that capability is unnecessary.
+
+\section{Behind an Apache reverse proxy}
+
+In this topology Apache handles public TLS and Velran listens only on loopback. Example Velran configuration:
+
+\begin{lstlisting}
+[server]
+app = "/srv/velran/current/main.vrn"
+listen = "127.0.0.1:8080"
+insecure_dev_cookies = false
+
+[tls]
+public_host = "www.example.com"
+
+[web]
+trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
+allow_missing_origin = false
+cors_origins = []
+cors_allow_credentials = false
+\end{lstlisting}
+
+In reverse-proxy mode there is no Velran-side certificate/key, but \code{tls.public_host} is still required. It is the trusted source for the canonical host visible to the browser and anchors Host and Origin/Referer validation. Production plain-HTTP upstream is allowed only on a loopback listener with an explicit trusted-proxy list and such a public host. Every normal proxied request must carry trusted metadata such as \code{X-Forwarded-Proto: https} or the equivalent standard \code{Forwarded: proto=https} from a trusted proxy.
+
+A minimal Apache VirtualHost is:
+
+\begin{lstlisting}
+<VirtualHost *:443>
+    ServerName www.example.com
+
+    SSLEngine on
+    SSLCertificateFile /etc/letsencrypt/live/www.example.com/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/www.example.com/privkey.pem
+
+    ProxyPreserveHost On
+    ProxyPass        / http://127.0.0.1:8080/
+    ProxyPassReverse / http://127.0.0.1:8080/
+
+    RequestHeader set X-Forwarded-Proto "https"
+</VirtualHost>
+\end{lstlisting}
+
+This typically requires the \code{proxy}, \code{proxy_http}, \code{headers}, and \code{ssl} modules. Velran accepts forwarding headers only from ranges listed in \code{trusted_proxy_cidrs}; do not configure an overly broad range such as the entire Internet.
+
+The port-80 VirtualHost may exist solely to redirect to HTTPS:
+
+\begin{lstlisting}
+<VirtualHost *:80>
+    ServerName www.example.com
+    Redirect permanent / https://www.example.com/
+</VirtualHost>
+\end{lstlisting}
+
+\section{Behind an Nginx reverse proxy}
+
+The Nginx topology uses the same trust model: Nginx handles public TLS and Velran listens on loopback. The Velran-side \code{server.toml} may be the same as in the Apache example.
+
+A minimal Nginx server block is:
+
+\begin{lstlisting}
+server {
+    listen 443 ssl;
+    server_name www.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/www.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/www.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+    }
+}
+\end{lstlisting}
+
+This example has a single direct reverse proxy, so \code{X-Forwarded-For} is the client address as seen by the proxy and \code{X-Forwarded-Proto} is \code{https}. Do not let arbitrary forwarding headers arriving from the Internet become authority. Velran only trusts forwarding headers received from the exact \code{trusted_proxy_cidrs} ranges.
+
+The HTTP listener may exist only to redirect to HTTPS:
+
+\begin{lstlisting}
+server {
+    listen 80;
+    server_name www.example.com;
+    return 301 https://$host$request_uri;
+}
+\end{lstlisting}
+
+\section{Recommended production directory structure}
+
+\begin{lstlisting}
+/usr/local/bin/velran-server
+/usr/local/bin/velran-cli
+/srv/velran/releases/2026-09-04.1/
+/srv/velran/current -> /srv/velran/releases/2026-09-04.1
+/srv/velran/data/
+/usr/local/etc/velran/server.toml
+/run/secrets/velran/
+/var/log/velran/
+\end{lstlisting}
+
+The binary, release tree, and configuration should be runtime read-only. The application should write only to declared data/log locations.
+
+\section{First validation}
+
+Before sending traffic to the server:
+
+\begin{lstlisting}[language=bash]
+/usr/local/bin/velran-server \
+  --config /usr/local/etc/velran/server.toml \
+  --check-config
+\end{lstlisting}
+
+This validates configuration, secret-file references, application compilation, and TLS files, among other checks, without opening a listener.
+
+\section{Practice: verify the deployment boundary}
+\paragraph{Exercise mode: guided.} Use the guided method defined in the preface.
+
+On a test machine, identify the binary, immutable release tree, configuration, secret files, application data, and logs. Confirm that only the intended data and log locations are writable by the service account. Run \code{--check-config} before opening a listener.
+
+\section{Common mistake: treating configuration as application data}
+Configuration and secrets should not drift together with mutable application state. Keeping the release tree and configuration read-only makes rollback, review, and incident response much easier to reason about.
+
+\section{Running project checkpoint: Secure Notes}
+For Secure Notes, decide where the application source/release artifact lives, where its database or persistent data lives, and which secrets are supplied by files rather than embedded in source. Record those paths before implementing features.

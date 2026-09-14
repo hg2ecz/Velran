@@ -1,0 +1,14 @@
+#[inline(never)]
+fn sample_bin(real: &mut [f32; 16]) -> f32 {
+    return real[3];
+}
+
+#[page]
+fn pureReturn(ctx: PageContext) -> Result<Html, PageError> {
+    let real = vec![0.0f32; 16];
+    real[3] = 12.5f32;
+    let value = sample_bin(&mut real);
+    return Ok(html {<p>{{ value }}</p>});
+}
+
+route pureReturn GET "/pure-fn-typed-return" public => pureReturn;

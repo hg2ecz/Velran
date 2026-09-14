@@ -1,0 +1,36 @@
+model User {
+    id: i64
+    role: i64
+}
+
+security event RoleGranted for User;
+
+permission UserAdmin {
+    role Admin
+}
+
+critical RoleChange {
+    permission UserAdmin
+    mfa
+    transaction
+    audit RoleGranted
+}
+
+#[query]
+fn recordRoleGrant(tx: Transaction, id: i64, role: i64) -> Result<(), DbError> sql {
+    INSERT INTO role_grants(user_id, role) VALUES(:id, :role)
+}
+
+#[action]
+fn grantRole(ctx: ActionContext, db: Db, id: i64, role: i64) -> Result<Json, PageError> critical RoleChange {
+    transaction db {
+        recordRoleGrant(tx, id, role)?;
+        security RoleGranted id;
+    }
+    return Ok(json(true));
+}
+
+route grantRole POST "/users/:id<i64>/role"
+    form role<i64>
+    auth critical RoleChange
+    => grantRole;

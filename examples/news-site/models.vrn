@@ -1,0 +1,12 @@
+model Article {
+    id: i64
+    slug: Slug
+    title: String
+    body: String
+}
+
+form ArticleForm {
+    title<String>
+    body<String>
+    validate title length 2 200 body length 1 300000
+}

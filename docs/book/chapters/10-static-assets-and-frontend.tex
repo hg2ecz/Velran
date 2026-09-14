@@ -1,0 +1,349 @@
+\chapter{Static assets and frontend integration}
+
+\noindent\textbf{Learning path: Fast path: browser branch.} Read now when adding static assets or progressive browser enhancement.\par\medskip
+
+A web application produces more than dynamic HTML and JSON responses. CSS, icons, images, fonts, source maps, or artifacts from a separate frontend build have a different lifecycle: they arrive as part of a release, ideally remain immutable, and can be cached aggressively by the browser.
+
+Velran therefore serves static assets from a separate, \textbf{read-only static root}. This is not the same area as the writable AppFs data root, and it is not the same concept as user-uploaded media.
+
+\noindent\textbf{First read:} learn the three file lifecycles, fingerprinted caching, and the V1 JavaScript/CSP boundary. Server-vs-proxy serving examples are reference material for deployment.
+
+\section{Three separate file lifecycles}
+
+In production, keep at least three file categories separate:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}lYYY@{}}
+\toprule
+ & Example & Writable? & Lifecycle \\
+\midrule
+release & CSS, font, logo & read-only & replaced on deploy \\
+runtime data & export, generated file & according to AppFs policy & changes while the app runs \\
+user media & uploaded image & controlled writable & lives with business data \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+A typical directory structure is:
+
+\begin{lstlisting}
+/usr/local/bin/velran-server
+/usr/local/bin/velran-cli
+/srv/myapp/releases/2026-09-04/
+  main.vrn
+  migrations/
+  public/
+    css/
+    img/
+    fonts/
+/srv/myapp/data/
+/run/secrets/velran/
+\end{lstlisting}
+
+Treat \code{public/} as a deployment artifact. \code{data/}, by contrast, is runtime state. If they are mixed, an upload may overwrite a release file, or a rollback may accidentally roll user data backward.
+
+\section{Configuring the static root}
+
+Static namespace configuration lives in a separate server-config section:
+
+\begin{lstlisting}
+[static_assets]
+root = "/srv/myapp/current/public"
+url_prefix = "/assets/"
+max_asset_bytes = 8388608
+max_age_secs = 300
+immutable_max_age_secs = 31536000
+precompressed = true
+\end{lstlisting}
+
+The same options are available through the CLI. Important flags include:
+
+\begin{lstlisting}
+--static-root
+--static-url-prefix
+--max-static-asset-bytes
+--static-max-age-secs
+--static-immutable-max-age-secs
+\end{lstlisting}
+
+The static prefix is a reserved route namespace. If the prefix is \code{/assets/}, the application must not declare a conflicting dynamic or static route. The server should fail closed on collision: startup failure is better than ambiguous route selection per request.
+
+\section{Fingerprints: the key to long caching}
+
+Tie static content and URL together. For example:
+
+\begin{lstlisting}
+public/
+  css/app.01234567.css
+  img/logo.a91f028c.svg
+  fonts/ui-f1e2d3c4.woff2
+\end{lstlisting}
+
+Velran treats a filename as fingerprinted when it contains a token of at least eight hexadecimal characters delimited by a dot, hyphen, or underscore. Such a file may receive a long immutable cache policy:
+
+\begin{lstlisting}
+Cache-Control: public, max-age=31536000, immutable
+\end{lstlisting}
+
+For a non-fingerprinted file the safer default is short and revalidatable:
+
+\begin{lstlisting}
+Cache-Control: public, max-age=300, must-revalidate
+\end{lstlisting}
+
+The key rule is: \textbf{do not replace content behind the same URL while using a one-year cache}. A new CSS build should get a new fingerprinted filename. Old files may remain in the release long enough for old HTML representations to age out.
+
+\section{A minimal asset build pipeline}
+
+Velran does not prescribe a frontend build system. The pipeline only needs to produce deterministic output into \code{public/}.
+
+For a small application, source might look like:
+
+\begin{lstlisting}
+assets-src/
+  app.css
+  logo.svg
+public/
+\end{lstlisting}
+
+A release build may:
+
+\begin{enumerate}
+  \item create a clean \code{public/} directory;
+  \item build or copy CSS/fonts/images;
+  \item compute a content hash;
+  \item create fingerprinted filenames;
+  \item optionally produce Brotli/gzip siblings;
+  \item use the fingerprinted URLs from the application.
+\end{enumerate}
+
+The hash is not a security token. Its purpose is to identify the content version in the filename.
+
+\section{ETag and conditional GET}
+
+Every static representation receives its own \code{ETag}. The browser can later send:
+
+\begin{lstlisting}
+If-None-Match: "velran-..."
+\end{lstlisting}
+
+If the representation has not changed, the server may return \code{304 Not Modified} without a body. HEAD is supported alongside GET.
+
+A static request does not create a session and does not send a session cookie. This matters for both performance and security: downloading CSS or a font should not become a session-lifecycle event.
+
+\section{Precompressed Brotli and gzip}
+
+The Velran server does not compress static files during the request. A release pipeline may prebuild:
+
+\begin{lstlisting}
+app.01234567.css
+app.01234567.css.br
+app.01234567.css.gz
+\end{lstlisting}
+
+Based on \code{Accept-Encoding}, the server chooses Brotli, then gzip, then the original representation. A compressed response includes headers such as:
+
+\begin{lstlisting}
+Content-Encoding: br
+Vary: Accept-Encoding
+\end{lstlisting}
+
+This avoids per-request compression CPU cost and does not expose dynamic compression work as part of the web request resource surface.
+
+\section{MIME, nosniff, and path confinement}
+
+The server maps known web extensions to MIME types and uses \code{application/octet-stream} for unknown extensions. Responses always include:
+
+\begin{lstlisting}
+X-Content-Type-Options: nosniff
+\end{lstlisting}
+
+Static paths are intentionally strict. Valid:
+
+\begin{lstlisting}
+/assets/css/app.01234567.css
+\end{lstlisting}
+
+Rejected forms include \code{..}, encoded traversal, backslashes, empty path components, and control characters. V1 does not allow percent-encoding in static paths; the build pipeline should use URL-safe filenames.
+
+On Linux, static-root access follows the same confinement philosophy as AppFs: serving assets must not become arbitrary host-filesystem reads through symlinks or traversal.
+
+\section{CSS, images, and fonts in Velran HTML}
+
+The V1 CSP allows same-origin style, image, font, and media assets. A normal release may therefore contain:
+
+\begin{lstlisting}
+/assets/css/app.01234567.css
+/assets/img/logo.a91f028c.svg
+/assets/fonts/ui-f1e2d3c4.woff2
+\end{lstlisting}
+
+HTML should always reference the fingerprinted URL that belongs to the release. Templates must not construct asset URLs from user input; the asset name is build data, not request data.
+
+\section{Important V1 boundary: JavaScript may be served, but not executed in Velran HTML}
+
+The static server knows the MIME types for \code{.js} and \code{.mjs}, so those build artifacts can physically be served. This does \textbf{not} mean that HTML rendered by Velran may execute scripts.
+
+In the V1 HTML security model:
+
+\begin{itemize}
+  \item CSP does not grant a \code{script-src} permission;
+  \item the compiler rejects \code{<script>} markup;
+  \item there is no inline-script or ``unsafe'' escape hatch.
+\end{itemize}
+
+This is an intentional security boundary. JavaScript \code{fetch} examples in the previous chapter therefore have two valid interpretations:
+
+\begin{enumerate}
+  \item a separate frontend application runs on its own origin and calls a Velran JSON API;
+  \item the code illustrates browser-API client behavior, not that a script tag can be embedded in V1 Velran HTML.
+\end{enumerate}
+
+For a classic Velran server-rendered application, build around HTML + CSS + typed form/action. If a full JavaScript frontend is required, deploy it separately and use Velran as a typed JSON backend.
+
+\section{Should Velran serve assets, or Apache/Nginx?}
+
+Two deployment models work.
+
+\subsection*{1. Velran-owned static namespace}
+
+This should be the default. The reverse proxy sends every request to Velran, which handles the \code{/assets/} namespace itself:
+
+\begin{lstlisting}
+Internet
+   |
+Apache / Nginx :443
+   |
+127.0.0.1:8080 Velran
+   |-- application routes
+   `-- /assets/*
+\end{lstlisting}
+
+The advantage is that fingerprint, ETag, precompressed, nosniff, and path policy stay in one place. This is usually more than sufficient for small and medium applications.
+
+\subsection*{2. The reverse proxy serves assets directly}
+
+At higher static traffic volumes, Apache or Nginx may serve the read-only release \code{public/} directory directly. If you do this, \textbf{you must reproduce} the important contract yourself:
+
+\begin{itemize}
+  \item separate read-only static root;
+  \item traversal/symlink-safe path handling;
+  \item correct MIME + \code{nosniff};
+  \item long immutable cache for fingerprinted files;
+  \item short/revalidatable cache for non-fingerprinted files;
+  \item correct \code{Vary} for Brotli/gzip;
+  \item no namespace collision with application routes.
+\end{itemize}
+
+This is an operator optimization, not a requirement for application correctness.
+
+\section{Nginx example for direct static serving}
+
+A simple starting point:
+
+\Needspace{15\baselineskip}
+\begin{lstlisting}
+server {
+    listen 443 ssl;
+    server_name app.example;
+
+    location /assets/ {
+        alias /srv/myapp/current/public/;
+        try_files $uri =404;
+        add_header X-Content-Type-Options nosniff always;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}
+\end{lstlisting}
+
+This is only a topology baseline. Production configuration must align cache policy, precompressed files, and symlink/release rules with the same immutable deployment model.
+
+\section{Apache example for direct static serving}
+
+The idea is the same with Apache:
+
+\Needspace{15\baselineskip}
+\begin{lstlisting}
+Alias /assets/ /srv/myapp/current/public/
+
+<Directory /srv/myapp/current/public/>
+    Require all granted
+    Options -Indexes
+    AllowOverride None
+    Header always set X-Content-Type-Options "nosniff"
+</Directory>
+
+ProxyPass        / http://127.0.0.1:8080/
+ProxyPassReverse / http://127.0.0.1:8080/
+\end{lstlisting}
+
+If Apache serves assets directly, the \code{Alias} rule must take effect before the proxy catch-all, and cache headers must be configured explicitly.
+
+\section{Deploy application code and assets as one release}
+
+A common asset failure is deploying HTML that references the new CSS filename while the static root still points to the old release -- or vice versa.
+
+Use this order:
+
+\begin{lstlisting}
+build application
+-> build/fingerprint assets
+-> optional .br/.gz
+-> immutable release directory
+-> preflight
+-> atomic current switch
+-> controlled restart/reload
+\end{lstlisting}
+
+Application code and the \code{public/} directory should be part of the same release artifact. Rollback then restores both together.
+
+\section{Checking with curl}
+
+After deployment, check at least:
+
+\begin{lstlisting}
+curl -I https://app.example/assets/css/app.01234567.css
+curl -I -H 'Accept-Encoding: br' \
+  https://app.example/assets/css/app.01234567.css
+curl -I -H 'If-None-Match: "velran-..."' \
+  https://app.example/assets/css/app.01234567.css
+\end{lstlisting}
+
+Verify \code{Content-Type}, \code{Cache-Control}, \code{ETag}, \code{X-Content-Type-Options}, and, for compressed representations, \code{Content-Encoding} and \code{Vary}.
+
+\section{Practical decision rule}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}lY@{}}
+\toprule
+Situation & Recommended approach \\
+\midrule
+server-rendered Velran page & Velran static root + CSS/image/font \\
+small/medium production & proxy forwards everything to Velran \\
+high static traffic & Apache/Nginx direct static with equivalent policy \\
+full JavaScript frontend & separate frontend deployment + Velran JSON API \\
+user upload & AppFs/media pipeline, not static root \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The most important rule is: \textbf{a static asset is a deployment artifact, not application data}. Preserving that boundary simplifies caching, rollback, backup, and security at the same time.
+
+\section{Verified companion example}
+The current static-asset companion is \path{examples/static-assets/app.vrn}. Keep release assets read-only and separate from AppFs/runtime state exactly as shown by the deployment model in this chapter.
+
+\section{Practice: classify every frontend file}
+\paragraph{Exercise mode: supported.} Use the supported method defined in the preface.
+
+Take the files used by a page and classify each as immutable deployment asset, generated HTML, JSON response, or mutable application data. Confirm that only immutable deployment assets live under the static root.
+
+\section{Common mistake: letting frontend convenience erase trust boundaries}
+A JavaScript frontend does not change server-side authorization requirements. Client validation and hidden controls are usability features; all authoritative validation, authorization, and mutation rules remain on the server boundary.
+
+\section{Running project checkpoint: Secure Notes}
+Add a small stylesheet and, if useful, progressive JavaScript enhancement to the notes UI. Keep the application functional without trusting client-side checks, and keep user-generated content outside the static asset tree.

@@ -1,0 +1,29 @@
+#[inline(never)]
+fn normalized_len(input: &str) -> i64 {
+    let cleaned = input.trim();
+    return cleaned.len();
+}
+
+#[inline(never)]
+fn contains_rust(input: &str) -> bool {
+    let normalized = input.to_lowercase();
+    return normalized.contains("rust");
+}
+
+#[page]
+fn pureString(ctx: PageContext, text: String) -> Result<Html, PageError> {
+    let length = normalized_len(&text);
+    let has_rust = contains_rust(&text);
+
+    return Ok(html {
+        <h1>Borrowed string pure function</h1>
+        <p>Input: {{ text }}</p>
+        <p>Trimmed length: {{ length }}</p>
+        <p>Contains rust: {{ has_rust }}</p>
+    });
+}
+
+route pureString GET "/pure-fn-borrowed-string"
+    query text<String>
+    validate text length 1 4096
+    public => pureString;

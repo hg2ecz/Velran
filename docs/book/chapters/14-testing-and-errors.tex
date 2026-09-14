@@ -1,0 +1,404 @@
+\chapter{Testing, error models, and developer diagnostics}
+
+\noindent\textbf{Learning path: Fast path: core before shipping.} Turn compiler, verifier, and runtime failures into a repeatable debugging workflow.\par\medskip
+
+\invariantblock{Security invariant: prove rejection too}{A security rule is not demonstrated only by a valid program succeeding. Keep negative tests that show forbidden variants are rejected, and treat an unexpected acceptance as a regression.}
+
+Compilation proves source and policy constraints, not business correctness or environment health. Testing must therefore cover the application state, real dependencies, migrations, authorization expectations, and deployed topology.
+
+\section{Read a security diagnostic in four passes}
+
+When the compiler or verifier rejects a program with a stable security code, do not start by looking for a way around the check. Read the diagnostic in four passes: identify the code, name the violated invariant, find the authority or data boundary involved, then make the smallest source change that restores that invariant. Re-run the check and keep the rejected variant as a negative test when the rule is security-significant.
+
+A useful debugging note therefore records four things: \emph{code}, \emph{boundary}, \emph{why the program was rejected}, and \emph{what evidence makes the corrected program acceptable}. This is more durable than memorizing message wording, and it teaches the same reasoning used during security review.
+
+Testing in Velran is therefore best treated as a set of layers that build on one another:
+
+\begin{enumerate}
+  \item \textbf{source check}: is the program valid in the language and policy sense;
+  \item \textbf{negative compile test}: is a dangerous or forbidden program actually rejected;
+  \item \textbf{application/database test}: does the business operation create the expected state;
+  \item \textbf{integration test}: do the real DB, Redis, LDAP, TLS, AppFs, or other dependencies work together correctly;
+  \item \textbf{system/smoke test}: does the installed system work over HTTP with the real configuration.
+\end{enumerate}
+
+The goal is not for every test to prove the same thing, but for every class of failure to break at the cheapest possible layer.
+
+\section{The first gate: \texttt{velran-cli check}}
+
+The fastest development check is:
+
+\begin{lstlisting}
+velran-cli check main.vrn
+\end{lstlisting}
+
+On success, the CLI summarizes the recognized program, for example the number of models, queries, pages, actions, and routes. The check does not start an HTTP server or mutate a database; it validates the source contract.
+
+Among other things, the compiler can catch here:
+
+\begin{itemize}
+  \item type mismatches;
+  \item mismatches between query result shape and \code{model};
+  \item invalid route or form declarations;
+  \item forbidden HTML/script constructions;
+  \item unsafe SQL construction or bind errors;
+  \item incompatible auth/cache/policy combinations;
+  \item certain violations of capability boundaries.
+\end{itemize}
+
+This is one of the key differences from a general-purpose scripting approach: a significant class of errors should be found before any HTTP request is made.
+
+\section{A negative test is as valuable as a positive test}
+
+For a security invariant, it is not enough to test that the correct program compiles. You must also prove that the forbidden program \emph{does not} compile.
+
+The repository release checks therefore run fixtures such as:
+
+\begin{lstlisting}
+# This must compile successfully:
+velran-cli check examples/auth/app.vrn
+
+# This must fail:
+velran-cli check \
+  tests/fixtures/security/sql-injection-rejected.vrn
+\end{lstlisting}
+
+Typical negative tests cover:
+
+\begin{itemize}
+  \item dynamic SQL suitable for SQL injection;
+  \item raw/script-like XSS attempts;
+  \item optional values used without a presence check;
+  \item invalid form/schema validation;
+  \item user-dependent routes with public cache;
+  \item public routes using object-level authorization guards;
+  \item forbidden upload paths or mixed JSON/form body modes.
+\end{itemize}
+
+A security rule is strong when the project contains \textbf{both positive and negative evidence} for it.
+
+A useful repository convention keeps those roles visible. Learner-facing, runnable applications stay under \path{examples/}; deliberately rejected compiler/security inputs live under \path{tests/fixtures/}; and lists used by verification tooling live under \path{tests/manifests/}. A positive example may still participate in \code{verify.sh}, but it should remain worth reading as application code. A rejection fixture does not need to look like a good application; its job is to isolate one invariant and fail for the intended reason.
+
+\section{Four different worlds of failure}
+
+When debugging, first decide which layer failed. The same user-visible symptom may require a completely different fix depending on the layer.
+
+\begin{description}
+  \item[Compile-time error] The source contract is invalid. \code{velran-cli check} or the build stops. Fix the code.
+  \item[Startup/config error] The program is valid, but server configuration, a secret, TLS key, or hard policy is invalid. Use \code{--check-config}, server logs, and effective config.
+  \item[Request/policy error] The server runs, but a request is rejected by input, authentication, authorization, rate-limit, or content-negotiation policy. Use the HTTP status, request ID, access log, and audit log.
+  \item[Dependency/runtime error] DB, Redis, LDAP, filesystem, network, or a resource limit causes the failure. Use readiness, metrics, server logs, and real integration tests.
+\end{description}
+
+A bad debugging reflex is to start rewriting source code for every 500/503 symptom. Identify the layer first.
+
+\section{Test configuration separately}
+
+Source checking does not replace server-configuration validation:
+
+\begin{lstlisting}
+velran-server \
+  --config /usr/local/etc/velran/server.toml \
+  --check-config
+\end{lstlisting}
+
+To inspect the fully resolved values before deployment:
+
+\begin{lstlisting}
+velran-server \
+  --config /usr/local/etc/velran/server.toml \
+  --print-effective-config
+\end{lstlisting}
+
+\code{--check-config} is not a dependency integration test. A syntactically valid DB URL can still point to an unavailable database; that is why readiness and deployment smoke tests exist separately.
+
+\section{Migration: status, verify, apply, verify}
+
+When the database changes, migration state is part of the test process:
+
+\begin{lstlisting}
+velran-cli migrate status \
+  --dir migrations \
+  --db-url-file /run/secrets/velran/migration-db-url
+
+velran-cli migrate verify \
+  --dir migrations \
+  --db-url-file /run/secrets/velran/migration-db-url
+\end{lstlisting}
+
+A good deployment order is:
+
+\begin{lstlisting}
+source/config check
+-> migration verify
+-> migration apply
+-> migration verify
+-> application rollout
+-> readiness
+-> smoke test
+\end{lstlisting}
+
+Do not modify an already-applied migration merely to make a test green. Put new changes into a new migration.
+
+\section{Business tests: prove state, not implementation}
+
+A CRUD or CMS action test should not primarily ask whether a certain internal function was called. Assert the externally observable state.
+
+For article publishing, for example:
+
+\begin{enumerate}
+  \item create a draft article;
+  \item authenticate with the Publisher role;
+  \item submit the publish action;
+  \item verify the redirect;
+  \item read the article back and verify the \code{Published} state;
+  \item verify the business-audit record;
+  \item verify that the public page now shows the new state;
+  \item for a cached route, verify invalidation too.
+\end{enumerate}
+
+This test remains valuable even if queries or module structure are later reorganized internally.
+
+\section{Database tests: SQLite does not prove everything}
+
+A separate temporary SQLite database is convenient for fast development tests. But if production uses PostgreSQL or MariaDB, test against the real backend at least in the release/integration suite.
+
+Particularly sensitive areas include:
+
+\begin{itemize}
+  \item transaction behavior;
+  \item constraints and unique conflicts;
+  \item concurrent mutation and optimistic locking;
+  \item indexes/query plans;
+  \item migration DDL;
+  \item timeouts and connection availability.
+\end{itemize}
+
+A backend-independent typed query contract rules out many mistakes, but it does not make backend behavior identical.
+
+\section{Authentication and authorization test matrix}
+
+For a protected action, test at least:
+
+\begin{longtable}{L{0.42\textwidth}L{0.44\textwidth}}
+\toprule
+Case & Expected result \\
+\midrule
+No session & login/auth rejection \\
+Valid user, missing required role & authorization deny \\
+Required role present & successful operation \\
+MFA-required route, no MFA & MFA rejection \\
+Expired or revoked session & new authentication required \\
+Invalid CSRF token on state change & request rejected \\
+Object not owned by user & object-authorization deny \\
+Admin/allowed actor & successful operation \\
+\bottomrule
+\end{longtable}
+
+When using LDAP/LDAPS or Redis, include real dependency integration tests. A mock does not prove TLS hostname validation, network timeout behavior, or Redis fail-closed semantics.
+
+\section{File, media, API, and cache tests}
+
+For these features, happy-path coverage is especially insufficient.
+
+\subsection*{Upload and media}
+
+Test at least:
+
+\begin{itemize}
+  \item a valid small file;
+  \item byte-limit overflow;
+  \item image pixel-limit overflow;
+  \item malicious/invalid filename;
+  \item path traversal or symlink escape rejection;
+  \item interrupted-upload cleanup.
+\end{itemize}
+
+\subsection*{JSON/CORS}
+
+In addition to valid JSON, test incorrect content type, duplicate keys, unknown fields, \code{Accept} negotiation, preflight, and the interaction of CSRF and CORS for credentialed state changes.
+
+\subsection*{Cache and rate limiting}
+
+Test that user-dependent pages cannot become public cache, that mutations invalidate the right cache generation, that shared state is actually shared across instances, and that Redis failure follows the chosen security fail-closed behavior.
+
+\section{An HTTP error code is not the same thing as a program bug}
+
+The client-visible status is part of the contract. Typical cases are:
+
+\begin{longtable}{L{0.61\textwidth}r}
+\toprule
+Situation & HTTP \\
+\midrule
+Malformed input or request-contract violation & 400 \\
+No valid authentication on JSON/API route & 401 \\
+Actor/policy does not allow the operation & 403 \\
+Resource not found & 404 \\
+Wrong HTTP method & 405 \\
+Representation not acceptable & 406 \\
+Concurrent modification / zero rows for \code{Changed} & 409 \\
+Request/upload too large & 413 \\
+Wrong or missing body content type & 415 \\
+Host/trust-boundary mismatch & 421 \\
+Named-form field error with rerender & 422 \\
+HTTPS required & 426 \\
+Rate limit & 429 \\
+Request header too large & 431 \\
+Internal unclassified server failure & 500 \\
+Dependency or request resource temporarily unavailable & 503 \\
+\bottomrule
+\end{longtable}
+
+Never send SQL, secrets, physical filesystem paths, session tokens, or stack traces to the client. Detailed diagnosis stays in server-side logs and is correlated by request ID.
+
+\subsection*{Status and representation are separate contracts}
+
+The same business situation may have a different representation on HTML and JSON surfaces. This is not inconsistency: status expresses the error category, while representation expresses the client-facing surface contract.
+
+\begin{longtable}{L{0.27\textwidth}L{0.31\textwidth}L{0.31\textwidth}}
+\toprule
+Situation & HTML route & JSON route \\
+\midrule
+\endhead
+No session & \code{303 See Other} to built-in login page & \code{401} + JSON error envelope \\
+\addlinespace
+Authorization denied & \code{403} & \code{403} + JSON error envelope \\
+\addlinespace
+Optimistic-lock conflict & \code{409} conflict page, \code{no-store} & \code{409} + JSON \code{error=conflict} \\
+\addlinespace
+Named-form validation & \code{422}, form rerendered with field errors & not a JSON body mode; body contracts are exclusive \\
+\addlinespace
+Record not found & \code{404} & \code{404} + JSON error envelope \\
+\bottomrule
+\end{longtable}
+
+A successful mutating HTML action typically returns \code{303 See Other} for Post/Redirect/Get. A \code{303} is therefore not an error; it is part of browser control flow.
+
+\section{Test exhaustive exceptional states}
+
+Velran closed sum types make security-relevant exceptional states testable at compile time. A \code{match} has no catch-all wildcard, so adding a new enum/sum variant forces every affected match site to be reviewed.
+
+For critical transactions, include tests for all three outcomes:
+
+\begin{itemize}
+  \item \code{Committed}: the success path is returned and replay state is stable;
+  \item \code{RolledBack}: the operation did not take effect and the public result is safe;
+  \item \code{CommitUnknown}: no automatic side-effect retry occurs and the caller receives an explicitly handled safe outcome.
+\end{itemize}
+
+Negative compiler tests should also prove that an idempotent critical transaction without outcome capture, or without exhaustive matching, is rejected.
+
+\section{Debugging with request IDs}
+
+When an HTTP request fails, the best first diagnostic key is the request ID generated by the server. Starting from the client response or access log:
+
+\begin{lstlisting}
+grep 'velran-...' /var/log/velran/access.log
+grep 'velran-...' /var/log/velran/server.log
+grep 'velran-...' /var/log/velran/audit.log
+\end{lstlisting}
+
+The three logs answer different questions:
+
+\begin{itemize}
+  \item access: what arrived and what status ended the request;
+  \item server: what technical/runtime event occurred;
+  \item audit: whether a security or user-policy decision occurred.
+\end{itemize}
+
+Preserve this diagnostic chain in automated test failure output too.
+
+\section{Deployment smoke test}
+
+A green CI run does not prove that the freshly installed service actually started. After rollout, check at least:
+
+\begin{lstlisting}
+curl --fail --silent \
+  https://example.test/health/live
+
+curl --fail --silent \
+  https://example.test/health/ready
+
+curl --fail --silent \
+  https://example.test/
+\end{lstlisting}
+
+Keep smoke tests small and non-destructive. If you also test a state-changing endpoint, use isolated test data and idempotent cleanup; do not experiment on production content.
+
+\section{What does the repository \texttt{verify.sh} mean?}
+
+Inside the Velran source tree, the full release-evidence entry point is:
+
+\begin{lstlisting}
+./verify.sh
+\end{lstlisting}
+
+It combines source checks with Rust workspace tests, learner-facing positive programs from \path{examples/}, rejection/security fixtures from \path{tests/fixtures/}, manifest-driven corpus checks from \path{tests/manifests/}, migration/auth/storage/runtime checks, and release-artifact invariants.
+
+If you modify the Velran implementation itself, this is the release minimum. If you only develop your own \code{.vrn} application, the daily loop can be smaller, but your release process should still include source check, migration/config validation, relevant integration tests, and post-deployment smoke testing.
+
+\section{Recommended development cycle}
+
+A good baseline for everyday feature development is:
+
+\begin{lstlisting}
+1. design domain/model change
+2. write migration if needed
+3. velran-cli check main.vrn
+4. fast application test
+5. negative/security cases
+6. migration verify
+7. relevant integration test
+8. velran-server --config server.toml --check-config
+9. deploy to staging
+10. readiness + HTTP smoke
+11. production rollout
+12. readiness + smoke + metrics/log review
+\end{lstlisting}
+
+The principle is that fast deterministic failures should happen early; expensive environment-dependent tests should run only after them.
+
+\section{Debugging decision order}
+
+When ``it does not work,'' proceed consistently:
+
+\begin{enumerate}
+  \item Does it compile? Run \code{velran-cli check}.
+  \item Is the config valid? Run \code{--check-config}.
+  \item Did the service start? Inspect service and server logs.
+  \item Is the process alive? Check liveness.
+  \item Are dependencies reachable? Check readiness.
+  \item Does the request reach the route? Inspect access log and request ID.
+  \item Is policy rejecting it? Inspect audit log and trust-boundary status (for example forwarding 400, 401/403/421/426/429).
+  \item Is runtime/dependency failing? Inspect server log and metrics.
+  \item Is the business result wrong? Reproduce with isolated test data and inspect persistent state.
+\end{enumerate}
+
+This is much faster than simultaneously changing code, proxy configuration, and database state.
+
+\section{Minimum application release checklist}
+
+\begin{itemize}
+  \item \code{velran-cli check} is green;
+  \item migration history verify is green;
+  \item server config check is green;
+  \item positive and negative tests for critical business flows are green;
+  \item auth/authorization/security regression cases are green;
+  \item integration tests against production-equivalent DB/Redis/TLS are green;
+  \item backup/restore readiness is known;
+  \item staging readiness and smoke are green;
+  \item after rollout, readiness, smoke, logs, and metrics are reviewed.
+\end{itemize}
+
+The goal is repeatable evidence for the important contracts: \textbf{what we allow, what we deny, what state we create, and how dependency failure behaves}.
+
+\section{Practice: derive negative tests from boundaries}
+\paragraph{Exercise mode: independent.} Use the independent method defined in the preface.
+
+For every trusted transition in a feature, write at least one test where the transition must be rejected: malformed input, missing authorization, stale version, exhausted budget, or unavailable dependency. Negative tests are most valuable when they prove the boundary itself rather than only an error string.
+
+\section{Common mistake: testing only successful handlers}
+A security-first framework earns much of its value from what it refuses to execute. Keep compile-time rejection, verification failure, and runtime failure tests separate so a regression cannot silently move a protection to a later and weaker phase.
+
+\section{Running project checkpoint: Secure Notes}
+Build a compact test matrix for create, view, edit, publish, and delete. Include another user's identifier, stale edit version, invalid input bounds, and an integration failure. The project should now have evidence for both expected success and expected refusal.

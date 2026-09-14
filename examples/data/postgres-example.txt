@@ -1,0 +1,1 @@
+postgres://velran:SECRET@db.example/velran?sslmode=verify-full

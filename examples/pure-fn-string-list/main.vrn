@@ -1,0 +1,14 @@
+#[inline(never)]
+fn echo_tags(tags: &[String]) -> Vec<String> {
+    return tags;
+}
+
+#[page]
+fn pureStringList(ctx: PageContext, text: String) -> Result<Html, PageError> {
+    let tags = splitBounded(text, ",", 16);
+    let echoed = echo_tags(&tags);
+    let count = echoed.len();
+    return Ok(html {<p>items={{ count }}</p>});
+}
+
+route GET "/pure-fn-string-list" -> pureStringList

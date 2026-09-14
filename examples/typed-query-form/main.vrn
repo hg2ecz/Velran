@@ -1,0 +1,47 @@
+struct SearchParams {
+    q: String,
+    page: i64,
+}
+
+struct LoginInput {
+    email: String,
+    remember: bool,
+}
+
+#[page]
+fn search(ctx: PageContext, input: Query<SearchParams>) -> Result<Html, PageError> {
+    let clean = input.q.trim();
+    return Ok(html {
+        <main>
+            <h1>Search</h1>
+            <p>Query: {{ clean }}</p>
+            <p>Page: {{ input.page }}</p>
+        </main>
+    });
+}
+
+#[page]
+fn loginPage(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {
+        <main>
+            <form method="post" @action(login)>
+                <input type="hidden" name="_csrf" value="{{ csrfToken }}">
+                <input name="email">
+                <select name="remember">
+                    <option value="false">No</option>
+                    <option value="true">Yes</option>
+                </select>
+                <button type="submit">Login</button>
+            </form>
+        </main>
+    });
+}
+
+#[action]
+fn login(ctx: ActionContext, input: Form<LoginInput>) -> Result<Redirect, PageError> {
+    return Ok(redirect(loginPage()));
+}
+
+route search GET "/search" query SearchParams public => search;
+route loginPage GET "/login" public => loginPage;
+route login POST "/login" form LoginInput public => login;

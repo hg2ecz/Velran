@@ -1,0 +1,8 @@
+model User { id: i64 }
+#[query]
+fn bad(db: Db, id: i64) -> Result<User, DbError> mutates Article by id sql {
+    SELECT id FROM users WHERE id = :other
+}
+#[page]
+fn home(ctx: PageContext) -> Result<Html, PageError> { return Ok(html {ok}); }
+route home GET "/" public => home;

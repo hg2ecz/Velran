@@ -1,0 +1,13 @@
+struct UploadInput {
+    title: String,
+    file: Upload,
+}
+
+#[action]
+fn save(ctx: ActionContext, input: Multipart<UploadInput>) -> Result<Json, PageError> {
+    let saved_path = input.file.path;
+    let title = input.title.trim();
+    return Ok(json(saved_path));
+}
+
+route save POST "/typed-multipart" multipart UploadInput to "private" public => save;
