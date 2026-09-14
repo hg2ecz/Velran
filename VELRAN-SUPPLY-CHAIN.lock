@@ -1,5 +1,5 @@
 format velran-supply-chain-v1
-cargo-lock-sha256 d3a7d38a01627403043f5ee78b3b4cd2d5d4d094cb1fd17a6de20bf8017ebd55
+cargo-lock-sha256 2268c32a08a2a65fcca6696dc84e49a5db0bb8ebd05881a5973574ed119b334f
 capability-policy-sha256 aad34a5e4026fcf565bc4cd4d86e023d434aaa8fc7c4a481e52e61b2311b53fd
 provenance crates.io-checksummed-only
 capability-model direct-external-dependency-edge
