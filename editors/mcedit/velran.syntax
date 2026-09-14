@@ -14,6 +14,15 @@ context default
     keyword whole integration brightcyan
     keyword whole security brightcyan
     keyword whole event brightcyan
+    keyword whole pub brightcyan
+    keyword whole use brightcyan
+    keyword whole struct brightcyan
+    keyword whole impl brightcyan
+    keyword whole self brightcyan
+    keyword whole Self brightcyan
+    keyword whole crate brightcyan
+    keyword whole super brightcyan
+    keyword whole as brightcyan
 
     keyword whole page yellow
     keyword whole action yellow
@@ -25,6 +34,8 @@ context default
     keyword whole set yellow
     keyword whole while yellow
     keyword whole if yellow
+    keyword whole else yellow
+    keyword whole match yellow
     keyword whole return yellow
     keyword whole with yellow
     keyword whole resource yellow
@@ -75,6 +86,9 @@ context default
     keyword whole items brightmagenta
     keyword whole required brightmagenta
 
+    keyword whole i64 brightcyan
+    keyword whole f32 brightcyan
+    keyword whole bool brightcyan
     keyword whole String brightcyan
     keyword whole Email brightcyan
     keyword whole Url brightcyan
@@ -98,6 +112,7 @@ context default
     keyword whole PageError brightcyan
     keyword whole DbError brightcyan
     keyword whole Result brightcyan
+    keyword whole Option brightcyan
     keyword whole List brightcyan
     keyword whole Dict brightcyan
     keyword whole Array brightcyan
@@ -111,6 +126,10 @@ context default
     keyword whole RolledBack brightred
     keyword whole CommitUnknown brightred
     keyword whole Changed brightred
+    keyword whole Some brightred
+    keyword whole None brightred
+    keyword whole Ok brightred
+    keyword whole Err brightred
 
     keyword => brightmagenta
     keyword -> brightmagenta
