@@ -19,6 +19,16 @@ Examples include `fn`, `let`, `let mut`, Rust primitive/container type spellings
 
 The compiler may lower some of these forms to compact verified IR rather than forwarding source text verbatim. The user-visible contract is Rust syntax; verification remains authoritative before code generation.
 
+## Verified pure compute contract
+
+The Rust-first policy applies to verified pure functions as well: normal local constructs should use normal Rust-like spellings when the compiler can verify them without widening authority.
+
+Current pure computation supports by-value `i64` and `bool`, immutable `&str`, `&[String]` and borrowed declared structs, plus a separate explicit `&mut [f32; N]` numeric-kernel family. Scalar/borrowed helpers may call one another with typed expression arguments. Scalar recursion is runtime depth-bounded and resource-accounted; recursive cycles that touch the mutable numeric hot path are rejected. The scalar and numeric helper families cannot cross-call while their verified internal ABIs remain separate.
+
+`if` / `else if` / `else` is first-class verified control flow. Lowering evaluates each condition once and preserves its static security metadata. String `.to_string()` and explicit immutable borrows at string-oriented builtin positions are verified operations rather than generic source-text passthrough.
+
+See [`docs/58-verified-pure-functions.md`](docs/58-verified-pure-functions.md) for the normative language contract.
+
 ## Security boundary
 
 The generated application shard is std-only and safe Rust. The verifier, not `rustc` alone, decides whether an operation is allowed in the web sandbox. Pure code receives no HostApi capability. External effects receive only the explicitly verified capability surface required by the handler.
@@ -40,7 +50,7 @@ The direct rustc invocation removes Cargo/Rust injection points such as `RUSTFLA
 
 ### Diagnostics policy
 
-A failed rustc invocation is captured as a first-class build diagnostic (bounded to prevent log/memory amplification). It is available to the console and error chain. With non-production `debug_compile_errors`, source reload also writes the detailed diagnostic to the server error log and serves an HTML-escaped, domain-scoped developer error page while the last known-good generation remains active. Production policy continues to reject detailed web compiler diagnostics and rustc reproduction artifacts.
+A failed rustc invocation is captured as a first-class build diagnostic (bounded to prevent log/memory amplification). It is available to the console and error chain. Frontend expression/control-flow diagnostics also preserve source location; file compilation reports the originating path and line, including nested pure `if`/`else`/`while` parsing. With non-production `debug_compile_errors`, source reload also writes the detailed diagnostic to the server error log and serves an HTML-escaped, domain-scoped developer error page while the last known-good generation remains active. Production policy continues to reject detailed web compiler diagnostics and rustc reproduction artifacts.
 
 ### Inherent `impl` status
 

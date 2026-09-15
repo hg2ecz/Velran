@@ -121,6 +121,103 @@ Web/data boundary & ordinary typed expressions & \code{route}, \code{html}, \cod
 
 This split is not an invitation to bypass the framework. Rust-like syntax is accepted only when it can preserve the same verified, bounded web semantics through native lowering.
 
+
+\section{Verified pure computation}
+
+Verified pure functions are Velran's reusable application-compute layer. They are ordinary Rust-like \code{fn} declarations that run without ambient web/server authority and are lowered through verified IR to generated safe Rust. Use them for parsers, renderers, validators, transforms, numeric kernels, and other reusable computation that should not need direct database, filesystem, network, process, environment, thread, FFI, or \code{unsafe} access.
+
+\subsection*{Parameter families and explicit borrowing}
+
+The scalar/borrowed family currently accepts immutable by-value \code{i64} and \code{bool}, plus explicit immutable \code{\&str}, \code{\&[String]}, and \code{\&Struct} parameters. The mutable numeric hot-path family accepts fixed arrays of the form \code{\&mut [f32; N]}. The two families deliberately remain separate while they use different verified internal ABIs.
+
+\begin{lstlisting}[language=Velran]
+fn choose(value: i64, enabled: bool) -> i64 {
+    if enabled {
+        return value;
+    }
+    return 0;
+}
+
+fn normalize(input: &str) -> String {
+    return input.trim().to_lowercase();
+}
+
+fn kernel(real: &mut [f32; 16]) -> f32 {
+    real[0] = real[0] + 1.0f32;
+    return real[0];
+}
+\end{lstlisting}
+
+Mutable array borrowing stays explicit at the call site:
+
+\begin{lstlisting}[language=Velran]
+kernel(&mut real)
+\end{lstlisting}
+
+The compiler does not silently reinterpret \code{kernel(real)} as a mutable borrow. This is a security and readability boundary, not ceremony.
+
+\subsection*{Pure-to-pure calls, recursion, and budgets}
+
+Scalar/borrowed pure functions may call other scalar/borrowed pure helpers with normal typed expressions, not only variable names. Child work stays inside the same instruction and allocation accounting; helper calls are not an unmetered escape hatch.
+
+\begin{lstlisting}[language=Velran]
+fn step(value: i64, enabled: bool) -> i64 {
+    if enabled {
+        return value + 1;
+    }
+    return value;
+}
+
+fn run(value: i64) -> i64 {
+    let first = step(value + 1, true);
+    let mut out = 0;
+    out = step(first, false);
+    return out;
+}
+\end{lstlisting}
+
+Scalar/borrowed recursion is supported but runtime depth-bounded. Generated code carries a pure-call depth budget with a current hard maximum of 64 nested calls, in addition to the normal instruction and allocation budgets. Recursive cycles that touch the mutable numeric hot-path family fail closed at compile time.
+
+The rule is intentionally asymmetric: ordinary scalar algorithms may use bounded recursion where it improves clarity, while the special mutable-array ABI remains more restrictive until the compiler can prove equivalent safety across that boundary.
+
+\subsection*{Control flow and returns}
+
+Verified pure code supports normal Rust-like \code{if}, \code{else if}, \code{else}, and resource-budgeted \code{while}. Every branch condition is evaluated exactly once, and compiler-created temporaries preserve the original static security metadata; an untrusted boolean is never silently promoted to trusted.
+
+Nested early \code{return} statements are type-checked against the declared function return type. For the current lowering, non-unit functions still require a final top-level return even when earlier branches return.
+
+\begin{lstlisting}[language=Velran]
+fn classify(value: i64) -> i64 {
+    if value < 0 {
+        return -1;
+    } else if value == 0 {
+        return 0;
+    } else {
+        return 1;
+    }
+    return 0; // current final-return contract
+}
+\end{lstlisting}
+
+\subsection*{Strings and immutable builtin borrows}
+
+Rust-like string methods such as \code{.trim()}, \code{.to_lowercase()}, and \code{.to_string()} are verified operations. String-producing work remains allocation-accounted. String-oriented builtins accept an explicit immutable borrow only where their argument contract is string-like:
+
+\begin{lstlisting}[language=Velran]
+let tail = substring(&text, 1);
+let first = charAt(&tail, 0);
+\end{lstlisting}
+
+The compiler does not erase \code{\&} generically. A builtin argument that does not accept an immutable borrow remains a compile error, and \code{\&mut} is never accepted as a substitute for an immutable string argument.
+
+\subsection*{SafeHtml and library-owned renderers}
+
+\code{SafeHtml} is a typed output boundary, not a trusted-string convention. Ordinary \code{String} interpolation into \code{html \{ ... \}} is escaped; only a \code{SafeHtml} value is emitted without another escaping pass. The compiler/framework owns generic escaping, SafeHtml constructors, tag policy, URL policy, JSON handling, typed SQL boundaries, and related web-safety invariants. Domain-specific renderers remain application/library code.
+
+Markdown/CommonMark therefore lives in Velran source such as \path{common/commonmark.vrn}; it is not an engine feature. There is intentionally no \code{@markdown(...)} directive. Unknown template call-directives shaped like \code{@name(...)} fail fast instead of silently becoming literal text, which also catches misspellings.
+
+\invariantblock{Security first, productivity second}{Do not weaken authority, type, aliasing, XSS, SQL, JSON, or resource invariants merely to accept more syntax. At the same time, do not force application code into unnatural rewrites when a normal construct can be implemented while preserving those invariants.}
+
 \subsection*{Statement terminators}
 
 Velran uses an explicit semicolon as the terminator for simple statements. Newlines are whitespace, not statement boundaries; there is no automatic semicolon insertion. This keeps multiline expressions deterministic and makes generated/audited code unambiguous.
@@ -257,10 +354,10 @@ let parts = splitBounded(rewritten, "-", 4096);
 \textbf{Function} & \textbf{Signature} \\
 \midrule
 \code{text.chars().count()} & \code{String -> i64} \\
-\code{text.trim()/trim\_start()/trim\_end()} & \code{String -> String} \\
-\code{text.to\_lowercase()/to\_uppercase()} & \code{String -> String} \\
+\code{text.trim()/trim_start()/trim_end()} & \code{String -> String} \\
+\code{text.to_lowercase()/to_uppercase()} & \code{String -> String} \\
 \code{text.contains(needle)} & \code{String, String -> bool} \\
-\code{text.starts\_with(part) / text.ends\_with(part)} & \code{String, String -> bool} \\
+\code{text.starts_with(part) / text.ends_with(part)} & \code{String, String -> bool} \\
 \code{text.replace(search, replacement)} & \code{String, String, String -> String} \\
 \code{splitBounded(text, delimiter, maxItems)} & \code{String, String, i64 -> Vec<String>} \\
 \code{substring(text, start[, length])} & \code{String, i64[, i64] -> String} \\

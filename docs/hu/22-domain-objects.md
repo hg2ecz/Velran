@@ -20,6 +20,8 @@ Az `object` nem klasszikus OOP-osztály. Inkább egy domain namespace, amelyhez 
 ## Első példa
 
 ```velran
+mod commonmark;
+
 object Article {
     model {
         id: i64
@@ -39,10 +41,11 @@ fn bySlug(db: Db, slug: Slug) -> Result<Article, DbError> sql {
     #[page]
 fn show(ctx: PageContext, db: Db, slug: Slug) -> Result<Html, PageError> {
         let article = Article.bySlug(db, slug)?;
+        let markdown_html = commonmark::render(&article.body);
         return Ok(html {
             <article>
                 <h1>{{ article.title }}</h1>
-                @markdown(article.body)
+                {{ markdown_html }}
             </article>
         });
     }

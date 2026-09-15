@@ -1,3 +1,5 @@
+mod commonmark;
+
 model Article {
     id: i64
     title: String
@@ -12,10 +14,11 @@ fn articleById(db: Db, id: i64) -> Result<Article, DbError> sql {
 #[page]
 fn article(ctx: PageContext, db: Db, id: i64) -> Result<Html, PageError> {
     let article = articleById(db, id)?;
+    let markdown_html = commonmark::render(&article.body);
     return Ok(html {
         <article>
             <h1>{{ article.title }}</h1>
-            <div class="article-body">@markdown(article.body)</div>
+            <div class="article-body">{{ markdown_html }}</div>
         </article>
     });
 }

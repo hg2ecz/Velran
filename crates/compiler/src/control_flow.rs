@@ -13,6 +13,17 @@ use crate::{arrays, dicts};
 use language_core::{ActionStatement, ComputeStatement, Expr, Program, Statement, ValueType};
 use std::collections::HashMap;
 
+fn fresh_internal_local(prefix: &str, seed: usize, known: &HashMap<String, StaticType>) -> String {
+    let mut index = seed;
+    loop {
+        let candidate = format!("{prefix}{index}");
+        if !known.contains_key(&candidate) {
+            return candidate;
+        }
+        index = index.saturating_add(1);
+    }
+}
+
 fn validate_compute_expr(
     expr: &language_core::Expr,
     known: &HashMap<String, StaticType>,
@@ -23,6 +34,39 @@ fn validate_compute_expr(
     crate::visibility::validate_pure_expr_access(expr, known, program, namespace)
 }
 
+fn line_for_offset(body: &str, cursor: usize, line_base: Option<usize>) -> Option<usize> {
+    line_base.map(|base| {
+        base + body[..cursor.min(body.len())]
+            .bytes()
+            .filter(|b| *b == b'\n')
+            .count()
+    })
+}
+
+fn with_expression_line(err: CompileError, line: Option<usize>) -> CompileError {
+    let Some(line) = line else {
+        return err;
+    };
+    match err {
+        CompileError::Syntax(message) if !message.starts_with("line ") => {
+            CompileError::Syntax(format!("line {line}: {message}"))
+        }
+        other => other,
+    }
+}
+
+fn parse_expr_at(
+    raw: &str,
+    namespace: &str,
+    p: &Program,
+    body: &str,
+    cursor: usize,
+    line_base: Option<usize>,
+) -> Result<Expr, CompileError> {
+    parse_expr_in_namespace(raw, namespace, p)
+        .map_err(|err| with_expression_line(err, line_for_offset(body, cursor, line_base)))
+}
+
 pub(super) fn parse_while_block(
     handler_kind: &str,
     handler_name: &str,
@@ -31,6 +75,7 @@ pub(super) fn parse_while_block(
     cursor: usize,
     known: &HashMap<String, StaticType>,
     p: &Program,
+    line_base: Option<usize>,
 ) -> Result<(Expr, Vec<ComputeStatement>, usize), CompileError> {
     let cond_start = cursor + "while ".len();
     let open = body[cond_start..]
@@ -39,7 +84,14 @@ pub(super) fn parse_while_block(
         .ok_or_else(|| {
             CompileError::Syntax(format!("{handler_kind} `{handler_name}` while missing {{"))
         })?;
-    let condition = parse_expr_in_namespace(body[cond_start..open].trim(), namespace, p)?;
+    let condition = parse_expr_at(
+        body[cond_start..open].trim(),
+        namespace,
+        p,
+        body,
+        cond_start,
+        line_base,
+    )?;
     validate_compute_expr(&condition, known, p, namespace)?;
     if infer_expr_type(&condition, known, p)? != ValueType::Bool {
         return Err(CompileError::Syntax(format!(
@@ -59,6 +111,7 @@ pub(super) fn parse_while_block(
         &body[open + 1..close],
         &mut inner_known,
         p,
+        line_base.map(|base| base + body[..open + 1].bytes().filter(|b| *b == b'\n').count()),
     )?;
     Ok((condition, statements, close))
 }
@@ -71,6 +124,7 @@ pub(super) fn parse_if_block(
     cursor: usize,
     known: &HashMap<String, StaticType>,
     p: &Program,
+    line_base: Option<usize>,
 ) -> Result<(Expr, Vec<ComputeStatement>, usize), CompileError> {
     let cond_start = cursor + "if ".len();
     let open = body[cond_start..]
@@ -79,7 +133,14 @@ pub(super) fn parse_if_block(
         .ok_or_else(|| {
             CompileError::Syntax(format!("{handler_kind} `{handler_name}` if missing {{"))
         })?;
-    let condition = parse_expr_in_namespace(body[cond_start..open].trim(), namespace, p)?;
+    let condition = parse_expr_at(
+        body[cond_start..open].trim(),
+        namespace,
+        p,
+        body,
+        cond_start,
+        line_base,
+    )?;
     validate_compute_expr(&condition, known, p, namespace)?;
     if infer_expr_type(&condition, known, p)? != ValueType::Bool {
         return Err(CompileError::Syntax(format!(
@@ -97,8 +158,113 @@ pub(super) fn parse_if_block(
         &body[open + 1..close],
         &mut inner_known,
         p,
+        line_base.map(|base| base + body[..open + 1].bytes().filter(|b| *b == b'\n').count()),
     )?;
     Ok((condition, statements, close))
+}
+
+fn parse_and_lower_if_chain(
+    handler_kind: &str,
+    handler_name: &str,
+    namespace: &str,
+    body: &str,
+    cursor: usize,
+    known: &mut HashMap<String, StaticType>,
+    p: &Program,
+    local_seed: usize,
+    line_base: Option<usize>,
+) -> Result<(Vec<ComputeStatement>, usize), CompileError> {
+    let (condition, statements, close) = parse_if_block(
+        handler_kind,
+        handler_name,
+        namespace,
+        body,
+        cursor,
+        known,
+        p,
+        line_base,
+    )?;
+    let after_if = skip_ws_and_comments(body, close + 1);
+    let has_else = body[after_if..].starts_with("else")
+        && body
+            .as_bytes()
+            .get(after_if + "else".len())
+            .is_some_and(|b| b.is_ascii_whitespace() || *b == b'{' || *b == b'/');
+
+    if !has_else {
+        return Ok((
+            vec![ComputeStatement::If {
+                condition,
+                statements,
+            }],
+            close,
+        ));
+    }
+
+    let after_else = skip_ws_and_comments(body, after_if + "else".len());
+    let (else_statements, chain_close) = if body[after_else..].starts_with("if ") {
+        let mut else_known = known.clone();
+        parse_and_lower_if_chain(
+            handler_kind,
+            handler_name,
+            namespace,
+            body,
+            after_else,
+            &mut else_known,
+            p,
+            local_seed + 1,
+            line_base,
+        )?
+    } else if body.as_bytes().get(after_else) == Some(&b'{') {
+        let else_close = matching_brace(body, after_else).ok_or_else(|| {
+            CompileError::Syntax(format!(
+                "{handler_kind} `{handler_name}` else block unclosed"
+            ))
+        })?;
+        let mut else_known = known.clone();
+        let statements = parse_compute_statements(
+            handler_kind,
+            handler_name,
+            namespace,
+            &body[after_else + 1..else_close],
+            &mut else_known,
+            p,
+            line_base.map(|base| {
+                base + body[..after_else + 1]
+                    .bytes()
+                    .filter(|b| *b == b'\n')
+                    .count()
+            }),
+        )?;
+        (statements, else_close)
+    } else {
+        return Err(CompileError::Syntax(format!(
+            "{handler_kind} `{handler_name}` else must use a block or `else if`"
+        )));
+    };
+
+    let condition_local = fresh_internal_local("__velran_if_condition_", local_seed, known);
+    let condition_type = infer_static_expr_type(&condition, known, p)?;
+    known.insert(condition_local.clone(), condition_type);
+    Ok((
+        vec![
+            ComputeStatement::Let {
+                name: condition_local.clone(),
+                expr: condition,
+            },
+            ComputeStatement::If {
+                condition: language_core::Expr::Variable(condition_local.clone()),
+                statements,
+            },
+            ComputeStatement::If {
+                condition: language_core::Expr::Not(Box::new(language_core::Expr::Variable(
+                    condition_local,
+                ))),
+                statements: else_statements,
+            },
+        ],
+        chain_close,
+    ))
 }
 
 pub(super) fn parse_pure_compute_statements(
@@ -107,8 +273,17 @@ pub(super) fn parse_pure_compute_statements(
     body: &str,
     known: &mut HashMap<String, StaticType>,
     p: &Program,
+    line_base: usize,
 ) -> Result<Vec<ComputeStatement>, CompileError> {
-    parse_compute_statements("pure fn", function_name, namespace, body, known, p)
+    parse_compute_statements(
+        "pure fn",
+        function_name,
+        namespace,
+        body,
+        known,
+        p,
+        Some(line_base),
+    )
 }
 
 fn parse_compute_statements(
@@ -118,6 +293,7 @@ fn parse_compute_statements(
     body: &str,
     known: &mut HashMap<String, StaticType>,
     p: &Program,
+    line_base: Option<usize>,
 ) -> Result<Vec<ComputeStatement>, CompileError> {
     let mut out = Vec::new();
     let mut cursor = 0usize;
@@ -126,18 +302,16 @@ fn parse_compute_statements(
         if cursor >= body.len() {
             break;
         }
-        if handler_kind != "pure fn" {
-            if let Some((function, args, next)) =
-                crate::pure_calls::parse(body, cursor, namespace, known, p)?
-            {
-                out.push(ComputeStatement::PureCall {
-                    target: None,
-                    function,
-                    args,
-                });
-                cursor = next;
-                continue;
-            }
+        if let Some((function, args, next)) =
+            crate::pure_calls::parse(body, cursor, namespace, known, p)?
+        {
+            out.push(ComputeStatement::PureCall {
+                target: None,
+                function,
+                args,
+            });
+            cursor = next;
+            continue;
         }
         if handler_kind == "pure fn" && body[cursor..].starts_with("return ") {
             let end = find_statement_end(body, cursor)?;
@@ -146,18 +320,18 @@ fn parse_compute_statements(
                 out.push(ComputeStatement::ReturnOption { value: None });
             } else if let Some(inner) = raw.strip_prefix("Some(").and_then(|v| v.strip_suffix(')'))
             {
-                let expr = parse_expr_in_namespace(inner.trim(), namespace, p)?;
+                let expr = parse_expr_at(inner.trim(), namespace, p, body, cursor, line_base)?;
                 validate_compute_expr(&expr, known, p, namespace)?;
                 out.push(ComputeStatement::ReturnOption { value: Some(expr) });
             } else if let Some(inner) = raw.strip_prefix("Ok(").and_then(|v| v.strip_suffix(')')) {
-                let expr = parse_expr_in_namespace(inner.trim(), namespace, p)?;
+                let expr = parse_expr_at(inner.trim(), namespace, p, body, cursor, line_base)?;
                 validate_compute_expr(&expr, known, p, namespace)?;
                 out.push(ComputeStatement::ReturnResult {
                     is_ok: true,
                     value: expr,
                 });
             } else if let Some(inner) = raw.strip_prefix("Err(").and_then(|v| v.strip_suffix(')')) {
-                let expr = parse_expr_in_namespace(inner.trim(), namespace, p)?;
+                let expr = parse_expr_at(inner.trim(), namespace, p, body, cursor, line_base)?;
                 validate_compute_expr(&expr, known, p, namespace)?;
                 out.push(ComputeStatement::ReturnResult {
                     is_ok: false,
@@ -170,7 +344,7 @@ fn parse_compute_statements(
             } else if let Some((function, args, return_type)) =
                 crate::pure_calls::parse_value_call(raw, namespace, known, p)?
             {
-                let target = format!("__velran_return_call_{}", out.len());
+                let target = fresh_internal_local("__velran_return_call_", out.len(), known);
                 known.insert(target.clone(), return_type);
                 out.push(ComputeStatement::PureCall {
                     target: Some(target.clone()),
@@ -181,7 +355,7 @@ fn parse_compute_statements(
                     target,
                 )));
             } else {
-                let expr = parse_expr_in_namespace(raw, namespace, p)?;
+                let expr = parse_expr_at(raw, namespace, p, body, cursor, line_base)?;
                 validate_compute_expr(&expr, known, p, namespace)?;
                 out.push(ComputeStatement::Return(expr));
             }
@@ -200,21 +374,19 @@ fn parse_compute_statements(
             }
             let end = find_statement_end(body, eq + 1)?;
             let rhs = body[eq + 1..end].trim();
-            if handler_kind != "pure fn" {
-                if let Some((function, args, return_type)) =
-                    crate::pure_calls::parse_value_call(rhs, namespace, known, p)?
-                {
-                    known.insert(local.into(), return_type);
-                    out.push(ComputeStatement::PureCall {
-                        target: Some(local.into()),
-                        function,
-                        args,
-                    });
-                    cursor = end + 1;
-                    continue;
-                }
+            if let Some((function, args, return_type)) =
+                crate::pure_calls::parse_value_call(rhs, namespace, known, p)?
+            {
+                known.insert(local.into(), return_type);
+                out.push(ComputeStatement::PureCall {
+                    target: Some(local.into()),
+                    function,
+                    args,
+                });
+                cursor = end + 1;
+                continue;
             }
-            let expr = parse_expr_in_namespace(rhs, namespace, p)?;
+            let expr = parse_expr_at(rhs, namespace, p, body, cursor, line_base)?;
             validate_compute_expr(&expr, known, p, namespace)?;
             known.insert(local.into(), infer_static_expr_type(&expr, known, p)?);
             out.push(ComputeStatement::Let {
@@ -286,18 +458,39 @@ fn parse_compute_statements(
                     .get(name)
                     .cloned()
                     .ok_or_else(|| CompileError::UnknownVariable(name.into()))?;
-                let expr = parse_expr_in_namespace(rhs.trim(), namespace, p)?;
-                validate_compute_expr(&expr, known, p, namespace)?;
-                let actual = infer_static_expr_type(&expr, known, p)?;
-                if expected != actual {
-                    return Err(CompileError::Syntax(format!(
-                        "{handler_kind} `{handler_name}` set `{name}` type mismatch"
-                    )));
+                if let Some((function, args, return_type)) =
+                    crate::pure_calls::parse_value_call(rhs.trim(), namespace, known, p)?
+                {
+                    if expected != return_type {
+                        return Err(CompileError::Syntax(format!(
+                            "{handler_kind} `{handler_name}` set `{name}` type mismatch"
+                        )));
+                    }
+                    let target = fresh_internal_local("__velran_set_call_", out.len(), known);
+                    known.insert(target.clone(), return_type);
+                    out.push(ComputeStatement::PureCall {
+                        target: Some(target.clone()),
+                        function,
+                        args,
+                    });
+                    out.push(ComputeStatement::Set {
+                        name: name.into(),
+                        expr: language_core::Expr::Variable(target),
+                    });
+                } else {
+                    let expr = parse_expr_at(rhs.trim(), namespace, p, body, cursor, line_base)?;
+                    validate_compute_expr(&expr, known, p, namespace)?;
+                    let actual = infer_static_expr_type(&expr, known, p)?;
+                    if expected != actual {
+                        return Err(CompileError::Syntax(format!(
+                            "{handler_kind} `{handler_name}` set `{name}` type mismatch"
+                        )));
+                    }
+                    out.push(ComputeStatement::Set {
+                        name: name.into(),
+                        expr,
+                    });
                 }
-                out.push(ComputeStatement::Set {
-                    name: name.into(),
-                    expr,
-                });
             }
             cursor = end + 1;
             continue;
@@ -311,6 +504,7 @@ fn parse_compute_statements(
                 cursor,
                 known,
                 p,
+                line_base,
             )?;
             out.push(ComputeStatement::While {
                 condition,
@@ -320,7 +514,7 @@ fn parse_compute_statements(
             continue;
         }
         if body[cursor..].starts_with("if ") {
-            let (condition, statements, close) = parse_if_block(
+            let (lowered, close) = parse_and_lower_if_chain(
                 handler_kind,
                 handler_name,
                 namespace,
@@ -328,11 +522,10 @@ fn parse_compute_statements(
                 cursor,
                 known,
                 p,
+                out.len(),
+                line_base,
             )?;
-            out.push(ComputeStatement::If {
-                condition,
-                statements,
-            });
+            out.extend(lowered);
             cursor = close + 1;
             continue;
         }
@@ -452,7 +645,9 @@ pub(super) fn compute_uses_request_state(statements: &[ComputeStatement]) -> Opt
             ComputeStatement::StringDictSet { key, value, .. } => {
                 expr_uses_request_state(key).or_else(|| expr_uses_request_state(value))
             }
-            ComputeStatement::PureCall { .. } => None,
+            ComputeStatement::PureCall { args, .. } => {
+                args.iter().find_map(expr_uses_request_state)
+            }
             ComputeStatement::ReturnStruct { fields, .. } => fields
                 .iter()
                 .find_map(|field| expr_uses_request_state(&field.expr)),
@@ -484,6 +679,102 @@ mod tests {
     use super::*;
     use crate::compile_source;
     use language_core::PageBody;
+
+    #[test]
+    fn pure_if_else_is_lowered_with_single_condition_evaluation() {
+        let src = r#"
+fn choose(value: i64, enabled: bool) -> i64 {
+    let mut out = 0;
+    if enabled {
+        out = value;
+    } else {
+        out = value + 1;
+    }
+    return out;
+}
+
+#[page] fn test(ctx: PageContext) -> Result<Json, PageError> {
+    return Ok(json(0));
+}
+route test GET "/test" public => test;
+"#;
+        let p = compile_source(src).unwrap();
+        let function = p.pure_function("choose").unwrap();
+        assert!(function.body.iter().any(|stmt| matches!(
+            stmt,
+            ComputeStatement::Let { name, .. } if name.starts_with("__velran_if_condition_")
+        )));
+        assert_eq!(
+            function
+                .body
+                .iter()
+                .filter(|stmt| matches!(stmt, ComputeStatement::If { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn pure_else_if_chain_is_supported() {
+        let src = r#"
+fn classify(value: i64) -> i64 {
+    let mut out = 0;
+    if value < 0 {
+        out = -1;
+    } else if value == 0 {
+        out = 0;
+    } else {
+        out = 1;
+    }
+    return out;
+}
+
+#[page] fn test(ctx: PageContext) -> Result<Json, PageError> {
+    return Ok(json(0));
+}
+route test GET "/test" public => test;
+"#;
+        let p = compile_source(src).unwrap();
+        let function = p.pure_function("classify").unwrap();
+        assert!(function.body.iter().any(|stmt| matches!(
+            stmt,
+            ComputeStatement::Let { name, .. } if name.starts_with("__velran_if_condition_")
+        )));
+    }
+
+    #[test]
+    fn immutable_string_borrows_are_accepted_for_string_builtins_only() {
+        let src = r#"
+fn pick(text: &str) -> String {
+    let tail = substring(&text, 1);
+    let ch = charAt(&tail, 0);
+    return ch;
+}
+
+#[page] fn test(ctx: PageContext) -> Result<Json, PageError> {
+    return Ok(json(0));
+}
+route test GET "/test" public => test;
+"#;
+        compile_source(src).unwrap();
+
+        let bad = r#"
+fn bad(value: i64) -> bool {
+    return regexMatch(&value, "x");
+}
+
+#[page] fn test(ctx: PageContext) -> Result<Json, PageError> {
+    return Ok(json(0));
+}
+route test GET "/test" public => test;
+"#;
+        let err = compile_source(bad).unwrap_err().to_string();
+        assert!(err.contains("line 3:"), "unexpected diagnostic: {err}");
+        assert!(
+            err.contains("does not accept an immutable borrow"),
+            "unexpected diagnostic: {err}"
+        );
+    }
 
     #[test]
     fn compiles_budgeted_while_with_scalar_and_array_set() {

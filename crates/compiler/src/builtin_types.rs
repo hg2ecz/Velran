@@ -3,6 +3,7 @@ use crate::diagnostics::CompileError;
 use crate::handler_types::StaticType;
 use crate::math_builtin_types;
 use crate::regex_types;
+use crate::safe_html_types;
 use crate::string_builtin_types;
 use crate::type_semantics::represented_as;
 use language_core::{BuiltinFunction, Expr, Program, ValueType};
@@ -33,6 +34,9 @@ pub(super) fn infer_builtin_type(
     }
     if string_builtin_types::handles(function) {
         return string_builtin_types::infer(function, args, known, program);
+    }
+    if safe_html_types::handles(function) {
+        return safe_html_types::infer(function, args, known, program);
     }
     if credential_builtin_types::handles(function) {
         return credential_builtin_types::infer(function, args, known, program);

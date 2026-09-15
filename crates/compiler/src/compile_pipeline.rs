@@ -90,6 +90,7 @@ pub(super) fn compile_units(units: &[source_loader::SourceUnit]) -> Result<Progr
         inherent_impl::lower_inherent_impls(&u.source, u.namespace(), &mut p)
             .map_err(|e| source_loader::source_error(u, e))?;
     }
+    pure_functions::validate_pure_recursion_contract(&p)?;
     for u in &units {
         query_parser::parse_queries(&u.source, u.namespace(), &mut p)
             .map_err(|e| source_loader::source_error(u, e))?;

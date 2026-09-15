@@ -1,3 +1,5 @@
+mod commonmark;
+
 model WikiPage {
     id: i64
     slug: Slug
@@ -61,11 +63,12 @@ fn wikiIndex(ctx: PageContext) -> Result<Html, PageError> {
 #[page]
 fn wikiShow(ctx: PageContext, db: Db, slug: Slug) -> Result<Html, PageError> {
     let page = wikiBySlug(db, slug)?;
+    let markdown_html = commonmark::render(&page.body);
     return Ok(html {
         @layout(Main, page.title) {
             <article>
                 <h1>{{ page.title }}</h1>
-                @markdown(page.body)
+                {{ markdown_html }}
             </article>
         }
     });

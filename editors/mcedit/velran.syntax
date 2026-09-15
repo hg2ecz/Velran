@@ -113,6 +113,7 @@ context default
     keyword whole DbError brightcyan
     keyword whole Result brightcyan
     keyword whole Option brightcyan
+    keyword whole SafeHtml brightcyan
     keyword whole List brightcyan
     keyword whole Dict brightcyan
     keyword whole Array brightcyan
@@ -166,6 +167,11 @@ context default
     keyword whole lastIndexOf brightgreen
     keyword whole charAt brightgreen
     keyword whole repeat brightgreen
+    keyword whole safeHtmlEmpty brightgreen
+    keyword whole safeHtmlText brightgreen
+    keyword whole safeHtmlElement brightgreen
+    keyword whole safeHtmlLink brightgreen
+    keyword whole safeHtmlConcat brightgreen
     keyword whole dict brightgreen
     keyword whole containsKey brightgreen
     keyword whole removeKey brightgreen

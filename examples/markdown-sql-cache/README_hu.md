@@ -7,7 +7,7 @@ Ez a példa az ajánlott Velran mintát mutatja adatbázisban tárolt Markdownho
 
 1. az adatbázisban az eredeti Markdown forrás maradjon;
 2. a rekordot typed `#[query]` töltse be kötött `:id` paraméterrel;
-3. a `String` csak HTML content pozícióban kerüljön `@markdown(...)` renderelésre;
+3. a `String` a forrásszintű `commonmark::render(...)` modullal legyen renderelve;
 4. a kész publikus HTML response opcionálisan a normál route cache-be kerülhet.
 
 Az alkalmazás az [`main.vrn`](main.vrn) fájlban van. SQLite, PostgreSQL és MariaDB inicializáló SQL is található a könyvtárban.
@@ -26,9 +26,13 @@ A route paraméter része a cache identitynek, ezért a különböző dokumentum
 
 ## Biztonsági tulajdonságok
 
-Az SQL named bindot (`:id`) használ, nem stringből épített SQL-t. A Markdownt a framework `@markdown` direktívája rendereli; az alkalmazáskód nem alakít adatbázisból érkező szöveget raw HTML-lé. A Markdownban szereplő raw HTML nem kerül végrehajtható markupként át, a veszélyes link sémákat pedig a Markdown policy elutasítja.
+Az SQL named bindot (`:id`) használ, nem stringből épített SQL-t. A Markdownt a Velranban megírt `commonmark.vrn` forrásmodul rendereli; az engine-ben nincs Markdown-specifikus direktíva. A modul csak az engine általános, típusos `SafeHtml` építőprimitívjein keresztül készíthet markupot. A Markdownban szereplő raw HTML escape-elt szövegként jelenik meg, a veszélyes link sémák pedig nem válnak trusted markuppá.
 
 A public cache csak akkor való ide, ha a generált oldal publikus, és nem függ felhasználói/session/request titoktól. Az Velran compiler cache-safety ellenőrzést végez a publikus cache-elt route-okon.
+
+## Compiler/nyelvi határ
+
+A CommonMark forrásmodul normál Velran kódként fordul. A verified pure helperek, scalar paraméterek, branching, rekurzió és string borrow az általános nyelvi contract része: [`docs/hu/58-verifikalt-pure-fuggvenyek.md`](../../docs/hu/58-verifikalt-pure-fuggvenyek.md). Nincs Markdown-specifikus compiler útvonal.
 
 ## Cache frissesség
 
@@ -45,3 +49,7 @@ sqlite3 app.db < examples/markdown-sql-cache/sqlite.sql
 ```
 
 A könyvtárban `postgresql.sql` és `mariadb.sql` is található.
+
+## Forrásszintű modul
+
+A `main.vrn` a mellette lévő fájlt `mod commonmark;` deklarációval emeli be. A példa átvételekor a `commonmark.vrn` fájlt is másold az alkalmazás mellé.

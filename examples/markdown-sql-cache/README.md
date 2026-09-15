@@ -7,7 +7,7 @@ This example shows the recommended Velran pattern for database-backed Markdown:
 
 1. keep the original Markdown source in SQL;
 2. load the row with a typed `#[query]` using a bound `:id` parameter;
-3. render the `String` only in HTML content position with `@markdown(...)`;
+3. render the `String` with the source-level `commonmark::render(...)` module;
 4. optionally cache the finished public HTML response with the normal route cache.
 
 The application is in [`main.vrn`](main.vrn). Database bootstrap examples are provided for SQLite, PostgreSQL, and MariaDB.
@@ -26,9 +26,13 @@ The route parameter participates in the cache identity, so different document ID
 
 ## Security properties
 
-The SQL statement uses a named bind (`:id`), not string-built SQL. Markdown is rendered by the framework `@markdown` directive; application code does not turn database text into raw HTML. Raw HTML in Markdown is not passed through as executable markup, and unsafe link schemes are rejected by the Markdown policy.
+The SQL statement uses a named bind (`:id`), not string-built SQL. Markdown is rendered by the Velran source module `commonmark.vrn`; the engine has no Markdown-specific directive. The module can only construct typed `SafeHtml` through the engine's generic safe HTML builders. Raw HTML in Markdown is emitted as escaped text, and unsafe link schemes are rendered as text rather than trusted markup.
 
 The public cache should be used only when the generated page is public and independent of user/session/request secrets. Velran's compiler performs cache-safety checks for public cached routes.
+
+## Compiler/language boundary
+
+The CommonMark source module is compiled as ordinary Velran. Its use of verified pure helpers, scalar parameters, branching, recursion and string borrows is part of the general language contract described in [`docs/58-verified-pure-functions.md`](../../docs/58-verified-pure-functions.md), not a Markdown-specific engine path.
 
 ## Cache freshness
 
@@ -45,3 +49,7 @@ sqlite3 app.db < examples/markdown-sql-cache/sqlite.sql
 ```
 
 Equivalent schema files are included as `postgresql.sql` and `mariadb.sql`.
+
+## Source-level module
+
+`main.vrn` includes the sibling source file with `mod commonmark;`. Copy `commonmark.vrn` with the application when adapting this example.

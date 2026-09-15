@@ -5,6 +5,7 @@ pub enum PureValueType {
     Bool,
     String,
     StringList,
+    SafeHtml,
     Struct(String),
 }
 

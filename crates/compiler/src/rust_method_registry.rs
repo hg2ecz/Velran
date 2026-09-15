@@ -14,6 +14,7 @@ pub(super) enum RustMethod {
     CharsCount,
     SumPredicate(PureSumPredicate),
     SumUnwrapOr,
+    StringToOwned,
 }
 
 /// Resolve only authority-free Rust-surface methods.
@@ -33,6 +34,7 @@ pub(super) fn resolve(name: &str) -> Option<RustMethod> {
         "is_ok" => SumPredicate(PureSumPredicate::IsOk),
         "is_err" => SumPredicate(PureSumPredicate::IsErr),
         "unwrap_or" => SumUnwrapOr,
+        "to_string" => StringToOwned,
         "trim" => Builtin(BuiltinFunction::Trim),
         "trim_start" => Builtin(BuiltinFunction::TrimStart),
         "trim_end" => Builtin(BuiltinFunction::TrimEnd),

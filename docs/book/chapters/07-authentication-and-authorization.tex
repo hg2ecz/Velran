@@ -359,11 +359,11 @@ An authenticated CMS editor interface still does not justify storing raw HTML. E
 
 \begin{lstlisting}[language=Velran]
 <article class="article-body">
-    @markdown(article.body)
+    {{ markdown_html }}
 </article>
 \end{lstlisting}
 
-\code{@markdown} does not permit raw HTML and filters link targets through an allowlist.
+The renderer is a Velran source module, not an engine directive. It produces typed \code{SafeHtml}; raw HTML is escaped and link targets are restricted by the module plus the generic SafeHtml boundary.
 
 \section{Production checklist}
 

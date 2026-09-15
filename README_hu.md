@@ -131,6 +131,12 @@ optimization = "release"
 A `cache_dir` abszolút útvonal. A `rustc` opcionális; rustup-managed toolchain esetén az automatikus toolchain-felismerés az ajánlott. Ha explicit `rustc` útvonalat adsz meg, annak abszolút compiler-útvonalnak kell lennie. A teljes szekció elhagyásakor az automatikus rustc/cache felismerés működik.
 
 
+## Forrásszintű common modulok
+
+Az engine-authorityt nem igénylő újrafelhasználható funkciókat érdemes Velranban, verified pure függvényekkel megírni. A pure réteg by-value `i64`/`bool`, immutable `&str`/`&[String]`/`&Struct`, külön explicit `&mut [f32; N]` numeric-kernel családot, pure→pure expression hívásokat, `if`/`else if`/`else` kontrollfolyamot és depth-bounded scalar rekurziót támogat. A hívások továbbra is instruction/allocation budget alatt maradnak; részletes contract: [`docs/hu/58-verifikalt-pure-fuggvenyek.md`](docs/hu/58-verifikalt-pure-fuggvenyek.md).
+
+A `common/commonmark.vrn` referencia arra, hogyan érdemes engine-authority nélküli komolyabb libraryt Velranban megírni: másold az alkalmazás forrásfájai közé, deklaráld `mod commonmark;` formában, majd hívd `commonmark::render(&source)` alakban. A Markdown parser szándékosan nem az engine része; az engine csak az általános, típusos `SafeHtml` biztonsági határt birtokolja.
+
 ## Natív példa-státusz
 
 A native-only futtatható/pending példamátrix: [`tests/NATIVE_STATUS.md`](tests/NATIVE_STATUS.md).

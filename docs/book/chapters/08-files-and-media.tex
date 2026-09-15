@@ -141,11 +141,12 @@ A validated image is rendered using the dedicated renderer rather than direct st
 #[page]
 fn article(ctx: PageContext, article: Article)
     -> Result<Html, PageError> {
+    let markdown_html = commonmark::render(&article.body);
     return Ok(html {
         <article>
             <h1>{{ article.title }}</h1>
             @image(article.hero, article.title)
-            @markdown(article.body)
+            {{ markdown_html }}
         </article>
     });
 }

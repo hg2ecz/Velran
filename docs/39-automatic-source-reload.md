@@ -72,7 +72,7 @@ A failed automatic reload does **not** take the domain offline. The previous val
 - `source_reload_cache_invalidation_failed`
 - `source_reload_stale`
 
-`source_reload_rejected` includes the canonical domain, active generation, and compiler/validation error so syntax and module errors remain diagnosable from the server log. Native cdylib failures also retain the bounded real `rustc` stderr instead of replacing it with an Velran imitation. With non-production `debug_compile_errors = true` (or `--debug-compile-errors`), the detailed frontend/rustc diagnostic is additionally written as `source_reload_diagnostics` and shown as an HTML-escaped, domain-scoped developer error page for GET/HEAD requests. Health endpoints remain available and the last valid generation is not discarded. Production policy rejects detailed compiler diagnostics.
+`source_reload_rejected` includes the canonical domain, active generation, and compiler/validation error so syntax and module errors remain diagnosable from the server log. Frontend expression/control-flow failures preserve source location, including line information through nested pure `if`/`else`/`while` parsing. Native cdylib failures also retain the bounded real `rustc` stderr instead of replacing it with an Velran imitation. With non-production `debug_compile_errors = true` (or `--debug-compile-errors`), the detailed frontend/rustc diagnostic is additionally written as `source_reload_diagnostics` and shown as an HTML-escaped, domain-scoped developer error page for GET/HEAD requests. Health endpoints remain available and the last valid generation is not discarded. Production policy rejects detailed compiler diagnostics.
 
 ## Deployment workflow
 

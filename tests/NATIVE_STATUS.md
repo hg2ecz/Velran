@@ -39,6 +39,12 @@ This file is generated/reviewed for the native-only architecture. It distinguish
 - `examples/string-operations/main.vrn`
 - `examples/upload/app.vrn`
 
+## Compile-gated language compatibility
+
+`examples/markdown/app.vrn` is used by the M32 safe-Markdown verification as a real `velran-cli check` language-compatibility gate. Its presence in the host/lowering-pending list below does not mean the frontend language is allowed to skip it; it only records that the complete example may still depend on native host/lowering coverage outside the pure/CommonMark language surface.
+
+The CommonMark source itself therefore must continue to compile as ordinary Velran and may not receive a Markdown-specific compiler exception.
+
 ## Native host/lowering pending source files
 
 - `examples/a-z-products/main.vrn`

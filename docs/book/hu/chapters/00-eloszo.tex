@@ -81,6 +81,11 @@ Add ki és üzemeltesd & 18--20.: production deployment, recovery és CLI workfl
 
 A 11--13. és 16--17. fejezetet addig elhalaszthatod, amíg ténylegesen nincs szükséged nagyobb modulszerkezetre, külső integrációra, cache/skálázásra vagy mélyebb observabilityre. A 15. fejezetet viszont production kiadás előtt ne hagyd ki.
 
+\paragraph{Alap üzemeltetői út.}
+Ezt válaszd, ha kisebb Velran szolgáltatást telepítesz, kiadsz, monitorozol, mentésből visszaállítasz és hibakeresel, de napi szinten nem fejlesztesz alkalmazásfeature-öket. Először a 2. és 15. fejezetet olvasd a topológiáról és security boundarykról, majd a 17--21. fejezetet az observability, deployment, recovery, CLI workflow és konfiguráció miatt. Zárásként használd a 23. fejezet release- és hibadiagnosztikai gate-jeit, és próbáld el őket nem production környezetben. A 6--10. fejezetet akkor vedd elő, ha a telepített alkalmazás ténylegesen használja az adott adatbázis-, auth-, fájl-, API- vagy frontend-felületet.
+
+Ez az út alkalmazásüzemeltetést tanít, nem teljes infrastruktúra-adminisztrációt. A DNS, a tanúsítvány kiadása és megújítása, az operációs rendszer frissítése, a DB/Redis platformüzemeltetés, a host monitoring, az időszinkron, a tárkapacitás és a hálózati/tűzfalszabályok továbbra is operátori felelősségek akkor is, ha a Velran az alkalmazásoldali ellenőrzéseket biztosítja.
+
 \paragraph{Teljes Velran út.}
 Olvasd végig sorrendben az 1--23. fejezetet. Ez az út azoknak szól, akik az alkalmazásfejlesztés mellett architektúráért, security review-ért, platformintegrációért, skálázásért, observabilityért vagy production üzemeltetésért is felelősek lesznek. A teljes út az opcionális webes feature-öket és az operátori anyagot is összefüggéseiben tanítja.
 

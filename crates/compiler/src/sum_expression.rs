@@ -57,6 +57,7 @@ fn value_type(value: &PureValueType) -> Result<ValueType, CompileError> {
         PureValueType::Bool => Ok(ValueType::Bool),
         PureValueType::String => Ok(ValueType::String),
         PureValueType::StringList => Ok(ValueType::StringList),
+        PureValueType::SafeHtml => Ok(ValueType::Domain(language_core::SAFE_HTML_DOMAIN_ID)),
         PureValueType::Struct(_) => Err(CompileError::Syntax(
             "`.unwrap_or(...)` for struct payloads is not enabled yet".into(),
         )),

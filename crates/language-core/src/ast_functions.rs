@@ -35,6 +35,8 @@ pub enum InlineHint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PureParamType {
     F32ArrayMut(u32),
+    Int,
+    Bool,
     Str,
     StringList,
     Struct(u16),

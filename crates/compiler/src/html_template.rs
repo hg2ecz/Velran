@@ -32,6 +32,7 @@ pub(super) fn parse_html_template_mode(
 ) -> Result<HtmlTemplate, CompileError> {
     validate_static_html(input)?;
     validate_interpolation_contexts(input)?;
+    validate_known_template_directives(input)?;
     validate_template_directive_contexts(input)?;
     parse_html_parts_mode(input, namespace, known, p, allow_content)
 }
@@ -54,7 +55,6 @@ fn parse_html_parts_mode(
         let component_pos = input[cursor..].find("@component(").map(|v| cursor + v);
         let layout_pos = input[cursor..].find("@layout(").map(|v| cursor + v);
         let content_pos = input[cursor..].find("@content").map(|v| cursor + v);
-        let markdown_pos = input[cursor..].find("@markdown(").map(|v| cursor + v);
         let image_pos = input[cursor..].find("@image(").map(|v| cursor + v);
         let flash_pos = input[cursor..].find("@flash()").map(|v| cursor + v);
         let next = [
@@ -66,7 +66,6 @@ fn parse_html_parts_mode(
             component_pos,
             layout_pos,
             content_pos,
-            markdown_pos,
             image_pos,
             flash_pos,
         ]
@@ -92,12 +91,17 @@ fn parse_html_parts_mode(
             validate_expr(&e, known, p)?;
             crate::visibility::validate_pure_expr_access(&e, known, p, namespace)?;
             validate_response_expression(&e, known, p, ResponseBoundary::Html)?;
-            if infer_expr_type(&e, known, p)? == ValueType::Image {
+            let interpolation_type = infer_expr_type(&e, known, p)?;
+            if interpolation_type == ValueType::Image {
                 return Err(CompileError::Syntax(
                     "Image cannot be interpolated directly; use @image(image, alt)".into(),
                 ));
             }
-            parts.push(HtmlPart::EscapedExpr(e));
+            if interpolation_type == ValueType::Domain(language_core::SAFE_HTML_DOMAIN_ID) {
+                parts.push(HtmlPart::SafeHtmlExpr(e));
+            } else {
+                parts.push(HtmlPart::EscapedExpr(e));
+            }
             cursor = close + 2;
             continue;
         }
@@ -114,29 +118,6 @@ fn parse_html_parts_mode(
         if Some(pos) == flash_pos {
             parts.push(HtmlPart::Flash);
             cursor = pos + "@flash()".len();
-            continue;
-        }
-        if Some(pos) == markdown_pos {
-            let open = pos + "@markdown(".len() - 1;
-            let close = matching_paren(input, open)
-                .ok_or_else(|| CompileError::Syntax("@markdown( is not closed".into()))?;
-            let raw = input[open + 1..close].trim();
-            if raw.is_empty() {
-                return Err(CompileError::Syntax(
-                    "@markdown requires one String expression".into(),
-                ));
-            }
-            let e = parse_expr_in_namespace(raw, namespace, p)?;
-            validate_expr(&e, known, p)?;
-            crate::visibility::validate_pure_expr_access(&e, known, p, namespace)?;
-            validate_response_expression(&e, known, p, ResponseBoundary::Html)?;
-            if !represented_as(p, infer_expr_type(&e, known, p)?, ValueType::String) {
-                return Err(CompileError::Syntax(
-                    "@markdown expression must have String representation".into(),
-                ));
-            }
-            parts.push(HtmlPart::Markdown(e));
-            cursor = close + 1;
             continue;
         }
         if Some(pos) == image_pos {
@@ -405,15 +386,48 @@ fn parse_html_parts_mode(
     Ok(HtmlTemplate { parts })
 }
 
+fn validate_known_template_directives(input: &str) -> Result<(), CompileError> {
+    const KNOWN_CALL_DIRECTIVES: &[&str] =
+        &["href", "action", "component", "layout", "image", "flash"];
+
+    let bytes = input.as_bytes();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        let Some(rel) = input[cursor..].find('@') else {
+            break;
+        };
+        let at = cursor + rel;
+        let ident_start = at + 1;
+        if ident_start >= bytes.len()
+            || !(bytes[ident_start] == b'_' || bytes[ident_start].is_ascii_alphabetic())
+        {
+            cursor = ident_start;
+            continue;
+        }
+
+        let mut ident_end = ident_start + 1;
+        while ident_end < bytes.len()
+            && (bytes[ident_end] == b'_' || bytes[ident_end].is_ascii_alphanumeric())
+        {
+            ident_end += 1;
+        }
+
+        if bytes.get(ident_end) == Some(&b'(') {
+            let name = &input[ident_start..ident_end];
+            if !KNOWN_CALL_DIRECTIVES.contains(&name) {
+                return Err(CompileError::Syntax(format!(
+                    "unknown HTML template directive `@{name}`"
+                )));
+            }
+        }
+
+        cursor = ident_end;
+    }
+    Ok(())
+}
+
 fn validate_template_directive_contexts(input: &str) -> Result<(), CompileError> {
-    for needle in [
-        "@component(",
-        "@layout(",
-        "@content",
-        "@markdown(",
-        "@image(",
-        "@flash()",
-    ] {
+    for needle in ["@component(", "@layout(", "@content", "@image(", "@flash()"] {
         let mut cursor = 0usize;
         while let Some(rel) = input[cursor..].find(needle) {
             let pos = cursor + rel;

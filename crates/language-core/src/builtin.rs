@@ -67,10 +67,15 @@ pub enum BuiltinFunction {
     EncryptUserData,
     DecryptUserData,
     Redact,
+    SafeHtmlEmpty,
+    SafeHtmlText,
+    SafeHtmlElement,
+    SafeHtmlLink,
+    SafeHtmlConcat,
 }
 
 impl BuiltinFunction {
-    pub const ALL: [Self; 51] = [
+    pub const ALL: [Self; 56] = [
         Self::Sin,
         Self::Cos,
         Self::Sqrt,
@@ -122,6 +127,11 @@ impl BuiltinFunction {
         Self::EncryptUserData,
         Self::DecryptUserData,
         Self::Redact,
+        Self::SafeHtmlEmpty,
+        Self::SafeHtmlText,
+        Self::SafeHtmlElement,
+        Self::SafeHtmlLink,
+        Self::SafeHtmlConcat,
     ];
 
     pub fn from_source_name(name: &str) -> Option<Self> {
@@ -183,6 +193,11 @@ impl BuiltinFunction {
             Self::EncryptUserData => ("encryptUserData", 2, 2, 32, false),
             Self::DecryptUserData => ("decryptUserData", 2, 2, 32, false),
             Self::Redact => ("redact", 1, 1, 2, false),
+            Self::SafeHtmlEmpty => ("safeHtmlEmpty", 0, 0, 1, false),
+            Self::SafeHtmlText => ("safeHtmlText", 1, 1, 4, false),
+            Self::SafeHtmlElement => ("safeHtmlElement", 2, 2, 4, false),
+            Self::SafeHtmlLink => ("safeHtmlLink", 2, 2, 5, false),
+            Self::SafeHtmlConcat => ("safeHtmlConcat", 2, 2, 3, false),
         };
         let execution_kind = match self {
             Self::RegexMatch | Self::RegexReplace | Self::RegexCaptures => {

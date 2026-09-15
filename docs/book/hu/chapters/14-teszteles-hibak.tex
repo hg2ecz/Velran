@@ -10,6 +10,8 @@ A fordítás source- és policy-korlátokat bizonyít, nem üzleti helyességet 
 
 Amikor a compiler vagy verifier stabil security kóddal elutasít egy programot, ne a check megkerülésével kezdd. Négy menetben olvasd a diagnosticot: azonosítsd a kódot, nevezd meg a megsértett invariantot, keresd meg az érintett authority- vagy adathatárt, majd végezd el a legkisebb forrásmódosítást, amely helyreállítja az invariantot. Futtasd újra az ellenőrzést, és security-szempontból fontos szabálynál tartsd meg az elutasított változatot negatív tesztként.
 
+A frontend expression- és kontrollfolyam-diagnosztika megőrzi a forráspozíciót. Fájlból fordítva a hibának a forrásfájlt és sorszámot is jeleznie kell, nested \code{if}/\code{else}/\code{while} blokkokban is. Ha a compiler rendelkezik helyinformációval, a hely nélküli általános parser-hiba diagnosztikai minőségi hibának számít.
+
 Rögzíts négy dolgot: \emph{kód}, \emph{határ}, \emph{az elutasítás oka}, és \emph{mi bizonyítja a javítás elfogadhatóságát}.
 
 Ezért a Velranban érdemes a tesztelést több egymásra épülő rétegként kezelni:

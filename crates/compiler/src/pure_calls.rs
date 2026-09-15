@@ -2,7 +2,7 @@ use crate::diagnostics::CompileError;
 use crate::handler_types::StaticType;
 use crate::module_namespace::resolve;
 use crate::source_syntax::{find_statement_end, is_identifier, matching_paren, split_top_level};
-use language_core::{Program, PureParamType, PureReturnType, PureValueType, ValueType};
+use language_core::{Expr, Program, PureParamType, PureReturnType, PureValueType, ValueType};
 use std::collections::HashMap;
 
 pub(super) fn parse(
@@ -11,7 +11,7 @@ pub(super) fn parse(
     namespace: &str,
     known: &HashMap<String, StaticType>,
     program: &Program,
-) -> Result<Option<(String, Vec<String>, usize)>, CompileError> {
+) -> Result<Option<(String, Vec<Expr>, usize)>, CompileError> {
     let end = match find_statement_end(body, cursor) {
         Ok(end) => end,
         Err(_) => return Ok(None),
@@ -55,7 +55,7 @@ pub(super) fn parse(
     };
     implicit_args.extend(parts.iter().map(|part| part.trim().to_string()));
     let refs = implicit_args.iter().map(String::as_str).collect::<Vec<_>>();
-    let args = validate_args(name, &refs, function, known, program)?;
+    let args = validate_args(name, &refs, function, namespace, known, program)?;
     Ok(Some((symbol, args, end + 1)))
 }
 
@@ -64,7 +64,7 @@ pub(super) fn parse_value_call(
     namespace: &str,
     known: &HashMap<String, StaticType>,
     program: &Program,
-) -> Result<Option<(String, Vec<String>, StaticType)>, CompileError> {
+) -> Result<Option<(String, Vec<Expr>, StaticType)>, CompileError> {
     let text = text.trim();
     let Some(open_rel) = text.find('(') else {
         return Ok(None);
@@ -94,7 +94,7 @@ pub(super) fn parse_value_call(
     };
     implicit_args.extend(parts.iter().map(|part| part.trim().to_string()));
     let refs = implicit_args.iter().map(String::as_str).collect::<Vec<_>>();
-    let args = validate_args(name, &refs, function, known, program)?;
+    let args = validate_args(name, &refs, function, namespace, known, program)?;
     let return_type = match &function.return_type {
         PureReturnType::Value(PureValueType::Int) => StaticType::trusted_scalar(ValueType::Int),
         PureReturnType::Value(PureValueType::F32) => StaticType::trusted_scalar(ValueType::F32),
@@ -104,6 +104,9 @@ pub(super) fn parse_value_call(
         }
         PureReturnType::Value(PureValueType::StringList) => {
             StaticType::trusted_scalar(ValueType::StringList)
+        }
+        PureReturnType::Value(PureValueType::SafeHtml) => {
+            StaticType::trusted_scalar(ValueType::Domain(language_core::SAFE_HTML_DOMAIN_ID))
         }
         PureReturnType::Value(PureValueType::Struct(schema)) => {
             StaticType::PureStruct(schema.clone())
@@ -188,9 +191,10 @@ fn validate_args(
     name: &str,
     parts: &[&str],
     function: &language_core::PureFunction,
+    namespace: &str,
     known: &HashMap<String, StaticType>,
     program: &Program,
-) -> Result<Vec<String>, CompileError> {
+) -> Result<Vec<Expr>, CompileError> {
     if parts.len() != function.params.len() {
         return Err(CompileError::Syntax(format!(
             "pure function `{name}` expects {} arguments, got {}",
@@ -202,99 +206,70 @@ fn validate_args(
     let mut mutable_args = Vec::new();
     for (part, param) in parts.iter().zip(&function.params) {
         let part = part.trim();
-        let variable = match param.ty {
-            PureParamType::F32ArrayMut(_) => {
-                let Some(variable) = part.strip_prefix("&mut ").map(str::trim) else {
-                    return Err(CompileError::Syntax(format!(
-                        "pure function `{name}` argument `{}` must be passed as `&mut variable`",
-                        param.name
-                    )));
-                };
-                if !is_identifier(variable)
-                    || !known
-                        .get(variable)
-                        .is_some_and(|ty| ty.is_scalar(ValueType::F32Array))
-                {
-                    return Err(CompileError::Syntax(format!(
-                        "pure function `{name}` argument `{variable}` must be a local f32 array"
-                    )));
-                }
-                if mutable_args.iter().any(|existing| existing == variable) {
-                    return Err(CompileError::Syntax(format!(
-                        "pure function `{name}` cannot borrow `{variable}` mutably more than once in one call"
-                    )));
-                }
-                mutable_args.push(variable.to_string());
-                variable
+        if let PureParamType::F32ArrayMut(_) = param.ty {
+            let Some(variable) = part.strip_prefix("&mut ").map(str::trim) else {
+                return Err(CompileError::Syntax(format!(
+                    "pure function `{name}` argument `{}` must be passed as `&mut variable`",
+                    param.name
+                )));
+            };
+            if !is_identifier(variable)
+                || !known
+                    .get(variable)
+                    .is_some_and(|ty| ty.is_scalar(ValueType::F32Array))
+            {
+                return Err(CompileError::Syntax(format!(
+                    "pure function `{name}` argument `{variable}` must be a local f32 array"
+                )));
             }
-            PureParamType::Str => {
-                let Some(variable) = part.strip_prefix('&').map(str::trim) else {
-                    return Err(CompileError::Syntax(format!(
-                        "pure function `{name}` argument `{}` has type `&str` and must be passed as `&variable`",
-                        param.name
-                    )));
-                };
-                if variable.starts_with("mut ")
-                    || !is_identifier(variable)
-                    || !known
-                        .get(variable)
-                        .is_some_and(|ty| ty.is_scalar(ValueType::String))
-                {
-                    return Err(CompileError::Syntax(format!(
-                        "pure function `{name}` argument `{}` must borrow a local string as `&variable`",
-                        param.name
-                    )));
-                }
-                variable
+            if mutable_args.iter().any(|existing| existing == variable) {
+                return Err(CompileError::Syntax(format!(
+                    "pure function `{name}` cannot borrow `{variable}` mutably more than once in one call"
+                )));
             }
-            PureParamType::StringList => {
-                let Some(variable) = part.strip_prefix('&').map(str::trim) else {
-                    return Err(CompileError::Syntax(format!(
-                        "pure function `{name}` argument `{}` has type `&[String]` and must be passed as `&variable`",
-                        param.name
-                    )));
-                };
-                if variable.starts_with("mut ")
-                    || !is_identifier(variable)
-                    || !known
-                        .get(variable)
-                        .is_some_and(|ty| ty.is_scalar(ValueType::StringList))
-                {
-                    return Err(CompileError::Syntax(format!(
-                        "pure function `{name}` argument `{}` must borrow a local `Vec<String>` as `&variable`",
-                        param.name
-                    )));
-                }
-                variable
+            mutable_args.push(variable.to_string());
+            args.push(Expr::Variable(variable.to_string()));
+            continue;
+        }
+
+        let expression_text = match param.ty {
+            PureParamType::Str | PureParamType::StringList | PureParamType::Struct(_) => {
+                part.strip_prefix('&').map(str::trim).unwrap_or(part)
             }
+            PureParamType::Int | PureParamType::Bool => part,
+            PureParamType::F32ArrayMut(_) => unreachable!(),
+        };
+        let expr = crate::expression::parse_expr_in_namespace(expression_text, namespace, program)?;
+        crate::expression::validate_expr(&expr, known, program)?;
+        let actual = crate::expression::infer_static_expr_type(&expr, known, program)?;
+        let matches = match param.ty {
+            PureParamType::Int => actual.is_scalar(ValueType::Int),
+            PureParamType::Bool => actual.is_scalar(ValueType::Bool),
+            PureParamType::Str => actual.is_scalar(ValueType::String),
+            PureParamType::StringList => actual.is_scalar(ValueType::StringList),
             PureParamType::Struct(id) => {
-                let Some(variable) = part.strip_prefix('&').map(str::trim) else {
-                    return Err(CompileError::Syntax(format!(
-                        "pure function `{name}` argument `{}` is a borrowed struct and must be passed as `&variable`",
-                        param.name
-                    )));
-                };
                 let expected = program
                     .json_schema_by_id(id)
-                    .map(|schema| schema.name.as_str())
-                    .ok_or_else(|| {
-                        CompileError::Syntax(format!(
-                            "pure function `{name}` references unknown struct parameter id {id}"
-                        ))
-                    })?;
-                if variable.starts_with("mut ")
-                    || !is_identifier(variable)
-                    || !matches!(known.get(variable), Some(StaticType::PureStruct(actual)) if actual == expected)
-                {
-                    return Err(CompileError::Syntax(format!(
-                        "pure function `{name}` argument `{}` must borrow the expected struct local as `&variable`",
-                        param.name
-                    )));
-                }
-                variable
+                    .map(|schema| schema.name.as_str());
+                matches!((&actual, expected), (StaticType::PureStruct(actual_name), Some(expected_name)) if actual_name == expected_name)
             }
+            PureParamType::F32ArrayMut(_) => false,
         };
-        args.push(variable.to_string());
+        if !matches {
+            let expected = match param.ty {
+                PureParamType::Int => "i64",
+                PureParamType::Bool => "bool",
+                PureParamType::Str => "&str",
+                PureParamType::StringList => "&[String]",
+                PureParamType::Struct(_) => "&Struct",
+                PureParamType::F32ArrayMut(_) => unreachable!(),
+            };
+            return Err(CompileError::Syntax(format!(
+                "pure function `{name}` argument `{}` must have type `{expected}`",
+                param.name
+            )));
+        }
+        args.push(expr);
     }
     Ok(args)
 }

@@ -35,7 +35,7 @@ pub(crate) fn generate_source(shard: &VerifiedShard) -> GeneratedRust {
         "pub const VELRAN_RUNTIME_CONTRACT_FINGERPRINT: u64 = {};\n",
         crate::runtime_contract_fingerprint(shard)
     ));
-    source.push_str(&format!("pub const VELRAN_STATUS_OK: u32 = {STATUS_OK};\npub const VELRAN_STATUS_INTERNAL: u32 = {STATUS_INTERNAL};\npub const VELRAN_STATUS_BUDGET_EXCEEDED: u32 = {STATUS_BUDGET_EXCEEDED};\npub const VELRAN_STATUS_MEMORY_EXCEEDED: u32 = {STATUS_MEMORY_EXCEEDED};\npub const VELRAN_STATUS_BAD_REQUEST: u32 = {STATUS_BAD_REQUEST};\npub const VELRAN_STATUS_OUTPUT_TOO_SMALL: u32 = {STATUS_OUTPUT_TOO_SMALL};\npub const VELRAN_STATUS_UNSUPPORTED: u32 = {STATUS_UNSUPPORTED};\n"));
+    source.push_str(&format!("pub const VELRAN_STATUS_OK: u32 = {STATUS_OK};\npub const VELRAN_STATUS_INTERNAL: u32 = {STATUS_INTERNAL};\npub const VELRAN_STATUS_BUDGET_EXCEEDED: u32 = {STATUS_BUDGET_EXCEEDED};\npub const VELRAN_STATUS_MEMORY_EXCEEDED: u32 = {STATUS_MEMORY_EXCEEDED};\npub const VELRAN_STATUS_BAD_REQUEST: u32 = {STATUS_BAD_REQUEST};\npub const VELRAN_STATUS_OUTPUT_TOO_SMALL: u32 = {STATUS_OUTPUT_TOO_SMALL};\npub const VELRAN_STATUS_UNSUPPORTED: u32 = {STATUS_UNSUPPORTED};\npub const VELRAN_MAX_PURE_CALL_DEPTH: u16 = 64;\n"));
     source.push_str(&format!("pub const VELRAN_VALUE_NONE: u32 = {VALUE_NONE};\npub const VELRAN_VALUE_INT: u32 = {VALUE_INT};\npub const VELRAN_VALUE_BOOL: u32 = {VALUE_BOOL};\npub const VELRAN_VALUE_F32_INTERNAL: u32 = 0x8000_0001;\npub const VELRAN_VALUE_HTML: u32 = {VALUE_HTML};\npub const VELRAN_VALUE_TYPED_JSON: u32 = {VALUE_TYPED_JSON};\n\n"));
     source.push_str("pub const VELRAN_CAPABILITIES: &[&str] = &[\n");
     for capability in shard.capabilities() {
@@ -101,6 +101,8 @@ pub(crate) fn generate_source(shard: &VerifiedShard) -> GeneratedRust {
                 .iter()
                 .enumerate()
                 .map(|(index, (_, ty))| match ty {
+                    PureParamType::Int => format!("velran_arg_{index}: i64"),
+                    PureParamType::Bool => format!("velran_arg_{index}: bool"),
                     PureParamType::Str => format!("velran_arg_{index}: std::sync::Arc<str>"),
                     PureParamType::StringList => {
                         format!("velran_arg_{index}: std::sync::Arc<Vec<std::sync::Arc<str>>>")
@@ -113,11 +115,21 @@ pub(crate) fn generate_source(shard: &VerifiedShard) -> GeneratedRust {
                 .collect::<Vec<_>>()
                 .join(", ");
             let comma = if params.is_empty() { "" } else { ", " };
-            source.push_str(&format!("fn {}({params}{comma}instruction_budget: u64, allocation_budget: u64) -> PureScalarResult {{\n", super::pure_function_ident(function.name())));
+            source.push_str(&format!("fn {}({params}{comma}instruction_budget: u64, allocation_budget: u64, recursion_budget: u16) -> PureScalarResult {{\n", super::pure_function_ident(function.name())));
             source.push_str("    let mut velran_fuel = Fuel::new(instruction_budget);\n    let mut velran_state = RuntimeState::new(allocation_budget);\n");
+            source.push_str("    if recursion_budget == 0 { return pure_budget_exceeded(&velran_fuel, &velran_state); }\n");
+            source.push_str("    let velran_recursion_budget = recursion_budget;\n");
             source.push_str(&format!("    // Velran verified owned scalar pure function: {:?}; host_api=false; ambient_authority=false\n", function.name()));
             for (index, (name, ty)) in function.params().iter().enumerate() {
                 match ty {
+                    PureParamType::Int => source.push_str(&format!(
+                        "    let mut {} = Scalar::Int(velran_arg_{index});\n",
+                        super::local_ident(name)
+                    )),
+                    PureParamType::Bool => source.push_str(&format!(
+                        "    let mut {} = Scalar::Bool(velran_arg_{index});\n",
+                        super::local_ident(name)
+                    )),
                     PureParamType::Str => source.push_str(&format!(
                         "    let mut {} = Scalar::String(velran_arg_{index});\n",
                         super::local_ident(name)
@@ -744,6 +756,53 @@ pub(crate) fn concat_strings(pair: (Option<Scalar>, Option<Scalar>), state: &mut
     let mut out = String::with_capacity(bytes); out.push_str(&a); out.push_str(&b);
     Some(finish_string(out))
 }
+pub(crate) fn safe_html_empty() -> Option<Scalar> { Some(Scalar::String(Arc::<str>::from(""))) }
+pub(crate) fn safe_html_text(value: Option<Scalar>, state: &mut RuntimeState) -> Option<Scalar> {
+    let value = as_string(value?)?;
+    let escaped = escape_html_owned(value.as_ref());
+    if !state.charge_alloc((escaped.len() as u64).saturating_add(24)) { return None; }
+    Some(finish_string(escaped))
+}
+pub(crate) fn safe_html_concat(left: Option<Scalar>, right: Option<Scalar>, state: &mut RuntimeState) -> Option<Scalar> {
+    concat_strings((left, right), state)
+}
+pub(crate) fn safe_html_element(tag: Option<Scalar>, body: Option<Scalar>, state: &mut RuntimeState) -> Option<Scalar> {
+    let tag = as_string(tag?)?;
+    let body = as_string(body?)?;
+    if !matches!(tag.as_ref(), "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "strong" | "em" | "code" | "pre" | "blockquote" | "ul" | "ol" | "li" | "hr" | "br") {
+        state.bad_request(); return None;
+    }
+    let bytes = tag.len().saturating_mul(2).saturating_add(body.len()).saturating_add(5);
+    if !state.charge_alloc((bytes as u64).saturating_add(24)) { return None; }
+    let mut out = String::with_capacity(bytes);
+    if matches!(tag.as_ref(), "hr" | "br") {
+        out.push('<'); out.push_str(tag.as_ref()); out.push('>');
+    } else {
+        out.push('<'); out.push_str(tag.as_ref()); out.push('>'); out.push_str(body.as_ref()); out.push_str("</"); out.push_str(tag.as_ref()); out.push('>');
+    }
+    Some(finish_string(out))
+}
+pub(crate) fn safe_html_link(href: Option<Scalar>, body: Option<Scalar>, state: &mut RuntimeState) -> Option<Scalar> {
+    let href = as_string(href?)?;
+    let body = as_string(body?)?;
+    let lower = href.trim().to_ascii_lowercase();
+    let allowed = href.starts_with('/') || href.starts_with('#') || lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:");
+    if !allowed || lower.starts_with("javascript:") || lower.starts_with("data:") || lower.starts_with("file:") { state.bad_request(); return None; }
+    let attr = escape_html_attr_owned(href.trim());
+    let bytes = attr.len().saturating_add(body.len()).saturating_add(15);
+    if !state.charge_alloc((bytes as u64).saturating_add(24)) { return None; }
+    let mut out = String::with_capacity(bytes);
+    out.push_str("<a href=\""); out.push_str(&attr); out.push_str("\">"); out.push_str(body.as_ref()); out.push_str("</a>");
+    Some(finish_string(out))
+}
+fn escape_html_owned(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch { '&' => out.push_str("&amp;"), '<' => out.push_str("&lt;"), '>' => out.push_str("&gt;"), '"' => out.push_str("&quot;"), '\'' => out.push_str("&#39;"), _ => out.push(ch) }
+    }
+    out
+}
+fn escape_html_attr_owned(value: &str) -> String { escape_html_owned(value) }
 pub(crate) fn string_len(value: Option<Scalar>) -> Option<Scalar> {
     let value = as_string(value?)?;
     let len = if value.is_ascii() { value.len() } else { value.chars().count() };
@@ -958,6 +1017,19 @@ pub(crate) fn direct_concat_strings(a: Arc<str>, b: Arc<str>, state: &mut Runtim
     let bytes = a.len().checked_add(b.len())?;
     if !state.charge_alloc((bytes as u64).saturating_add(24)) { return None; }
     let mut out=String::with_capacity(bytes); out.push_str(&a); out.push_str(&b); Some(Arc::<str>::from(out))
+}
+pub(crate) fn direct_safe_html_text(value: Arc<str>, state: &mut RuntimeState) -> Option<Arc<str>> {
+    let escaped = escape_html_owned(value.as_ref());
+    if !state.charge_alloc((escaped.len() as u64).saturating_add(24)) { return None; }
+    Some(Arc::<str>::from(escaped))
+}
+pub(crate) fn direct_safe_html_element(tag: Arc<str>, body: Arc<str>, state: &mut RuntimeState) -> Option<Arc<str>> {
+    let value = safe_html_element(Some(Scalar::String(tag)), Some(Scalar::String(body)), state)?;
+    as_string(value)
+}
+pub(crate) fn direct_safe_html_link(href: Arc<str>, body: Arc<str>, state: &mut RuntimeState) -> Option<Arc<str>> {
+    let value = safe_html_link(Some(Scalar::String(href)), Some(Scalar::String(body)), state)?;
+    as_string(value)
 }
 pub(crate) fn direct_string_trim(value: Arc<str>, mode: u8, state: &mut RuntimeState) -> Option<Arc<str>> {
     let trimmed = match mode { 0 => value.trim(), 1 => value.trim_start(), _ => value.trim_end() };

@@ -214,14 +214,14 @@ A következő lista szándékosan rövid és végrehajtható. A részletes indok
   \item \textbf{Migration:} production előtt \code{migrate status} és \code{migrate verify}; a jóváhagyott schema változás explicit \code{migrate apply}; utána újabb verify.
   \item \textbf{Konfiguráció:} a valódi production \code{server.toml} config-checken átment. Az effective config redaktált kimenete reviewzható.
   \item \textbf{Secrets:} DB/Redis/auth secret fájlok nem a repositoryban vannak, szűk filesystem jogosultsággal rendelkeznek, és nem kerülnek logba vagy release-recordba.
-  \item \textbf{HTTP edge:} a domain, TLS és Host kezelés helyes. A trusted-proxy lista kizárólag a tényleges proxykat tartalmazza.
+  \item \textbf{HTTP edge:} a domain, TLS és Host kezelés helyes. A trusted-proxy lista kizárólag a tényleges proxykat tartalmazza; a certificate-renewal felelőse és a lejárat monitorozása explicit.
   \item \textbf{Auth:} production cookie policy aktív; local auth/LDAP konfiguráció ellenőrzött; admin/MFA recovery folyamat dokumentált.
   \item \textbf{CSRF és CORS:} state-changing böngészős kérés CSRF-védett; CORS allowlist explicit; credentialed CORS esetén nincs wildcard origin.
   \item \textbf{Adatbázis:} az alkalmazás DB user least privilege; pool/budget összhangban van a backend kapacitásával; fontos queryk indexelése ismert.
   \item \textbf{Storage/upload:} AppFs root confinement és jogosultságok helyesek; upload byte/pixel limitek aktívak; release tartalom nem írható alkalmazásból.
   \item \textbf{Redis/cache/rate limit:} multi-instance környezetben a közös security/runtime state Redisben van; Redis kiesési viselkedése ismert és tesztelt.
   \item \textbf{Egress:} csak named outbound target engedélyezett; host/CIDR/port/TLS/timeout/méret policy explicit; secret nem kerül URL-be vagy logba.
-  \item \textbf{Erőforrások:} request/runtime limitek és process hard limitek konzisztensen be vannak állítva; cgroup authorityként systemd vagy külön delegált Velran cgroup legyen, ne mindkettő.
+  \item \textbf{Erőforrások/host:} request/runtime limitek és process hard limitek konzisztensen be vannak állítva; cgroup authorityként systemd vagy külön delegált Velran cgroup legyen, ne mindkettő; legyen elegendő lemez/inode tartalék és működő host időszinkron.
   \item \textbf{Observability:} server/access/audit log írható; request ID működik; metrics és readiness elérhető a megfelelő belső hálózatról; riasztási minimum definiált.
   \item \textbf{Backup/recovery:} van friss, ellenőrzött DB + AppFs + identity backup; recovery manifest rendelkezésre áll; restore drill nem csak papíron létezik.
   \item \textbf{Deploy/rollback:} a release artifact és checksum ismert; a régi release visszaállítható; schema-változásnál tisztázott, hogy app rollback vagy teljes restore lehetséges.
@@ -336,6 +336,7 @@ Ez a lista más kérdésre válaszol, mint a production gate: \emph{képes vagy-
   \item Migrationt elő tudok készíteni és ellenőrizni anélkül, hogy a schema-módosítást a szerver indulásához kötném.
   \item Request ID alapján tudok server/access/audit logot olvasni, és readiness/metrics segítségével különválasztom az alkalmazáshibát a dependency-hibától.
   \item Explicit release artifacttal, checksummal, konfigurációs review-val, smoke teszttel és rollback döntéssel tudok deployolni.
+  \item Meg tudom nevezni, ki felel a TLS renewalért, OS patchingért, időszinkronért, lemez/inode kapacitásért, DB/Redis karbantartásért és firewall/DNS változásokért, és tudom, mely Velran checkeket kell ezek után újra lefuttatni.
   \item El tudom mondani, mi tartozik a backupba, izoláltan vissza tudok állítani konzisztens DB/AppFs/identity állapotot, és a restore drillt evidence-nek tekintem, nem puszta dokumentációnak.
   \item Le tudom futtatni a \code{./verify.sh}-t, megértem, melyik gate bukott el, meg tudom különböztetni a tanulói példákat a rejection fixture-öktől/manifesztektől, és kerülöm az olyan ``javítást'', amely csak gyengíti az ellenőrzést.
 \end{itemize}

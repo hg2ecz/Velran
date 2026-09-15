@@ -13,6 +13,18 @@ Az Velran V1 ennek a release tree-nek a Rust-first, native-only webalkalmazás-n
 - Velran-specifikus szintaxis ott marad, ahol webes vagy security szemantikát hordoz: route, typed request schema, authorization policy, HTML/template boundary, resource contract és named capability.
 - Az alkalmazás-végrehajtás: verifikált IR -> generált safe Rust -> `rustc` -> immutable `cdylib` -> atomikus aktiválás. Nincs VM/interpreter fallback. Nem támogatott natív lowering vagy host ABI esetén a candidate fail-closed módon elutasításra kerül, az előző valid generáció aktív marad.
 
+## Verified pure nyelvi produktivitási frissítés
+
+- A scalar/borrowolt verified pure függvény by-value `i64`/`bool` paramétert is fogad az explicit immutable string/list/struct borrow mellett.
+- Scalar/borrowolt pure helperek typed expression argumentumokkal hívhatják egymást; a hívás eredménye lokálist inicializálhat vagy assignment jobb oldala lehet.
+- A Rust-szerű `if`/`else if`/`else` támogatott, egyszeri feltételkiértékeléssel és megőrzött statikus security metadata-val.
+- A scalar pure rekurzió hard depth-bounded és továbbra is fuel/allocation-budgetelt; a mutable numeric hot-path rekurzív ciklus compile-time hiba.
+- A string `.to_string()` verifikált, allocation-accounted művelet; string-orientált builtin csak string argumentumhelyen fogad explicit immutable borrow-t.
+- A frontend expression/kontrollfolyam diagnosztika megőrzi a forrássort.
+- A `SafeHtml` típusos lowering boundary marad, az ismeretlen call-alakú template direktíva fail-fast. A Markdown/CommonMark továbbra is Velran forrásmodul, nem engine feature.
+
+Normatív leírás: [`docs/hu/58-verifikalt-pure-fuggvenyek.md`](docs/hu/58-verifikalt-pure-fuggvenyek.md).
+
 ## Security és üzemeltetés
 
 - Explicit route access policy (`public`, auth/permission/MFA/critical policyk).

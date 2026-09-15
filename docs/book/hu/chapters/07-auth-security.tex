@@ -359,11 +359,11 @@ Az autholt CMS-szerkesztői felület sem indokolja raw HTML tárolását. A szer
 
 \begin{lstlisting}[language=Velran]
 <article class="article-body">
-    @markdown(article.body)
+    {{ markdown_html }}
 </article>
 \end{lstlisting}
 
-Az \code{@markdown} nem enged raw HTML-t, és a link targeteket allowlist szerint kezeli.
+A renderer Velran forrásmodul, nem engine-direktíva. Típusos \code{SafeHtml} értéket állít elő; a raw HTML escape-elve jelenik meg, a linkcélokat pedig a modul és az általános SafeHtml boundary korlátozza.
 
 \section{Production ellenőrzőlista}
 

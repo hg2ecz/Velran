@@ -38,11 +38,12 @@ fn wikiBySlug(db: Db, slug: Slug)
 fn wikiShow(ctx: PageContext, db: Db, slug: Slug)
     -> Result<Html, PageError> {
     let page = wikiBySlug(db, slug)?;
+    let markdown_html = commonmark::render(&page.body);
     return Ok(html {
         @layout(Main, page.title) {
             <article>
                 <h1>{{ page.title }}</h1>
-                @markdown(page.body)
+                {{ markdown_html }}
             </article>
         }
     });
@@ -119,11 +120,12 @@ form ArticleForm {
 fn article(ctx: PageContext, db: Db, slug: Slug)
     -> Result<Html, PageError> {
     let article = articleBySlug(db, slug)?;
+    let markdown_html = commonmark::render(&article.body);
     return Ok(html {
         @layout(Main, article.title) {
             <article>
                 <h1>{{ article.title }}</h1>
-                @markdown(article.body)
+                {{ markdown_html }}
             </article>
         }
     });
@@ -180,17 +182,19 @@ In a CMS, original Markdown should remain the source of truth; do not store raw 
 
 \section{Server-side Markdown rendering and cache}
 
-For published content, prefer server-side Markdown rendering. The authoritative path is:
+For published content, prefer server-side Markdown rendering. Markdown itself is not a Markdown-specific engine feature: copy/include \path{commonmark.vrn} with \code{mod commonmark;} and call the Velran source module. The authoritative path is:
 
 \begin{lstlisting}
 Markdown stored in SQL
 -> typed query by stable id/slug
--> @markdown(...)
+-> commonmark::render(...)
 -> safe HTML response
 -> optional route-level public cache
 \end{lstlisting}
 
-Keep the original Markdown in the database as the source of truth. Do not persist application-generated HTML merely to avoid rendering work. The server-side renderer rejects raw HTML and applies its link-target policy, so rendering remains inside the framework's HTML security boundary instead of moving trust into browser JavaScript.
+There is no engine-level \code{@markdown(...)} directive. An unknown template call-directive shaped like \code{@name(...)} is rejected at compile time instead of being rendered as literal text; call \code{commonmark::render(...)} as ordinary Velran library code.
+
+Keep the original Markdown in the database as the source of truth. Do not persist application-generated HTML merely to avoid rendering work. The source-level renderer escapes raw HTML and applies its link-target policy while constructing only typed \code{SafeHtml}. Markdown syntax therefore stays outside the engine while the generic HTML security boundary remains enforced.
 
 A public, non-personalized document may use route caching when its freshness contract allows it. The cache stores the completed response; removing the cache clause gives the same rendering path without caching. A minimal pair looks like:
 
@@ -205,7 +209,7 @@ route markdownDocumentCached GET "/documents-cached/:id<i64>"
     => markdownDocument;
 \end{lstlisting}
 
-The canonical end-to-end example is \path{examples/markdown-sql-cache/}. It includes SQLite, PostgreSQL, and MariaDB schema variants and demonstrates an ID-based typed SQL read feeding \code{@markdown}. Use browser-side Markdown rendering only for an editor preview when it improves interaction; the published representation should still be rendered by the server so the server remains authoritative for sanitization, cache policy, CSP assumptions, and no-JavaScript clients.
+The canonical end-to-end example is \path{examples/markdown-sql-cache/}. It includes SQLite, PostgreSQL, and MariaDB schema variants and demonstrates an ID-based typed SQL read feeding \code{commonmark::render}. Use browser-side Markdown rendering only for an editor preview when it improves interaction; the published representation should still be rendered by the server so the server remains authoritative for sanitization, cache policy, CSP assumptions, and no-JavaScript clients.
 
 \section{From demo CMS to editorial workflow}
 

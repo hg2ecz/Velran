@@ -170,6 +170,8 @@ pub(super) fn lower_pure_function_bodies(
         for param in &params {
             let static_ty = match param.ty {
                 PureParamType::F32ArrayMut(_) => StaticType::trusted_scalar(ValueType::F32Array),
+                PureParamType::Int => StaticType::trusted_scalar(ValueType::Int),
+                PureParamType::Bool => StaticType::trusted_scalar(ValueType::Bool),
                 PureParamType::Str => StaticType::trusted_scalar(ValueType::String),
                 PureParamType::StringList => StaticType::trusted_scalar(ValueType::StringList),
                 PureParamType::Struct(id) => {
@@ -183,12 +185,18 @@ pub(super) fn lower_pure_function_bodies(
             };
             known.insert(param.name.clone(), static_ty);
         }
+        let body_line = source[..body_open + 1]
+            .bytes()
+            .filter(|b| *b == b'\n')
+            .count()
+            + 1;
         let body = crate::control_flow::parse_pure_compute_statements(
             &symbol_name,
             namespace,
             &source[body_open + 1..body_close],
             &mut known,
             program,
+            body_line,
         )?;
         validate_param_bindings(&name, &params, &body)?;
         validate_return_contract(&name, &return_type, &body, &known, program)?;
@@ -209,6 +217,110 @@ pub(super) fn parse_pure_functions(
 ) -> Result<(), CompileError> {
     predeclare_pure_functions(source, namespace, program)?;
     lower_pure_function_bodies(source, namespace, program)
+}
+
+pub(super) fn validate_pure_recursion_contract(program: &Program) -> Result<(), CompileError> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Mark {
+        Visiting,
+        Done,
+    }
+
+    fn collect_calls(statements: &[language_core::ComputeStatement], out: &mut Vec<String>) {
+        for statement in statements {
+            match statement {
+                language_core::ComputeStatement::PureCall { function, .. } => {
+                    out.push(function.clone())
+                }
+                language_core::ComputeStatement::While { statements, .. }
+                | language_core::ComputeStatement::If { statements, .. } => {
+                    collect_calls(statements, out)
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn visit(
+        name: &str,
+        program: &Program,
+        marks: &mut HashMap<String, Mark>,
+        stack: &mut Vec<String>,
+    ) -> Result<(), CompileError> {
+        match marks.get(name).copied() {
+            Some(Mark::Done) => return Ok(()),
+            Some(Mark::Visiting) => {
+                let start = stack.iter().position(|item| item == name).unwrap_or(0);
+                let cycle = &stack[start..];
+                let touches_unbounded_numeric_path = cycle.iter().any(|item| {
+                    program.pure_function(item).is_some_and(|function| {
+                        function
+                            .params
+                            .iter()
+                            .any(|param| matches!(param.ty, PureParamType::F32ArrayMut(_)))
+                    })
+                });
+                if touches_unbounded_numeric_path {
+                    let mut path = cycle.to_vec();
+                    path.push(name.to_string());
+                    return Err(CompileError::Syntax(format!(
+                        "recursive pure call cycle through the numeric hot path is not allowed: {}",
+                        path.join(" -> ")
+                    )));
+                }
+                // Owned/borrowed scalar pure recursion is runtime depth-bounded.
+                return Ok(());
+            }
+            None => {}
+        }
+        marks.insert(name.to_string(), Mark::Visiting);
+        stack.push(name.to_string());
+        if let Some(function) = program.pure_function(name) {
+            let mut calls = Vec::new();
+            collect_calls(&function.body, &mut calls);
+            for callee in calls {
+                visit(&callee, program, marks, stack)?;
+            }
+        }
+        stack.pop();
+        marks.insert(name.to_string(), Mark::Done);
+        Ok(())
+    }
+
+    // Keep the mutable fixed-array hot path ABI closed over itself. Its generated
+    // helpers use the primitive tuple transport, while scalar helpers use the owned
+    // Scalar transport and recursion budget. Crossing that ABI boundary from inside
+    // another pure helper is rejected until a unified internal call ABI exists.
+    for function in &program.pure_functions {
+        let numeric_family = function
+            .params
+            .iter()
+            .any(|param| matches!(param.ty, PureParamType::F32ArrayMut(_)));
+        let mut calls = Vec::new();
+        collect_calls(&function.body, &mut calls);
+        for callee in calls {
+            let Some(target) = program.pure_function(&callee) else {
+                continue;
+            };
+            let target_numeric_family = target
+                .params
+                .iter()
+                .any(|param| matches!(param.ty, PureParamType::F32ArrayMut(_)));
+            if numeric_family != target_numeric_family {
+                return Err(CompileError::Syntax(format!(
+                    "pure helper `{}` cannot cross the scalar/numeric helper ABI when calling `{callee}`; keep scalar orchestration and mutable numeric kernels separate",
+                    function.name
+                )));
+            }
+        }
+    }
+
+    let mut marks = HashMap::new();
+    for function in &program.pure_functions {
+        let mut stack = Vec::new();
+        visit(&function.name, program, &mut marks, &mut stack)?;
+    }
+    Ok(())
 }
 
 fn parse_return_type(
@@ -261,6 +373,7 @@ fn parse_pure_value_type(
         "bool" => Ok(PureValueType::Bool),
         "String" => Ok(PureValueType::String),
         "Vec<String>" => Ok(PureValueType::StringList),
+        "SafeHtml" => Ok(PureValueType::SafeHtml),
         _ if crate::module_namespace::is_symbol_path(raw) => {
             let symbol = qualify(namespace, raw);
             if program.json_schema(&symbol).is_some() {
@@ -273,7 +386,7 @@ fn parse_pure_value_type(
             }
         }
         _ => Err(CompileError::Syntax(format!(
-            "pure function `{function_name}` return type `{raw}` is unsupported; safe value types are currently i64, f32, bool, String, Vec<String>, and declared structs"
+            "pure function `{function_name}` return type `{raw}` is unsupported; safe value types are currently i64, f32, bool, String, Vec<String>, SafeHtml, and declared structs"
         ))),
     }
 }
@@ -285,27 +398,96 @@ fn validate_return_contract(
     known: &HashMap<String, StaticType>,
     program: &Program,
 ) -> Result<(), CompileError> {
-    fn has_nested_return(statements: &[language_core::ComputeStatement]) -> bool {
-        statements.iter().any(|s| match s {
-            language_core::ComputeStatement::If { statements, .. }
-            | language_core::ComputeStatement::While { statements, .. } => {
-                statements.iter().any(|n| {
-                    matches!(
-                        n,
-                        language_core::ComputeStatement::Return(_)
-                            | language_core::ComputeStatement::ReturnStruct { .. }
-                            | language_core::ComputeStatement::ReturnOption { .. }
-                            | language_core::ComputeStatement::ReturnResult { .. }
-                    )
-                }) || has_nested_return(statements)
+    fn validate_nested_returns(
+        name: &str,
+        expected: &PureReturnType,
+        statements: &[language_core::ComputeStatement],
+        known: &HashMap<String, StaticType>,
+        program: &Program,
+    ) -> Result<(), CompileError> {
+        for statement in statements {
+            match statement {
+                language_core::ComputeStatement::If { statements, .. }
+                | language_core::ComputeStatement::While { statements, .. } => {
+                    validate_nested_returns(name, expected, statements, known, program)?;
+                }
+                language_core::ComputeStatement::Return(expr) => {
+                    let PureReturnType::Value(value) = expected else {
+                        return Err(CompileError::Syntax(format!(
+                            "pure function `{name}` nested return does not match its declared return type"
+                        )));
+                    };
+                    let Some(expected_value) = pure_value_to_value_type(value) else {
+                        return Err(CompileError::Syntax(format!(
+                            "pure function `{name}` nested struct return must use `return StructName {{ ... }};`"
+                        )));
+                    };
+                    if crate::expression::infer_expr_type(expr, known, program)? != expected_value {
+                        return Err(CompileError::Syntax(format!(
+                            "pure function `{name}` nested return type mismatch"
+                        )));
+                    }
+                }
+                language_core::ComputeStatement::ReturnStruct { schema, .. } => match expected {
+                    PureReturnType::Value(PureValueType::Struct(expected_schema))
+                        if schema == expected_schema => {}
+                    _ => {
+                        return Err(CompileError::Syntax(format!(
+                            "pure function `{name}` nested struct return does not match its declared return type"
+                        )));
+                    }
+                },
+                language_core::ComputeStatement::ReturnOption { value } => {
+                    let PureReturnType::Option(inner) = expected else {
+                        return Err(CompileError::Syntax(format!(
+                            "pure function `{name}` nested Option return does not match its declared return type"
+                        )));
+                    };
+                    if let Some(expr) = value {
+                        let expected_value = pure_value_to_value_type(inner).ok_or_else(|| {
+                            CompileError::Syntax(format!(
+                                "pure function `{name}` Option<struct> lowering is not enabled yet"
+                            ))
+                        })?;
+                        if crate::expression::infer_expr_type(expr, known, program)?
+                            != expected_value
+                        {
+                            return Err(CompileError::Syntax(format!(
+                                "pure function `{name}` nested Option payload type mismatch"
+                            )));
+                        }
+                    }
+                }
+                language_core::ComputeStatement::ReturnResult { is_ok, value } => {
+                    let PureReturnType::Result { ok, err } = expected else {
+                        return Err(CompileError::Syntax(format!(
+                            "pure function `{name}` nested Result return does not match its declared return type"
+                        )));
+                    };
+                    let value_ty = if *is_ok { ok } else { err };
+                    let expected_value = pure_value_to_value_type(value_ty).ok_or_else(|| {
+                        CompileError::Syntax(format!(
+                            "pure function `{name}` Result<struct,...> lowering is not enabled yet"
+                        ))
+                    })?;
+                    if crate::expression::infer_expr_type(value, known, program)? != expected_value
+                    {
+                        return Err(CompileError::Syntax(format!(
+                            "pure function `{name}` nested Result payload type mismatch"
+                        )));
+                    }
+                }
+                _ => {}
             }
-            _ => false,
-        })
+        }
+        Ok(())
     }
-    if has_nested_return(body) {
-        return Err(CompileError::Syntax(format!(
-            "pure function `{name}` return must currently be the final top-level statement"
-        )));
+    for statement in body {
+        if let language_core::ComputeStatement::If { statements, .. }
+        | language_core::ComputeStatement::While { statements, .. } = statement
+        {
+            validate_nested_returns(name, expected, statements, known, program)?;
+        }
     }
     match expected {
         PureReturnType::Unit => {
@@ -375,6 +557,7 @@ fn validate_return_contract(
                 PureValueType::Bool => ValueType::Bool,
                 PureValueType::String => ValueType::String,
                 PureValueType::StringList => ValueType::StringList,
+                PureValueType::SafeHtml => ValueType::Domain(language_core::SAFE_HTML_DOMAIN_ID),
                 PureValueType::Struct(_) => unreachable!(),
             };
             if actual != expected_value {
@@ -468,6 +651,7 @@ fn pure_value_to_value_type(value: &PureValueType) -> Option<ValueType> {
         PureValueType::Bool => ValueType::Bool,
         PureValueType::String => ValueType::String,
         PureValueType::StringList => ValueType::StringList,
+        PureValueType::SafeHtml => ValueType::Domain(language_core::SAFE_HTML_DOMAIN_ID),
         PureValueType::Struct(_) => return None,
     })
 }
@@ -552,7 +736,11 @@ fn parse_params(
             )));
         }
         let compact: String = ty.chars().filter(|ch| !ch.is_whitespace()).collect();
-        let param_ty = if compact == "&str" {
+        let param_ty = if compact == "i64" {
+            PureParamType::Int
+        } else if compact == "bool" {
+            PureParamType::Bool
+        } else if compact == "&str" {
             PureParamType::Str
         } else if compact == "&[String]" {
             PureParamType::StringList
@@ -587,7 +775,7 @@ fn parse_params(
             PureParamType::Struct(id)
         } else {
             return Err(CompileError::Syntax(format!(
-                "pure function `{name}` parameter `{param_name}` must currently use `&str`, `&[String]`, `&Struct`, or `&mut [f32; N]`"
+                "pure function `{name}` parameter `{param_name}` must use `i64`, `bool`, `&str`, `&[String]`, `&Struct`, or `&mut [f32; N]`"
             )));
         };
         out.push(PureFunctionParam {
@@ -602,15 +790,19 @@ fn validate_param_family(name: &str, params: &[PureFunctionParam]) -> Result<(),
     let has_arrays = params
         .iter()
         .any(|p| matches!(p.ty, PureParamType::F32ArrayMut(_)));
-    let has_strings = params.iter().any(|p| {
+    let has_scalar_or_borrowed = params.iter().any(|p| {
         matches!(
             p.ty,
-            PureParamType::Str | PureParamType::StringList | PureParamType::Struct(_)
+            PureParamType::Int
+                | PureParamType::Bool
+                | PureParamType::Str
+                | PureParamType::StringList
+                | PureParamType::Struct(_)
         )
     });
-    if has_arrays && has_strings {
+    if has_arrays && has_scalar_or_borrowed {
         return Err(CompileError::Syntax(format!(
-            "pure function `{name}` cannot mix string/list borrows and `&mut [f32; N]` parameters in this iteration"
+            "pure function `{name}` cannot mix scalar/borrowed parameters and `&mut [f32; N]` parameters in this iteration"
         )));
     }
     Ok(())
@@ -668,7 +860,7 @@ mod tests {
         let err = parse_pure_functions("fn bad(path: String) { }\n", "", &mut p).unwrap_err();
         assert!(
             err.to_string()
-                .contains("&str`, `&[String]`, `&Struct`, or `&mut [f32; N]")
+                .contains("`i64`, `bool`, `&str`, `&[String]`, `&Struct`, or `&mut [f32; N]")
         );
     }
 
@@ -702,6 +894,54 @@ mod tests {
             p.pure_functions[0].return_type,
             PureReturnType::Value(PureValueType::String)
         );
+    }
+
+    #[test]
+    fn parses_scalar_value_parameters() {
+        let mut p = Program::default();
+        parse_pure_functions(
+            "fn choose(value: i64, enabled: bool) -> i64 { if enabled { return value; } return 0; }\n",
+            "",
+            &mut p,
+        )
+        .unwrap();
+        assert_eq!(p.pure_functions[0].params[0].ty, PureParamType::Int);
+        assert_eq!(p.pure_functions[0].params[1].ty, PureParamType::Bool);
+    }
+
+    #[test]
+    fn scalar_pure_functions_can_call_helpers_with_expression_arguments() {
+        let mut p = Program::default();
+        parse_pure_functions(
+            "fn step(value: i64, enabled: bool) -> i64 { if enabled { return value + 1; } return value; }\nfn run(value: i64) -> i64 { let first = step(value + 1, true); let mut out = 0; out = step(first, false); return out; }\n",
+            "",
+            &mut p,
+        )
+        .unwrap();
+        validate_pure_recursion_contract(&p).unwrap();
+        assert!(p.pure_function("run").is_some());
+    }
+
+    #[test]
+    fn scalar_recursion_is_allowed_but_numeric_hot_path_recursion_is_rejected() {
+        let mut scalar = Program::default();
+        parse_pure_functions(
+            "fn nested(input: &str) -> String { if input.len() == 0 { return input.to_string(); } return nested(input); }\n",
+            "",
+            &mut scalar,
+        )
+        .unwrap();
+        validate_pure_recursion_contract(&scalar).unwrap();
+
+        let mut numeric = Program::default();
+        parse_pure_functions(
+            "fn spin(real: &mut [f32; 16]) -> i64 { return spin(&mut real); }\n",
+            "",
+            &mut numeric,
+        )
+        .unwrap();
+        let err = validate_pure_recursion_contract(&numeric).unwrap_err();
+        assert!(err.to_string().contains("numeric hot path"));
     }
 
     #[test]

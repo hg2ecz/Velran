@@ -81,6 +81,12 @@ Ne kapcsolj automatikus reverse SQL-t az alkalmazás symlink visszaállításáh
 
 Destruktív vagy schema-kompatibilitást érintő release előtt legyen ismert recovery point és friss restore-evidence. A backup tartalma, a DB/AppFs konzisztencia, az RPO/RTO, valamint a rollback és restore döntési fa a következő fejezetben szerepel. A deployment felelőssége itt az, hogy a release-váltás előtt ez a gate teljesüljön.
 
+\section{Host-karbantartási boundary}
+
+A Velran fail-closed módon tudja ellenőrizni az alkalmazáskonfigurációt, capabilityket és readiness állapotot, de a hostot nem adminisztrálja. Legyen explicit felelőse az operációs rendszer security frissítéseinek, az időszinkronnak, a lemez/inode kapacitásnak, a TLS-t lezáró edge tanúsítvány-megújításának, a DB/Redis karbantartásnak, valamint a firewall- és DNS-változásoknak. Kis telepítésnél elég egy rövid runbook, amely megnevezi a felelős rendszert és a renewal/patch ritmust; az nem elfogadható, ha ezek a feladatok implicit maradnak.
+
+A host-karbantartást kezeld kontrollált change-ként: előbb ellenőrizd a kapacitást és a backup/recovery állapotot, lehetőleg rétegenként patch-elj vagy újíts meg, majd ismételd meg a readiness-, smoke-, log- és metrics ellenőrzéseket.
+
 \section{Deploy utáni minimum ellenőrzés}
 
 \begin{enumerate}

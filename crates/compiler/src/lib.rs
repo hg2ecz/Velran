@@ -119,6 +119,7 @@ mod route_typed_schema;
 mod route_upload;
 mod routes;
 mod rustlike_surface;
+mod safe_html_types;
 mod string_builtin_signature;
 mod string_builtin_types;
 #[cfg(test)]

@@ -1,3 +1,5 @@
+mod commonmark;
+
 model MarkdownDocument {
     id: i64
     title: String
@@ -18,12 +20,13 @@ fn markdownDocument(
     id: i64
 ) -> Result<Html, PageError> {
     let document = markdownDocumentById(db, id)?;
+    let markdown_html = commonmark::render(&document.body);
     return Ok(html {
         <main>
             <article>
                 <h1>{{ document.title }}</h1>
                 <div class="markdown-body">
-                    @markdown(document.body)
+                    {{ markdown_html }}
                 </div>
             </article>
         </main>

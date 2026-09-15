@@ -20,6 +20,9 @@ impl Program {
     }
     pub fn representation_type(&self, ty: crate::ValueType) -> Option<crate::ValueType> {
         match ty {
+            crate::ValueType::Domain(id) if id == crate::SAFE_HTML_DOMAIN_ID => {
+                Some(crate::ValueType::String)
+            }
             crate::ValueType::Domain(id) => self.domain_type_by_id(id).map(|domain| domain.base),
             crate::ValueType::Credential(_) => Some(crate::ValueType::String),
             other => Some(other),

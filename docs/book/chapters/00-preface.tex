@@ -81,6 +81,11 @@ Ship and operate & 18--20: production deployment, recovery, and the CLI workflow
 
 You may postpone Chapters 11--13 and 16--17 until the application actually needs larger module structure, external integrations, caching/scaling, or deeper observability. Do not postpone Chapter 15 before shipping.
 
+\paragraph{Basic operator path.}
+Use this when you will install, release, monitor, back up, and recover a small Velran service but will not develop application features day to day. Read Chapters 2 and 15 first for topology and security boundaries, then 17--21 for observability, deployment, recovery, CLI workflow, and configuration. Finish with Chapter 23 and rehearse its troubleshooting and release gates on a non-production instance. Read Chapters 6--10 when the deployed application actually uses those database, authentication, file, API, or frontend surfaces.
+
+This path covers application operations, not full infrastructure administration. DNS ownership, certificate issuance/renewal, operating-system patching, database/Redis platform administration, host monitoring, time synchronization, storage capacity, and network/firewall policy remain operator responsibilities even when Velran provides the application-side checks.
+
 \paragraph{Complete Velran path.}
 Read Chapters 1--23 in order. This path is intended for developers who will also own architecture, security review, platform integration, scaling, observability, or production operations. The full path keeps optional web features and operator material in context instead of treating them as isolated recipes.
 

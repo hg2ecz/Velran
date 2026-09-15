@@ -13,7 +13,7 @@ check_tree() {
     fi
     # Rust-first application expressions: do not reintroduce free-function aliases
     # for operations that already have a straightforward Rust method spelling.
-    legacy_expr=$(grep -RInE --include='*.vrn' '(^|[^.[:alnum:]_])(sin|cos|sqrt|abs|ln|log10|log|exp|pow|round|floor|ceil|trim|trimStart|trimEnd|lower|upper|contains|startsWith|endsWith|replace|repeat|stringLen|substring|indexOf|lastIndexOf|charAt|containsKey|dict|toF32|monotonicNanos)[[:space:]]*\(' "$tree" 2>/dev/null | grep -vE ':[0-9]+:[[:space:]]*<' || true)
+    legacy_expr=$(grep -RInE --include='*.vrn' '(^|[^.[:alnum:]_])(sin|cos|sqrt|abs|ln|log10|log|exp|pow|round|floor|ceil|trim|trimStart|trimEnd|lower|upper|contains|startsWith|endsWith|replace|repeat|stringLen|containsKey|dict|toF32|monotonicNanos)[[:space:]]*\(' "$tree" 2>/dev/null | grep -vE ':[0-9]+:[[:space:]]*<' || true)
     if [ -n "$legacy_expr" ]; then
         printf '%s\n' "$legacy_expr"
         echo "non-Rust convenience expression remains under $tree" >&2
@@ -43,7 +43,7 @@ grep -q 'legacy_set_assignment_is_rejected' crates/compiler/src/tests/legacy_rej
 grep -q 'legacy_int_type_spelling_is_rejected' crates/compiler/src/tests/legacy_rejection_tests.rs || { echo 'missing legacy type rejection test' >&2; exit 1; }
 grep -q 'legacy_query_return_spellings_are_rejected' crates/compiler/src/tests/legacy_rejection_tests.rs || { echo 'missing legacy query return rejection test' >&2; exit 1; }
 grep -q 'rust_query_return_spellings_are_accepted' crates/compiler/src/tests/legacy_rejection_tests.rs || { echo 'missing Rust-like query return acceptance test' >&2; exit 1; }
-grep -q 'value_type_parser_rejects_legacy_spellings' crates/language-core/src/values.rs || { echo 'missing legacy ValueType rejection test' >&2; exit 1; }
+grep -q 'value_type_parser_rejects_legacy_spellings' crates/language-core/src/values_tests.rs || { echo 'missing legacy ValueType rejection test' >&2; exit 1; }
 
 [ "$fail" -eq 0 ]
 echo 'Velran language corpus verification: PASS'

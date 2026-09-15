@@ -62,6 +62,11 @@ pub(super) fn parse_domain_types(
 }
 
 fn require_type_name(name: &str) -> Result<(), CompileError> {
+    if name == "SafeHtml" {
+        return Err(CompileError::Syntax(
+            "domain type name `SafeHtml` is reserved by the HTML safety boundary".into(),
+        ));
+    }
     if name
         .chars()
         .next()

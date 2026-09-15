@@ -214,6 +214,7 @@ fn numeric_type(ty: NativeScalarType) -> Option<NumericType> {
         NativeScalarType::F32Array => NumericType::ARRAY_F32,
         NativeScalarType::Bool => NumericType::Bool,
         NativeScalarType::String
+        | NativeScalarType::SafeHtml
         | NativeScalarType::StringList
         | NativeScalarType::StringDict
         | NativeScalarType::Struct(_)
@@ -435,7 +436,10 @@ fn lower_statement(
             function: function.clone(),
             args: args
                 .iter()
-                .map(|name| ids.get(name).copied())
+                .map(|arg| match arg {
+                    ScalarExpr::Variable(name) => ids.get(name).copied(),
+                    _ => None,
+                })
                 .collect::<Option<Vec<_>>>()?,
             array_lens: array_lens.clone(),
             return_type: match return_type {
@@ -472,6 +476,7 @@ fn lower_statement(
                     crate::NativeHtmlPart::Escaped(expr) => {
                         Some(TypedHtmlPart::Escaped(lower_expr(expr, body, ids)?))
                     }
+                    crate::NativeHtmlPart::Safe(_) => None,
                 })
                 .collect::<Option<Vec<_>>>()?,
         ),

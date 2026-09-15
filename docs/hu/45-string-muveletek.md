@@ -35,6 +35,7 @@ String::trim_start() -> String
 String::trim_end() -> String
 String::to_lowercase() -> String
 String::to_uppercase() -> String
+String::to_string() -> String
 String::contains(String) -> bool
 String::starts_with(String) -> bool
 String::ends_with(String) -> bool
@@ -51,6 +52,19 @@ String::repeat(i64) -> String
 A `.chars().count()`, `substring`, `indexOf`, `lastIndexOf` és `charAt` Unicode skalárérték-pozíciókkal dolgozik, nem UTF-8 byte indexekkel. Az `indexOf` és `lastIndexOf` `-1` értéket ad, ha nincs találat. A `substring(text, start)` a `start` pozíciótól adja vissza a string végét; a háromparaméteres forma karakterhosszt kap, és a string végénél levágja a tartományt. Negatív vagy érvénytelen index fail-closed hibát ad.
 
 A kis- és nagybetűsítés Unicode-tudatos. A `replace` nem enged üres keresőszöveget, a `split` pedig üres delimitert; egy split legfeljebb 4096 elemet eredményezhet. A `repeat` nem enged negatív ismétlésszámot, és az allokáció előtt bekerül a request memória-budget elszámolásába.
+
+## Explicit immutable borrow string builtin határon
+
+String-orientált builtin stringet váró argumentumhelyén explicit immutable borrow is használható:
+
+```velran
+let tail = substring(&text, 1);
+let ch = charAt(&tail, 0);
+```
+
+A compiler **nem** törli általánosan az `&` jelet. Nem-string builtin argumentum explicit borrow-val továbbra is compile error, és immutable string argumentum helyén `&mut` sem fogadható el. Így a borrow boundary explicit marad, nem lesz belőle implicit coercion.
+
+A `.to_string()` verifikált owned-string művelet, és a többi Stringet előállító művelethez hasonlóan allocation-budgetelt.
 
 ## Erőforrás-elszámolás
 

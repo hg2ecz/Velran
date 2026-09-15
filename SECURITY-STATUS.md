@@ -67,6 +67,22 @@ Implemented:
 - public application errors are a closed safe set; internal/database/resource errors remain platform-owned;
 - application/runtime failures fail closed rather than selecting permissive fallback behavior.
 
+### Verified pure computation boundary
+
+Implemented:
+
+- pure functions receive no ambient filesystem/network/process/environment/thread/FFI/unsafe authority;
+- scalar parameters include by-value `i64`/`bool` plus explicit immutable string/list/struct borrows;
+- mutable fixed-`f32` numeric kernels require explicit `&mut` and remain a separate helper ABI;
+- scalar pure helpers may call one another with typed expression arguments while inheriting fuel/allocation accounting;
+- scalar recursion is hard depth-bounded in generated code; recursive cycles through the mutable numeric hot path are rejected;
+- verified `if`/`else if`/`else` evaluates conditions once and preserves static trust/sensitivity metadata;
+- `SafeHtml` remains a typed XSS boundary: normal `String` interpolation escapes, while typed `SafeHtml` is not double-escaped;
+- domain-specific renderers such as CommonMark remain source-level Velran libraries rather than privileged engine features;
+- unknown `@name(...)` template call-directives fail closed instead of silently becoming literal output.
+
+The normative language details are in [`docs/58-verified-pure-functions.md`](docs/58-verified-pure-functions.md).
+
 ### Resource and availability safety
 
 Implemented:

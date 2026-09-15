@@ -359,8 +359,12 @@ Egy kisebb production telepítésnél is legyen legalább riasztás az alábbiak
   \item auth/policy/rate-limit denial szokatlan kiugrása;
   \item \code{velran_runtime_budget_exceeded_total} növekedése;
   \item \code{velran_log_fallback_total} növekedése;
-  \item process restart loop vagy váratlan shutdown.
+  \item process restart loop vagy váratlan shutdown;
+  \item a log-, AppFs- és adatbázis-volume lemezterületének vagy inode-jainak kimerülése;
+  \item a publikus TLS-t lezáró edge tanúsítványának lejárata, illetve automatizált megújítás esetén a renewal job hibája.
 \end{itemize}
+
+Saját üzemeltetésű hostnál figyeld az időszinkront és a DB/Redis kapacitásjelzéseit is. A Velran metrikái az alkalmazás boundaryját írják le; nem helyettesítik a host, proxy, certificate vagy adatbázis monitoringot.
 
 A konkrét thresholdot nem a nyelvnek kell hardcode-olnia. A forgalom, SLO és üzleti kritikalitás alapján az üzemeltető állítja be.
 

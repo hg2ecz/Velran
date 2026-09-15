@@ -1243,3 +1243,6 @@ bash tools/check-release-stabilization.sh
 "$ROOT/tools/check-reproducible-release-recovery.sh"
 
 "$ROOT/tools/check-native-build-test-scope-hotfix.sh"
+
+./tools/check-commonmark.sh
+./tools/check-editor-syntax.sh

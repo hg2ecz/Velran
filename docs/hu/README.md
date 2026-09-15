@@ -17,6 +17,7 @@
    - [Numerikus operátorok, matematika és monoton időmérés](43-matematika-es-idomeres.md)
    - [String műveletek](45-string-muveletek.md)
    - [Statement terminátorok](55-statement-terminatorok.md)
+   - [Verifikált pure függvények](58-verifikalt-pure-fuggvenyek.md)
 4. [Routing, input és validáció](04-routing-input.md)
 5. [Adatbázis és typed SQL](05-adatbazis.md)
 6. [CRUD és tranzakciók](06-crud.md)

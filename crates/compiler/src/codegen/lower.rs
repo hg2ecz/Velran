@@ -61,19 +61,26 @@ fn statement_source(statement: &ScalarStatement, out: &mut String, indent: usize
             out.push_str(&format!("{pad}let {} = match {} {{ Some(v) => Scalar::Int(v), None => return {fail_fn}(&velran_fuel, &velran_state) }};\n", local_ident(name), outbound_source(call)));
         }
         ScalarStatement::PureCall { target, function, args, param_types, return_type, .. } => {
-            let scalar_transport = matches!(return_type, Some(executable_ir::NativeScalarType::String | executable_ir::NativeScalarType::StringList | executable_ir::NativeScalarType::Struct(_) | executable_ir::NativeScalarType::Option(_) | executable_ir::NativeScalarType::Result { .. }))
-                || param_types.iter().any(|ty| matches!(ty, executable_ir::NativeInputType::String | executable_ir::NativeInputType::StringList | executable_ir::NativeInputType::Struct(_)));
+            let scalar_transport = !param_types
+                .iter()
+                .any(|ty| matches!(ty, executable_ir::NativeInputType::F32Array));
             let mut call_args = Vec::with_capacity(args.len());
             for (arg, param_ty) in args.iter().zip(param_types) {
                 match param_ty {
+                    executable_ir::NativeInputType::Int => call_args.push(format!(
+                        "match {} {{ Some(Scalar::Int(v)) => v, _ => return {fail_fn}(&velran_fuel, &velran_state) }}", expr_source(arg)
+                    )),
+                    executable_ir::NativeInputType::Bool => call_args.push(format!(
+                        "match {} {{ Some(Scalar::Bool(v)) => v, _ => return {fail_fn}(&velran_fuel, &velran_state) }}", expr_source(arg)
+                    )),
                     executable_ir::NativeInputType::String => call_args.push(format!(
-                        "match &{} {{ Scalar::String(v) => v.clone(), _ => return {fail_fn}(&velran_fuel, &velran_state) }}", local_ident(arg)
+                        "match {} {{ Some(Scalar::String(v)) => v, _ => return {fail_fn}(&velran_fuel, &velran_state) }}", expr_source(arg)
                     )),
                     executable_ir::NativeInputType::StringList => call_args.push(format!(
-                        "match &{} {{ Scalar::StringList(v) => v.clone(), _ => return {fail_fn}(&velran_fuel, &velran_state) }}", local_ident(arg)
+                        "match {} {{ Some(Scalar::StringList(v)) => v, _ => return {fail_fn}(&velran_fuel, &velran_state) }}", expr_source(arg)
                     )),
                     executable_ir::NativeInputType::Struct(id) => call_args.push(format!(
-                        "match &{} {{ Scalar::Struct(v @ PureStructValue::S{id} {{ .. }}) => v.clone(), _ => return {fail_fn}(&velran_fuel, &velran_state) }}", local_ident(arg)
+                        "match {} {{ Some(Scalar::Struct(v @ PureStructValue::S{id} {{ .. }})) => v, _ => return {fail_fn}(&velran_fuel, &velran_state) }}", expr_source(arg)
                     )),
                     executable_ir::NativeInputType::F32Array => unreachable!("generic scalar pure-call codegen excludes numeric array helpers"),
                     _ => unreachable!("verified pure-call parameter type"),
@@ -81,17 +88,22 @@ fn statement_source(statement: &ScalarStatement, out: &mut String, indent: usize
             }
             let joined = call_args.join(", ");
             let comma = if joined.is_empty() { "" } else { ", " };
-            out.push_str(&format!("{pad}let velran_pure_call = {}({joined}{comma}velran_fuel.remaining(), velran_state.remaining_alloc());\n", super::pure_function_ident(function)));
             if scalar_transport {
+                let recursion_arg = if mode == LowerMode::PureScalar { "velran_recursion_budget.saturating_sub(1)" } else { "VELRAN_MAX_PURE_CALL_DEPTH" };
+                out.push_str(&format!("{pad}let velran_pure_call = {}({joined}{comma}velran_fuel.remaining(), velran_state.remaining_alloc(), {recursion_arg});\n", super::pure_function_ident(function)));
                 out.push_str(&format!("{pad}if !velran_fuel.charge(velran_pure_call.fuel_used) {{ return {budget_fn}(&velran_fuel, &velran_state); }}\n"));
                 out.push_str(&format!("{pad}if !velran_state.charge_alloc(velran_pure_call.allocated) {{ return {fail_fn}(&velran_fuel, &velran_state); }}\n"));
-                out.push_str(&format!("{pad}if velran_pure_call.status != VELRAN_STATUS_OK {{ return (velran_pure_call.status, VELRAN_VALUE_NONE, 0, velran_fuel.used(), velran_state.allocated(), 0); }}\n"));
+                if mode == LowerMode::PureScalar {
+                    out.push_str(&format!("{pad}if velran_pure_call.status != VELRAN_STATUS_OK {{ return PureScalarResult {{ status: velran_pure_call.status, value: None, fuel_used: velran_fuel.used(), allocated: velran_state.allocated() }}; }}\n"));
+                } else {
+                    out.push_str(&format!("{pad}if velran_pure_call.status != VELRAN_STATUS_OK {{ return (velran_pure_call.status, VELRAN_VALUE_NONE, 0, velran_fuel.used(), velran_state.allocated(), 0); }}\n"));
+                }
                 if let (Some(target), Some(return_type)) = (target, return_type) {
                     let expected = match return_type {
                         executable_ir::NativeScalarType::Int => "Scalar::Int(_) => true".to_string(),
                         executable_ir::NativeScalarType::Bool => "Scalar::Bool(_) => true".to_string(),
                         executable_ir::NativeScalarType::F32 => "Scalar::F32(v) => v.is_finite()".to_string(),
-                        executable_ir::NativeScalarType::String => "Scalar::String(_) => true".to_string(),
+                        executable_ir::NativeScalarType::String | executable_ir::NativeScalarType::SafeHtml => "Scalar::String(_) => true".to_string(),
                         executable_ir::NativeScalarType::StringList => "Scalar::StringList(_) => true".to_string(),
                         executable_ir::NativeScalarType::Struct(id) => format!("Scalar::Struct(PureStructValue::S{id} {{ .. }}) => true"),
                         executable_ir::NativeScalarType::Option(inner) => {
@@ -108,15 +120,20 @@ fn statement_source(statement: &ScalarStatement, out: &mut String, indent: usize
                 }
             } else {
                 // Numeric helpers retain the primitive tuple transport used by the typed hot path.
+                out.push_str(&format!("{pad}let velran_pure_call = {}({joined}{comma}velran_fuel.remaining(), velran_state.remaining_alloc());\n", super::pure_function_ident(function)));
                 out.push_str(&format!("{pad}if !velran_fuel.charge(velran_pure_call.3) {{ return {budget_fn}(&velran_fuel, &velran_state); }}\n"));
                 out.push_str(&format!("{pad}if !velran_state.charge_alloc(velran_pure_call.4) {{ return {fail_fn}(&velran_fuel, &velran_state); }}\n"));
-                out.push_str(&format!("{pad}if velran_pure_call.0 != VELRAN_STATUS_OK {{ return (velran_pure_call.0, VELRAN_VALUE_NONE, 0, velran_fuel.used(), velran_state.allocated(), 0); }}\n"));
+                if mode == LowerMode::PureScalar {
+                    out.push_str(&format!("{pad}if velran_pure_call.0 != VELRAN_STATUS_OK {{ return PureScalarResult {{ status: velran_pure_call.0, value: None, fuel_used: velran_fuel.used(), allocated: velran_state.allocated() }}; }}\n"));
+                } else {
+                    out.push_str(&format!("{pad}if velran_pure_call.0 != VELRAN_STATUS_OK {{ return (velran_pure_call.0, VELRAN_VALUE_NONE, 0, velran_fuel.used(), velran_state.allocated(), 0); }}\n"));
+                }
                 if let (Some(target), Some(return_type)) = (target, return_type) {
                     let decode = match return_type {
                         executable_ir::NativeScalarType::Int => "if velran_pure_call.1 != VELRAN_VALUE_INT { velran_state.bad_request(); return {fail_fn}(&velran_fuel, &velran_state); } Scalar::Int(velran_pure_call.2 as i64)".to_string(),
                         executable_ir::NativeScalarType::Bool => "if velran_pure_call.1 != VELRAN_VALUE_BOOL || velran_pure_call.2 > 1 { velran_state.bad_request(); return {fail_fn}(&velran_fuel, &velran_state); } Scalar::Bool(velran_pure_call.2 != 0)".to_string(),
                         executable_ir::NativeScalarType::F32 => "if velran_pure_call.1 != VELRAN_VALUE_F32_INTERNAL { velran_state.bad_request(); return {fail_fn}(&velran_fuel, &velran_state); } { let Ok(bits) = u32::try_from(velran_pure_call.2) else { velran_state.bad_request(); return {fail_fn}(&velran_fuel, &velran_state); }; let value = f32::from_bits(bits); if !value.is_finite() { velran_state.bad_request(); return {fail_fn}(&velran_fuel, &velran_state); } Scalar::F32(value) }".to_string(),
-                        executable_ir::NativeScalarType::String | executable_ir::NativeScalarType::StringList => unreachable!("owned scalar returns use scalar transport"),
+                        executable_ir::NativeScalarType::String | executable_ir::NativeScalarType::SafeHtml | executable_ir::NativeScalarType::StringList => unreachable!("owned scalar returns use scalar transport"),
                         _ => unreachable!("pure numeric return contract"),
                     };
                     out.push_str(&format!("{pad}let mut {} = {{ {decode} }};\n", local_ident(target)));
@@ -202,6 +219,7 @@ fn statement_source(statement: &ScalarStatement, out: &mut String, indent: usize
                 match part {
                     NativeHtmlPart::Text(text) => out.push_str(&format!("{pad}if !velran_output.push({text:?}, &mut velran_state) {{ return {fail_fn}(&velran_fuel, &velran_state); }}\n")),
                     NativeHtmlPart::Escaped(expr) => out.push_str(&format!("{pad}match {} {{ Some(v) => if html_escape(v, &mut velran_output, &mut velran_state).is_none() {{ return {fail_fn}(&velran_fuel, &velran_state); }}, None => return {fail_fn}(&velran_fuel, &velran_state) }};\n", expr_source(expr))),
+                    NativeHtmlPart::Safe(expr) => out.push_str(&format!("{pad}match {} {{ Some(Scalar::String(v)) => if !velran_output.push(v.as_ref(), &mut velran_state) {{ return {fail_fn}(&velran_fuel, &velran_state); }}, _ => return {fail_fn}(&velran_fuel, &velran_state) }};\n", expr_source(expr))),
                 }
             }
             out.push_str(&format!("{pad}return velran_output.finish(&velran_fuel, &velran_state);\n"));
@@ -239,6 +257,7 @@ fn sum_type_suffix(ty: NativePureValueType) -> &'static str {
         NativePureValueType::Bool => "Bool",
         NativePureValueType::String => "String",
         NativePureValueType::StringList => "StringList",
+        NativePureValueType::SafeHtml => "String",
         NativePureValueType::Struct(_) => {
             unreachable!("sum struct payload lowering is not enabled")
         }
@@ -252,6 +271,7 @@ fn sum_extract_expr(ty: NativePureValueType, variable: &str, fail_fn: &str) -> S
         NativePureValueType::Bool => "Scalar::Bool(v) => v",
         NativePureValueType::String => "Scalar::String(v) => v",
         NativePureValueType::StringList => "Scalar::StringList(v) => v",
+        NativePureValueType::SafeHtml => "Scalar::String(v) => v",
         NativePureValueType::Struct(_) => {
             unreachable!("sum struct payload lowering is not enabled")
         }
@@ -312,6 +332,7 @@ fn pure_value_variant_suffix(ty: NativePureValueType) -> &'static str {
         NativePureValueType::Bool => "Bool",
         NativePureValueType::String => "String",
         NativePureValueType::StringList => "StringList",
+        NativePureValueType::SafeHtml => "String",
         NativePureValueType::Struct(_) => {
             unreachable!("sum struct payload lowering is not enabled")
         }
@@ -325,6 +346,7 @@ fn sum_payload_to_scalar(ty: NativePureValueType, value: &str) -> String {
         NativePureValueType::Bool => format!("Scalar::Bool({value})"),
         NativePureValueType::String => format!("Scalar::String({value}.clone())"),
         NativePureValueType::StringList => format!("Scalar::StringList({value}.clone())"),
+        NativePureValueType::SafeHtml => format!("Scalar::String({value}.clone())"),
         NativePureValueType::Struct(_) => {
             unreachable!("sum struct payload lowering is not enabled")
         }
@@ -443,6 +465,11 @@ fn builtin_source(function: ScalarBuiltin, args: &[ScalarExpr]) -> String {
         LastIndexOf => format!("index_of({}, {}, true)", a(0), a(1)),
         CharAt => format!("char_at({}, {}, &mut velran_state)", a(0), a(1)),
         Repeat => format!("repeat_string({}, {}, &mut velran_state)", a(0), a(1)),
+        SafeHtmlEmpty => "safe_html_empty()".into(),
+        SafeHtmlText => format!("safe_html_text({}, &mut velran_state)", a(0)),
+        SafeHtmlElement => format!("safe_html_element({}, {}, &mut velran_state)", a(0), a(1)),
+        SafeHtmlLink => format!("safe_html_link({}, {}, &mut velran_state)", a(0), a(1)),
+        SafeHtmlConcat => format!("safe_html_concat({}, {}, &mut velran_state)", a(0), a(1)),
         DictNew => "string_dict_new()".into(),
         ContainsKey => format!("string_dict_contains_key({}, {})", a(0), a(1)),
         RemoveKey => format!(

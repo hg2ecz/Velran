@@ -3,3 +3,4 @@ mod queries;
 mod components;
 mod pages;
 mod actions;
+mod commonmark;

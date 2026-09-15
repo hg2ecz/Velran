@@ -203,6 +203,16 @@ fn expression_metadata(
                     purpose,
                 ))
             }
+            language_core::BuiltinFunction::SafeHtmlEmpty
+            | language_core::BuiltinFunction::SafeHtmlText
+            | language_core::BuiltinFunction::SafeHtmlElement
+            | language_core::BuiltinFunction::SafeHtmlLink
+            | language_core::BuiltinFunction::SafeHtmlConcat => {
+                let mut metadata = combine_expression_metadata(args.iter(), known, program)?;
+                metadata.value_type = ValueType::Domain(language_core::SAFE_HTML_DOMAIN_ID);
+                metadata.trust = TrustLevel::Trusted;
+                Ok(metadata)
+            }
             _ => combine_expression_metadata(args.iter(), known, program),
         },
         Expr::Binary { left, right, .. } => {

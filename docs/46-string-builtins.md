@@ -35,6 +35,7 @@ String::trim_start() -> String
 String::trim_end() -> String
 String::to_lowercase() -> String
 String::to_uppercase() -> String
+String::to_string() -> String
 String::contains(String) -> bool
 String::starts_with(String) -> bool
 String::ends_with(String) -> bool
@@ -51,6 +52,19 @@ String::repeat(i64) -> String
 `.chars().count()`, `substring`, `indexOf`, `lastIndexOf`, and `charAt` use Unicode scalar-value positions rather than UTF-8 byte offsets. `indexOf` and `lastIndexOf` return `-1` when no match exists. `substring(text, start)` returns the suffix from `start`; the three-argument form takes a character count and clips the end to the available string length. Invalid negative/out-of-range indices fail closed.
 
 Case conversion uses Unicode-aware Rust string conversion. `replace` rejects an empty search string, and `split` rejects an empty delimiter. A split is capped at 4096 result items. `repeat` rejects negative counts and is charged against the request allocation budget before allocation.
+
+## Explicit immutable borrows at string builtin boundaries
+
+String-oriented builtins may receive an explicit immutable borrow when the corresponding argument contract is string-like. This keeps Rust-like borrowed call sites usable in verified pure libraries:
+
+```velran
+let tail = substring(&text, 1);
+let ch = charAt(&tail, 0);
+```
+
+The compiler does **not** strip `&` generically. A non-string builtin argument that is explicitly borrowed remains a compile error, and `&mut` is not accepted for immutable string arguments. This preserves the borrow boundary instead of turning it into an implicit coercion rule.
+
+`.to_string()` is a verified owned-string operation and is allocation-accounted like other string-producing operations.
 
 ## Resource accounting
 

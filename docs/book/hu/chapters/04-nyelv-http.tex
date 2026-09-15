@@ -121,6 +121,103 @@ Web/data boundary & normál typed kifejezés & \code{route}, \code{html}, \code{
 
 Ez a felosztás nem framework-megkerülés. Rust-szerű szintaxis csak akkor elfogadott, ha a natív lowering közben ugyanaz a verified, bounded webes szemantika megőrizhető.
 
+
+\section{Verifikált pure számítás}
+
+A verified pure függvény a Velran újrafelhasználható alkalmazás-compute rétege. Normál Rust-szerű \code{fn}, amely ambient web/server authority nélkül fut, és verifikált IR-en keresztül generált safe Rust kódra fordul. Parser, renderer, validációs helper, transzformáció, numerikus kernel és más olyan számítás való ide, amelynek nincs szüksége közvetlen adatbázis-, fájlrendszer-, hálózat-, process-, environment-, thread-, FFI- vagy \code{unsafe} hozzáférésre.
+
+\subsection*{Paramétercsaládok és explicit borrow}
+
+A scalar/borrowolt család immutable by-value \code{i64} és \code{bool}, valamint explicit immutable \code{\&str}, \code{\&[String]} és \code{\&Struct} paramétert támogat. A mutable numerikus hot-path család fix \code{\&mut [f32; N]} tömböt fogad. A két család szándékosan külön marad, amíg eltérő verifikált belső ABI-t használ.
+
+\begin{lstlisting}[language=Velran]
+fn choose(value: i64, enabled: bool) -> i64 {
+    if enabled {
+        return value;
+    }
+    return 0;
+}
+
+fn normalize(input: &str) -> String {
+    return input.trim().to_lowercase();
+}
+
+fn kernel(real: &mut [f32; 16]) -> f32 {
+    real[0] = real[0] + 1.0f32;
+    return real[0];
+}
+\end{lstlisting}
+
+A mutable tömb borrowja a hívási ponton is explicit marad:
+
+\begin{lstlisting}[language=Velran]
+kernel(&mut real)
+\end{lstlisting}
+
+A compiler nem értelmezi automatikusan a \code{kernel(real)} alakot mutable borrow-ként. Ez biztonsági és olvashatósági határ, nem fölösleges ceremónia.
+
+\subsection*{Pure-to-pure hívások, rekurzió és budget}
+
+Scalar/borrowolt pure függvény hívhat más scalar/borrowolt pure helpert normál típusos expression argumentumokkal, nem csak változónevekkel. A child munka ugyanabban az instruction- és allocation-elszámolásban marad; a helper hívás nem lehet budget nélküli kerülőút.
+
+\begin{lstlisting}[language=Velran]
+fn step(value: i64, enabled: bool) -> i64 {
+    if enabled {
+        return value + 1;
+    }
+    return value;
+}
+
+fn run(value: i64) -> i64 {
+    let first = step(value + 1, true);
+    let mut out = 0;
+    out = step(first, false);
+    return out;
+}
+\end{lstlisting}
+
+A scalar/borrowolt rekurzió támogatott, de runtime depth-bounded. A generált kód aktuális hard maximuma 64 nested pure hívás, az instruction- és allocation-budget mellett. A mutable numerikus hot-path családot érintő rekurzív ciklus compile-time fail-closed hiba.
+
+A szabály tudatosan aszimmetrikus: normál scalar algoritmus használhat bounded rekurziót, ha az tisztább, miközben a speciális mutable-array ABI szigorúbb marad addig, amíg a compiler ugyanezt a biztonságot nem tudja bizonyítani azon a határon is.
+
+\subsection*{Kontrollfolyam és return}
+
+Verified pure kódban normál Rust-szerű \code{if}, \code{else if}, \code{else} és resource-budgetelt \code{while} használható. Minden feltétel pontosan egyszer értékelődik ki, és a compiler által létrehozott temporális megőrzi az eredeti statikus security metadata-t; untrusted boolból nem lesz csendben trusted bool.
+
+A nested early \code{return} ágak a deklarált visszatérési típushoz képest típusellenőrzöttek. A jelenlegi lowering nem-unit függvénynél továbbra is megkövetel egy végső top-level returnt.
+
+\begin{lstlisting}[language=Velran]
+fn classify(value: i64) -> i64 {
+    if value < 0 {
+        return -1;
+    } else if value == 0 {
+        return 0;
+    } else {
+        return 1;
+    }
+    return 0; // jelenlegi final-return contract
+}
+\end{lstlisting}
+
+\subsection*{Stringek és immutable builtin borrow}
+
+A Rust-szerű string metódusok -- például \code{.trim()}, \code{.to_lowercase()} és \code{.to_string()} -- verifikált műveletek. A Stringet előállító munka allocation-budgetbe számít. String-orientált builtin argumentumhelyen explicit immutable borrow használható, ha a contract string-szerű értéket vár:
+
+\begin{lstlisting}[language=Velran]
+let tail = substring(&text, 1);
+let first = charAt(&tail, 0);
+\end{lstlisting}
+
+A compiler nem törli általánosan a \code{\&} jelet. Ahol a builtin contract nem fogad immutable borrow-t, ott compile error marad, és \code{\&mut} soha nem helyettesítheti az immutable string argumentumot.
+
+\subsection*{SafeHtml és library-owned rendererek}
+
+A \code{SafeHtml} típusos output boundary, nem ``trusted string'' konvenció. Normál \code{String} a \code{html \{ ... \}} interpolációban escape-elődik; csak \code{SafeHtml} kerül ki újabb escaping nélkül. A compiler/framework birtokolja az általános escapinget, SafeHtml konstruktorokat, tag- és URL-policyt, JSON-kezelést, typed SQL határokat és más webes biztonsági invariánsokat. A domain-specifikus renderelő logika application/library feladat.
+
+Ezért a Markdown/CommonMark Velran forrásmodulban, például a \path{common/commonmark.vrn} fájlban él; nem engine feature. Szándékosan nincs \code{@markdown(...)} direktíva. Az ismeretlen \code{@name(...)} alakú template call-direktíva fail-fast compile errort ad ahelyett, hogy csendben literal szöveggé válna, így az elgépelések is azonnal látszanak.
+
+\invariantblock{Első a biztonság, második a produktivitás}{Ne gyengíts authority-, type-, aliasing-, XSS-, SQL-, JSON- vagy resource-invariánst csak azért, hogy több szintaxist elfogadjunk. Ugyanakkor ne kényszerítsük az alkalmazáskódot mesterséges átírásra, ha egy normális konstrukció ezeknek az invariánsoknak a megtartásával implementálható.}
+
 \subsection*{Statement terminátorok}
 
 A Velranban az egyszerű statementeket explicit pontosvessző zárja. A sortörés whitespace, nem statement-határ; nincs automatikus semicolon insertion. Ez determinisztikussá teszi a többsoros kifejezéseket és egyértelműbbé a generált, illetve auditált kódot.
@@ -256,10 +353,10 @@ let parts = splitBounded(rewritten, "-", 4096);
 \textbf{Függvény} & \textbf{Szignatúra} \\
 \midrule
 \code{text.chars().count()} & \code{String -> i64} \\
-\code{text.trim()/trim\_start()/trim\_end()} & \code{String -> String} \\
-\code{text.to\_lowercase()/to\_uppercase()} & \code{String -> String} \\
+\code{text.trim()/trim_start()/trim_end()} & \code{String -> String} \\
+\code{text.to_lowercase()/to_uppercase()} & \code{String -> String} \\
 \code{text.contains(needle)} & \code{String, String -> bool} \\
-\code{text.starts\_with(part) / text.ends\_with(part)} & \code{String, String -> bool} \\
+\code{text.starts_with(part) / text.ends_with(part)} & \code{String, String -> bool} \\
 \code{text.replace(search, replacement)} & \code{String, String, String -> String} \\
 \code{splitBounded(text, delimiter, maxItems)} & \code{String, String, i64 -> Vec<String>} \\
 \code{substring(text, start[, length])} & \code{String, i64[, i64] -> String} \\

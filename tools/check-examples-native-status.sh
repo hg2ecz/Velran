@@ -6,7 +6,7 @@ tmp=$(mktemp)
 trap 'rm -f "$tmp" "$tmp.expected"' EXIT
 find "$root/examples" -type f -name '*.vrn' | sort | while IFS= read -r file; do
     rel=${file#"$root/"}
-    if grep -Eq '#\[query\]|(^|[[:space:]])transaction[[:space:]]|@for[[:space:]]|@layout\(|@component\(|@markdown' "$file"; then
+    if grep -Eq '#\[query\]|(^|[[:space:]])transaction[[:space:]]|@for[[:space:]]|@layout\(|@component\(' "$file"; then
         printf '%s\n' "$rel"
     fi
 done > "$tmp"

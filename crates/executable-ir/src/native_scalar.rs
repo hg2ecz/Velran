@@ -54,6 +54,11 @@ pub enum ScalarBuiltin {
     DictNew,
     ContainsKey,
     RemoveKey,
+    SafeHtmlEmpty,
+    SafeHtmlText,
+    SafeHtmlElement,
+    SafeHtmlLink,
+    SafeHtmlConcat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +110,7 @@ pub enum ScalarExpr {
 pub enum NativeHtmlPart {
     Text(String),
     Escaped(ScalarExpr),
+    Safe(ScalarExpr),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,7 +156,7 @@ pub enum ScalarStatement {
     PureCall {
         target: Option<String>,
         function: String,
-        args: Vec<String>,
+        args: Vec<ScalarExpr>,
         param_types: Vec<NativeInputType>,
         array_lens: Vec<u32>,
         return_type: Option<NativeScalarType>,
@@ -232,6 +238,7 @@ pub enum NativePureValueType {
     Bool,
     String,
     StringList,
+    SafeHtml,
     Struct(u16),
 }
 
@@ -244,6 +251,7 @@ pub enum NativeScalarType {
     String,
     StringList,
     StringDict,
+    SafeHtml,
     Struct(u16),
     Option(NativePureValueType),
     Result {
@@ -371,7 +379,9 @@ pub fn statement_fuel(statement: &ScalarStatement) -> u64 {
                 .iter()
                 .map(|part| match part {
                     NativeHtmlPart::Text(_) => 1,
-                    NativeHtmlPart::Escaped(expr) => 1 + expr_fuel(expr),
+                    NativeHtmlPart::Escaped(expr) | NativeHtmlPart::Safe(expr) => {
+                        1 + expr_fuel(expr)
+                    }
                 })
                 .sum::<u64>()
         }
@@ -427,6 +437,11 @@ fn function_fuel(function: ScalarBuiltin) -> u64 {
         ScalarBuiltin::DictNew => 1,
         ScalarBuiltin::ContainsKey => 2,
         ScalarBuiltin::RemoveKey => 3,
+        ScalarBuiltin::SafeHtmlEmpty => 1,
+        ScalarBuiltin::SafeHtmlText => 4,
+        ScalarBuiltin::SafeHtmlElement => 4,
+        ScalarBuiltin::SafeHtmlLink => 5,
+        ScalarBuiltin::SafeHtmlConcat => 3,
     }
 }
 
@@ -448,6 +463,8 @@ pub(crate) fn lower_pure_function(
             name: param.name.clone(),
             ty: match param.ty {
                 PureParamType::F32ArrayMut(_) => NativeInputType::F32Array,
+                PureParamType::Int => NativeInputType::Int,
+                PureParamType::Bool => NativeInputType::Bool,
                 PureParamType::Str => NativeInputType::String,
                 PureParamType::StringList => NativeInputType::StringList,
                 PureParamType::Struct(id) => NativeInputType::Struct(id),
@@ -458,6 +475,8 @@ pub(crate) fn lower_pure_function(
     for param in &function.params {
         let ty = match param.ty {
             PureParamType::F32ArrayMut(_) => ScalarType::F32Array,
+            PureParamType::Int => ScalarType::Int,
+            PureParamType::Bool => ScalarType::Bool,
             PureParamType::Str => ScalarType::String,
             PureParamType::StringList => ScalarType::StringList,
             PureParamType::Struct(id) => ScalarType::Struct(id),
@@ -488,10 +507,26 @@ pub(crate) fn lower_pure_function(
         .iter()
         .filter_map(|param| match param.ty {
             PureParamType::F32ArrayMut(size) => Some((param.name.clone(), size)),
-            PureParamType::Str | PureParamType::StringList | PureParamType::Struct(_) => None,
+            PureParamType::Int
+            | PureParamType::Bool
+            | PureParamType::Str
+            | PureParamType::StringList
+            | PureParamType::Struct(_) => None,
         })
         .collect();
-    body.numeric_body = crate::typed_numeric::lower_with_fixed_inputs(&body, &fixed);
+    let numeric_helper_family = function
+        .params
+        .iter()
+        .any(|param| matches!(param.ty, PureParamType::F32ArrayMut(_)));
+    body.numeric_body = if numeric_helper_family {
+        let lowered = crate::typed_numeric::lower_with_fixed_inputs(&body, &fixed);
+        if lowered.is_none() {
+            return Err(ScalarLowerError::TypeMismatch);
+        }
+        lowered
+    } else {
+        None
+    };
     Ok(body)
 }
 
@@ -515,28 +550,49 @@ pub(crate) fn lower_action(
 fn pure_param_native_type(param: &language_core::PureFunctionParam) -> NativeInputType {
     match param.ty {
         PureParamType::F32ArrayMut(_) => NativeInputType::F32Array,
+        PureParamType::Int => NativeInputType::Int,
+        PureParamType::Bool => NativeInputType::Bool,
         PureParamType::Str => NativeInputType::String,
         PureParamType::StringList => NativeInputType::StringList,
         PureParamType::Struct(id) => NativeInputType::Struct(id),
     }
 }
 
-fn pure_args_match(
-    args: &[String],
+fn lower_pure_args(
+    args: &[Expr],
     pure: &PureFunction,
     locals: &BTreeMap<String, ScalarType>,
-) -> bool {
-    args.len() == pure.params.len()
-        && args.iter().zip(&pure.params).all(|(arg, param)| {
-            let expected = match param.ty {
-                PureParamType::F32ArrayMut(_) => ScalarType::F32Array,
-                PureParamType::Str => ScalarType::String,
-                PureParamType::StringList => ScalarType::StringList,
-                PureParamType::Struct(id) => ScalarType::Struct(id),
-            };
-            locals.get(arg).copied() == Some(expected)
-        })
+    program: &Program,
+) -> Result<Vec<ScalarExpr>, ScalarLowerError> {
+    if args.len() != pure.params.len() {
+        return Err(ScalarLowerError::TypeMismatch);
+    }
+    let mut lowered = Vec::with_capacity(args.len());
+    for (arg, param) in args.iter().zip(&pure.params) {
+        let Some((expr, actual)) = lower_expr(arg, locals, Some(program))? else {
+            return Err(ScalarLowerError::TypeMismatch);
+        };
+        let expected = match param.ty {
+            PureParamType::F32ArrayMut(_) => ScalarType::F32Array,
+            PureParamType::Int => ScalarType::Int,
+            PureParamType::Bool => ScalarType::Bool,
+            PureParamType::Str => ScalarType::String,
+            PureParamType::StringList => ScalarType::StringList,
+            PureParamType::Struct(id) => ScalarType::Struct(id),
+        };
+        if actual != expected {
+            return Err(ScalarLowerError::TypeMismatch);
+        }
+        if matches!(param.ty, PureParamType::F32ArrayMut(_))
+            && !matches!(expr, ScalarExpr::Variable(_))
+        {
+            return Err(ScalarLowerError::TypeMismatch);
+        }
+        lowered.push(expr);
+    }
+    Ok(lowered)
 }
+
 enum PageOrAction<'a> {
     Page(&'a Statement),
     Action(&'a ActionStatement),
@@ -641,9 +697,7 @@ fn lower_statements<'a>(
                 let Some(pure) = program.pure_function(function) else {
                     return Ok(None);
                 };
-                if !pure_args_match(args, pure, &locals) {
-                    return Err(ScalarLowerError::TypeMismatch);
-                }
+                let lowered_args = lower_pure_args(args, pure, &locals, program)?;
                 let return_type = match (target, &pure.return_type) {
                     (None, PureReturnType::Unit) => None,
                     (Some(name), PureReturnType::Value(PureValueType::Int)) => {
@@ -678,6 +732,12 @@ fn lower_statements<'a>(
                             return Err(ScalarLowerError::DuplicateLocal);
                         }
                         Some(ScalarType::StringList)
+                    }
+                    (Some(name), PureReturnType::Value(PureValueType::SafeHtml)) => {
+                        if locals.insert(name.clone(), ScalarType::SafeHtml).is_some() {
+                            return Err(ScalarLowerError::DuplicateLocal);
+                        }
+                        Some(ScalarType::SafeHtml)
                     }
                     (Some(name), PureReturnType::Value(PureValueType::Struct(schema))) => {
                         let (id, _) = program
@@ -714,14 +774,16 @@ fn lower_statements<'a>(
                 ScalarStatement::PureCall {
                     target: target.clone(),
                     function: function.clone(),
-                    args: args.clone(),
+                    args: lowered_args,
                     param_types: pure.params.iter().map(pure_param_native_type).collect(),
                     array_lens: pure
                         .params
                         .iter()
                         .filter_map(|p| match p.ty {
                             PureParamType::F32ArrayMut(size) => Some(size),
-                            PureParamType::Str
+                            PureParamType::Int
+                            | PureParamType::Bool
+                            | PureParamType::Str
                             | PureParamType::StringList
                             | PureParamType::Struct(_) => None,
                         })
@@ -893,13 +955,15 @@ fn infer_nested_local_types(
                 }
                 for (arg, param_ty) in args.iter().zip(param_types) {
                     let expected = match param_ty {
+                        NativeInputType::Int => NativeScalarType::Int,
+                        NativeInputType::Bool => NativeScalarType::Bool,
                         NativeInputType::F32Array => NativeScalarType::F32Array,
                         NativeInputType::String => NativeScalarType::String,
                         NativeInputType::StringList => NativeScalarType::StringList,
                         NativeInputType::Struct(id) => NativeScalarType::Struct(*id),
                         _ => return Err(ScalarLowerError::TypeMismatch),
                     };
-                    if locals.get(arg).copied() != Some(expected) {
+                    if lowered_expr_type(arg, locals)? != expected {
                         return Err(ScalarLowerError::TypeMismatch);
                     }
                 }
@@ -935,8 +999,11 @@ fn infer_nested_local_types(
             }
             ScalarStatement::ReturnHtml(parts) => {
                 for part in parts {
-                    if let NativeHtmlPart::Escaped(expr) = part {
-                        let _ = lowered_expr_type(expr, locals)?;
+                    match part {
+                        NativeHtmlPart::Escaped(expr) | NativeHtmlPart::Safe(expr) => {
+                            let _ = lowered_expr_type(expr, locals)?;
+                        }
+                        NativeHtmlPart::Text(_) => {}
                     }
                 }
             }
@@ -1026,6 +1093,11 @@ fn lowered_expr_type(
             | ScalarBuiltin::ContainsKey => NativeScalarType::Bool,
             ScalarBuiltin::SplitBounded => NativeScalarType::StringList,
             ScalarBuiltin::DictNew | ScalarBuiltin::RemoveKey => NativeScalarType::StringDict,
+            ScalarBuiltin::SafeHtmlEmpty
+            | ScalarBuiltin::SafeHtmlText
+            | ScalarBuiltin::SafeHtmlElement
+            | ScalarBuiltin::SafeHtmlLink
+            | ScalarBuiltin::SafeHtmlConcat => NativeScalarType::SafeHtml,
             ScalarBuiltin::Trim
             | ScalarBuiltin::TrimStart
             | ScalarBuiltin::TrimEnd
@@ -1059,6 +1131,15 @@ fn lower_html(
                     return Ok(None);
                 }
                 out.push(NativeHtmlPart::Escaped(expr));
+            }
+            HtmlPart::SafeHtmlExpr(expr) => {
+                let Some((expr, ty)) = lower_expr(expr, locals, program)? else {
+                    return Ok(None);
+                };
+                if ty != ScalarType::SafeHtml {
+                    return Ok(None);
+                }
+                out.push(NativeHtmlPart::Safe(expr));
             }
             _ => return Ok(None),
         }
@@ -1165,9 +1246,7 @@ fn lower_compute_statements(
                 let Some(pure) = program.pure_function(function) else {
                     return Err(ScalarLowerError::TypeMismatch);
                 };
-                if !pure_args_match(args, pure, &locals) {
-                    return Err(ScalarLowerError::TypeMismatch);
-                }
+                let lowered_args = lower_pure_args(args, pure, &locals, program)?;
                 let return_type = match (target, &pure.return_type) {
                     (None, PureReturnType::Unit) => None,
                     (Some(name), PureReturnType::Value(PureValueType::Int)) => {
@@ -1202,6 +1281,12 @@ fn lower_compute_statements(
                             return Err(ScalarLowerError::DuplicateLocal);
                         }
                         Some(ScalarType::StringList)
+                    }
+                    (Some(name), PureReturnType::Value(PureValueType::SafeHtml)) => {
+                        if locals.insert(name.clone(), ScalarType::SafeHtml).is_some() {
+                            return Err(ScalarLowerError::DuplicateLocal);
+                        }
+                        Some(ScalarType::SafeHtml)
                     }
                     (Some(name), PureReturnType::Value(PureValueType::Struct(schema))) => {
                         let (id, _) = program
@@ -1238,14 +1323,16 @@ fn lower_compute_statements(
                 Some(ScalarStatement::PureCall {
                     target: target.clone(),
                     function: function.clone(),
-                    args: args.clone(),
+                    args: lowered_args,
                     param_types: pure.params.iter().map(pure_param_native_type).collect(),
                     array_lens: pure
                         .params
                         .iter()
                         .filter_map(|p| match p.ty {
                             PureParamType::F32ArrayMut(size) => Some(size),
-                            PureParamType::Str
+                            PureParamType::Int
+                            | PureParamType::Bool
+                            | PureParamType::Str
                             | PureParamType::StringList
                             | PureParamType::Struct(_) => None,
                         })
@@ -1369,6 +1456,7 @@ fn native_pure_value_type(
         PureValueType::Bool => NativePureValueType::Bool,
         PureValueType::String => NativePureValueType::String,
         PureValueType::StringList => NativePureValueType::StringList,
+        PureValueType::SafeHtml => NativePureValueType::SafeHtml,
         PureValueType::Struct(schema) => NativePureValueType::Struct(
             program
                 .json_schema_by_name(schema)
@@ -1385,6 +1473,7 @@ fn native_value_scalar_type(value: NativePureValueType) -> ScalarType {
         NativePureValueType::Bool => ScalarType::Bool,
         NativePureValueType::String => ScalarType::String,
         NativePureValueType::StringList => ScalarType::StringList,
+        NativePureValueType::SafeHtml => ScalarType::SafeHtml,
         NativePureValueType::Struct(id) => ScalarType::Struct(id),
     }
 }
@@ -1746,6 +1835,7 @@ fn native_pure_value_scalar_type(value: NativePureValueType) -> ScalarType {
         NativePureValueType::Bool => ScalarType::Bool,
         NativePureValueType::String => ScalarType::String,
         NativePureValueType::StringList => ScalarType::StringList,
+        NativePureValueType::SafeHtml => ScalarType::SafeHtml,
         NativePureValueType::Struct(id) => ScalarType::Struct(id),
     }
 }
@@ -1776,6 +1866,11 @@ fn lower_builtin(function: BuiltinFunction) -> Option<ScalarBuiltin> {
         BuiltinFunction::DictNew => ScalarBuiltin::DictNew,
         BuiltinFunction::ContainsKey => ScalarBuiltin::ContainsKey,
         BuiltinFunction::RemoveKey => ScalarBuiltin::RemoveKey,
+        BuiltinFunction::SafeHtmlEmpty => ScalarBuiltin::SafeHtmlEmpty,
+        BuiltinFunction::SafeHtmlText => ScalarBuiltin::SafeHtmlText,
+        BuiltinFunction::SafeHtmlElement => ScalarBuiltin::SafeHtmlElement,
+        BuiltinFunction::SafeHtmlLink => ScalarBuiltin::SafeHtmlLink,
+        BuiltinFunction::SafeHtmlConcat => ScalarBuiltin::SafeHtmlConcat,
         _ => return None,
     })
 }
@@ -1861,6 +1956,26 @@ fn builtin_type(
         RemoveKey => {
             exact(&[ScalarType::StringDict, ScalarType::String])?;
             ScalarType::StringDict
+        }
+        SafeHtmlEmpty => {
+            exact(&[])?;
+            ScalarType::SafeHtml
+        }
+        SafeHtmlText => {
+            exact(&[ScalarType::String])?;
+            ScalarType::SafeHtml
+        }
+        SafeHtmlElement => {
+            exact(&[ScalarType::String, ScalarType::SafeHtml])?;
+            ScalarType::SafeHtml
+        }
+        SafeHtmlLink => {
+            exact(&[ScalarType::String, ScalarType::SafeHtml])?;
+            ScalarType::SafeHtml
+        }
+        SafeHtmlConcat => {
+            exact(&[ScalarType::SafeHtml, ScalarType::SafeHtml])?;
+            ScalarType::SafeHtml
         }
     })
 }

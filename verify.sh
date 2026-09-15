@@ -10,6 +10,10 @@ if [ ! -f Cargo.lock ]; then
   echo 'generate and review Cargo.lock in the trusted developer workspace before packaging' >&2
   exit 1
 fi
+if ! command -v cargo >/dev/null 2>&1; then
+  echo 'release verification refused: cargo is required for workspace verification' >&2
+  exit 1
+fi
 cargo metadata --locked --format-version 1 >/dev/null || {
   echo 'verification refused: Cargo.lock is stale for workspace manifests' >&2
   echo 'run ./tools/refresh-lock.sh, review Cargo.lock, then regenerate VELRAN-SUPPLY-CHAIN.lock' >&2
@@ -228,6 +232,10 @@ test -f examples/logrotate/velran
 printf '%s\n' 'M31 logging/audit verification passed'
 
 echo "checking M32 safe Markdown"
+# CommonMark remains a Velran source module, not an engine feature. Its canonical
+# implementation must nevertheless compile through the same verified-pure language
+# surface available to ordinary Velran programs.
+sh tools/check-commonmark.sh
 cargo run --locked -q -p velran-cli -- check examples/markdown/app.vrn
 cargo test --locked -p compiler m32_markdown_compiler_tests
 cargo test --locked -p runtime m32_markdown_runtime_tests

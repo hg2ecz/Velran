@@ -1,0 +1,12 @@
+mod commonmark;
+
+#[page]
+fn commonmark_demo(ctx: PageContext) -> Result<Html, PageError> {
+    let source = "# Velran Markdown\n\nA **safe** renderer written in *Velran*.\n\n[Velran](https://example.com)\n\n<script>alert('not HTML')</script>";
+    let rendered = commonmark::render(&source);
+    return Ok(html {
+        <article class="markdown-body">{{ rendered }}</article>
+    });
+}
+
+route commonmark_demo GET "/commonmark" public => commonmark_demo;

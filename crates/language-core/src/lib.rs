@@ -69,7 +69,7 @@ pub use schema::{
 pub use security_event::SecurityEvent;
 pub use values::DataSensitivity;
 pub use values::{F32Value, FunctionParam, ImageRef, PageParam, Value, ValueType};
-pub use values::{TRANSACTION_OUTCOME_ENUM_ID, TRANSACTION_OUTCOME_VARIANTS};
+pub use values::{SAFE_HTML_DOMAIN_ID, TRANSACTION_OUTCOME_ENUM_ID, TRANSACTION_OUTCOME_VARIANTS};
 pub use visibility::{ModuleVisibility, SymbolVisibility, Visibility};
 pub use web_types::{
     FlashKind, FlashMessage, Html, HttpMethod, LocalUrl, Redirect, RedirectStatus,

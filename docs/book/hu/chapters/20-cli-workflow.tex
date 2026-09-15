@@ -247,27 +247,20 @@ edit .vrn source
 
 A sorrend lényege, hogy az olcsóbb és determinisztikusabb hibákat előbb fogjuk meg. Nincs értelme HTTP smoke tesztet futtatni olyan forrásra, amely már compiler-szinten hibás.
 
-\section{Application release workflow}
+\section{Application release workflow: CLI touchpointok}
 
-Egy production release minimális operátori folyamata:
+A deployment contractot a 18. fejezet, a futtatható production gate-et a 23. fejezet definiálja; itt nem tartunk fenn még egy külön release checklistet. A CLI-specifikus touchpointok szándékosan rövidek:
 
 \begin{lstlisting}
-immutable release selected
--> velran-cli check deployed main.vrn
--> velran-server --check-config
--> velran-cli migrate status
--> velran-cli migrate verify
--> backup/recovery gate
--> approved velran-cli migrate apply, if pending
--> velran-cli migrate verify
--> controlled service restart/switch
--> /health/live
--> /health/ready
--> application smoke test
--> logs + metrics + audit review
+velran-cli check deployed main.vrn
+velran-cli migrate status
+velran-cli migrate verify
+# approved change only:
+velran-cli migrate apply
+velran-cli migrate verify
 \end{lstlisting}
 
-A migration \code{apply} az egyetlen mutáló schema-lépés ebben a folyamatban; külön approval pontként kezeld.
+A config-check, backup/recovery, aktiválás, health, smoke és observability gate-eket ezek körül a 18., 19. és 23. fejezet szerint futtasd. A migration \code{apply} schema-módosító lépés, ezért külön jóváhagyási pont marad.
 
 \section{A Velran platform release workflowja más}
 

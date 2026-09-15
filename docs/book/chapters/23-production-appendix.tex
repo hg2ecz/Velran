@@ -214,14 +214,14 @@ The following list is intentionally short and executable. The earlier chapters p
   \item \textbf{Migration:} run \code{migrate status} and \code{migrate verify} before production; apply approved schema changes explicitly; verify again afterward.
   \item \textbf{Configuration:} pass config-check on the real production \code{server.toml}; review the redacted effective configuration.
   \item \textbf{Secrets:} keep DB/Redis/auth secret files out of the repository, with narrow filesystem permissions, and out of logs and release records.
-  \item \textbf{HTTP edge:} verify domain, TLS, and Host handling; the trusted-proxy list contains only real proxies.
+  \item \textbf{HTTP edge:} verify domain, TLS, and Host handling; the trusted-proxy list contains only real proxies; certificate renewal ownership and expiry monitoring are explicit.
   \item \textbf{Auth:} production cookie policy is active; local-auth/LDAP configuration is verified; admin/MFA recovery is documented.
   \item \textbf{CSRF and CORS:} state-changing browser requests are CSRF protected; CORS allowlists are explicit; credentialed CORS has no wildcard origin.
   \item \textbf{Database:} the application DB user is least privilege; pool/budget matches backend capacity; important query indexes are understood.
   \item \textbf{Storage/upload:} AppFs confinement is correct; byte/pixel limits are active; the application cannot write release content.
   \item \textbf{Redis/cache/rate limit:} multi-instance shared security/runtime state lives in Redis; Redis outage behavior is known and tested.
   \item \textbf{Egress:} only named outbound targets are allowed; host/CIDR/port/TLS/timeout/size policy is explicit; secrets do not appear in URLs or logs.
-  \item \textbf{Resources:} request/runtime limits and process hard limits are consistent; cgroup authority is either systemd or a separately delegated Velran cgroup, not both.
+  \item \textbf{Resources/host:} request/runtime limits and process hard limits are consistent; cgroup authority is either systemd or a separately delegated Velran cgroup, not both; disk/inode headroom and host clock synchronization are healthy.
   \item \textbf{Observability:} server/access/audit logs are writable; request IDs work; metrics and readiness are reachable from the correct management network; minimum alerts are defined.
   \item \textbf{Backup/recovery:} recent verified DB + AppFs + identity backups exist; a recovery manifest exists; restore drills are real rather than theoretical.
   \item \textbf{Deploy/rollback:} release artifact and checksum are known; the previous release can be restored; schema changes have an explicit app-rollback versus full-restore decision.
@@ -336,6 +336,7 @@ This checklist answers a different question from the production gate: \emph{can 
   \item I can prepare and verify a migration instead of coupling schema mutation to server startup.
   \item I can read server, access, and audit logs using a request ID and use readiness/metrics to separate application failure from dependency failure.
   \item I can deploy with an explicit release artifact, checksum, configuration review, smoke test, and rollback decision.
+  \item I can identify who owns TLS renewal, OS patching, time synchronization, disk/inode capacity, DB/Redis maintenance, and firewall/DNS changes, and I know which Velran checks must be repeated after those changes.
   \item I can explain what belongs in backup, restore a consistent DB/AppFs/identity state in isolation, and treat a restore drill as evidence rather than documentation alone.
   \item I can run \code{./verify.sh}, understand which gate failed, distinguish learner examples from rejection fixtures/manifests, and avoid ``fixes'' that merely weaken the guard.
 \end{itemize}

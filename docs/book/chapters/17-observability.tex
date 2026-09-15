@@ -359,8 +359,12 @@ Even a small production deployment should alert on at least:
   \item unusual spikes in auth/policy/rate-limit denials;
   \item increases in \code{velran_runtime_budget_exceeded_total};
   \item increases in \code{velran_log_fallback_total};
-  \item process restart loops or unexpected shutdown.
+  \item process restart loops or unexpected shutdown;
+  \item host disk-space and inode exhaustion on log, AppFs, and database volumes;
+  \item public TLS certificate expiry at the terminating edge, and failed renewal jobs where automation is used.
 \end{itemize}
+
+For hosts you operate directly, also monitor clock synchronization and the capacity signals of the database/Redis service. Velran metrics describe the application boundary; they do not replace host, proxy, certificate, or database monitoring.
 
 Thresholds should not be hardcoded by the language. Operators set them according to traffic, SLOs, and business criticality.
 

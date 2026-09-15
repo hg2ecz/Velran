@@ -64,7 +64,7 @@ pub(crate) fn expr_uses_request_state(e: &Expr) -> Option<&str> {
 fn html_uses_request_state<'a>(t: &'a HtmlTemplate, p: &'a Program) -> Option<&'a str> {
     for part in &t.parts {
         let hit = match part {
-            HtmlPart::EscapedExpr(e) | HtmlPart::Markdown(e) => expr_uses_request_state(e),
+            HtmlPart::EscapedExpr(e) | HtmlPart::SafeHtmlExpr(e) => expr_uses_request_state(e),
             HtmlPart::Image { image, alt } => {
                 expr_uses_request_state(image).or_else(|| expr_uses_request_state(alt))
             }
@@ -139,7 +139,7 @@ pub(super) fn validate_public_cache_statements(
             }
             Statement::LetQuery { call, .. } => call.args.iter().find_map(expr_uses_request_state),
             Statement::LetOutboundStatus { .. } => None,
-            Statement::PureCall { .. } => None,
+            Statement::PureCall { args, .. } => args.iter().find_map(expr_uses_request_state),
             Statement::Authorize(_) => Some("authorization"),
             Statement::CanonicalSlug { .. } => Some("canonical redirect"),
             Statement::ReturnHtml(t) => html_uses_request_state(t, p),

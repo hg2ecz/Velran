@@ -81,7 +81,7 @@ pub enum HtmlAttrKind {
 pub enum HtmlPart {
     Text(String),
     EscapedExpr(Expr),
-    Markdown(Expr),
+    SafeHtmlExpr(Expr),
     Image {
         image: Expr,
         alt: Expr,
@@ -195,7 +195,7 @@ pub enum ComputeStatement {
     PureCall {
         target: Option<String>,
         function: String,
-        args: Vec<String>,
+        args: Vec<Expr>,
     },
     ReturnStruct {
         schema: String,
@@ -279,7 +279,7 @@ pub enum Statement {
     PureCall {
         target: Option<String>,
         function: String,
-        args: Vec<String>,
+        args: Vec<Expr>,
     },
     LetQuery {
         name: String,

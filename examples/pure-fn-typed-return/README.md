@@ -4,3 +4,5 @@
 # Pure typed return example
 
 Demonstrates a verified pure `#[inline(never)] fn` returning `f32` and a handler assigning its result.
+
+See [`docs/58-verified-pure-functions.md`](../../docs/58-verified-pure-functions.md) for the current pure-call, parameter, recursion and resource-safety contract.

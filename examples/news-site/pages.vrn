@@ -1,11 +1,14 @@
+use crate::commonmark as commonmark;
+
 #[page]
 fn article(ctx: PageContext, db: Db, slug: Slug) -> Result<Html, PageError> {
     let article = queries::articleBySlug(db, slug)?;
+    let markdown_html = commonmark::render(&article.body);
     return Ok(html {
         @layout(components::Main, article.title) {
             <article>
                 <h1>{{ article.title }}</h1>
-                @markdown(article.body)
+                {{ markdown_html }}
             </article>
         }
     });

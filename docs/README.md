@@ -24,6 +24,7 @@ English is the canonical documentation language for the Velran repository. Hunga
 - [String dictionaries](48-string-dictionaries.md)
 - [Regular expressions](49-regular-expressions.md)
 - [Statement terminators](56-statement-terminators.md)
+- [Verified pure functions](58-verified-pure-functions.md)
 - [Domain types and bounded collections](62-domain-types-and-bounded-collections.md)
 - [Nominal domain types](63-nominal-domain-types.md)
 - [Domain value refinement](64-domain-value-refinement.md)

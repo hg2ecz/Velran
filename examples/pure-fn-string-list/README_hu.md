@@ -5,3 +5,5 @@
 
 Immutable Rust-szerű `&[String]` pure-függvény paramétert és owned `Vec<String>` visszatérést mutat.
 A generált natív reprezentáció megosztott, immutable ownershipot használ; nincs raw-pointer ABI.
+
+Az aktuális pure-call, paraméter-, rekurzió- és resource-safety contract: [`docs/hu/58-verifikalt-pure-fuggvenyek.md`](../../docs/hu/58-verifikalt-pure-fuggvenyek.md).

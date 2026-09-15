@@ -247,27 +247,20 @@ edit .vrn source
 
 The point of the order is to catch cheaper, more deterministic failures first. There is little value in running HTTP smoke tests against source that already fails at compiler level.
 
-\section{Application release workflow}
+\section{Application release workflow: CLI touchpoints}
 
-A minimal production operator flow is:
+Chapter 18 defines the deployment contract and Chapter 23 contains the executable production gate; do not maintain a second release checklist here. The CLI-specific touchpoints are deliberately small:
 
 \begin{lstlisting}
-immutable release selected
--> velran-cli check deployed main.vrn
--> velran-server --check-config
--> velran-cli migrate status
--> velran-cli migrate verify
--> backup/recovery gate
--> approved velran-cli migrate apply, if pending
--> velran-cli migrate verify
--> controlled service restart/switch
--> /health/live
--> /health/ready
--> application smoke test
--> logs + metrics + audit review
+velran-cli check deployed main.vrn
+velran-cli migrate status
+velran-cli migrate verify
+# approved change only:
+velran-cli migrate apply
+velran-cli migrate verify
 \end{lstlisting}
 
-Migration \code{apply} is the only schema-mutating step in this sequence; treat it as a separate approval point.
+Run config-check, backup/recovery, activation, health, smoke, and observability gates around these commands as described in Chapters 18, 19, and 23. Migration \code{apply} is the schema-mutating step and remains a separate approval point.
 
 \section{The Velran platform release workflow is different}
 

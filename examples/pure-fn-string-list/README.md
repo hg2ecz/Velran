@@ -5,3 +5,5 @@
 
 Demonstrates an immutable Rust-like `&[String]` pure-function parameter and an owned `Vec<String>` return.
 The generated native representation uses shared immutable ownership; no raw-pointer ABI is exposed.
+
+See [`docs/58-verified-pure-functions.md`](../../docs/58-verified-pure-functions.md) for the current pure-call, parameter, recursion and resource-safety contract.

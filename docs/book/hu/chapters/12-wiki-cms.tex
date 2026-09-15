@@ -38,11 +38,12 @@ fn wikiBySlug(db: Db, slug: Slug)
 fn wikiShow(ctx: PageContext, db: Db, slug: Slug)
     -> Result<Html, PageError> {
     let page = wikiBySlug(db, slug)?;
+    let markdown_html = commonmark::render(&page.body);
     return Ok(html {
         @layout(Main, page.title) {
             <article>
                 <h1>{{ page.title }}</h1>
-                @markdown(page.body)
+                {{ markdown_html }}
             </article>
         }
     });
@@ -120,11 +121,12 @@ form ArticleForm {
 fn article(ctx: PageContext, db: Db, slug: Slug)
     -> Result<Html, PageError> {
     let article = articleBySlug(db, slug)?;
+    let markdown_html = commonmark::render(&article.body);
     return Ok(html {
         @layout(Main, article.title) {
             <article>
                 <h1>{{ article.title }}</h1>
-                @markdown(article.body)
+                {{ markdown_html }}
             </article>
         }
     });
@@ -181,17 +183,19 @@ A CMS-ben az eredeti Markdown legyen a source of truth; ne tárolj alkalmazásb�
 
 \section{Szerveroldali Markdown renderelés és cache}
 
-Publikált tartalomnál alapértelmezetten szerveroldali Markdown renderelést használj. Az authoritative útvonal:
+Publikált tartalomnál alapértelmezetten szerveroldali Markdown renderelést használj. A Markdown nem Markdown-specifikus engine feature: a \path{commonmark.vrn} forrásfájlt \code{mod commonmark;} deklarációval emeld be, és a Velranban megírt modult hívd. Az authoritative útvonal:
 
 \begin{lstlisting}
 SQL-ben tarolt Markdown
 -> typed query stabil id/slug alapjan
--> @markdown(...)
+-> commonmark::render(...)
 -> biztonsagos HTML valasz
 -> opcionalis route-szintu public cache
 \end{lstlisting}
 
-Az adatbázisban az eredeti Markdown maradjon a source of truth. Ne tárold el az alkalmazás által generált HTML-t pusztán azért, hogy megspórold a renderelést. A szerveroldali renderer nem enged raw HTML-t, és a link targeteket saját policy szerint kezeli, így a renderelés a framework HTML-security boundaryján belül marad ahelyett, hogy a bizalmat böngészős JavaScriptre helyeznéd át.
+Nincs engine-szintű \code{@markdown(...)} direktíva. Az ismeretlen \code{@name(...)} alakú template call-direktívát a compiler elutasítja ahelyett, hogy literal szövegként renderelné. A renderelést normál Velran library-hívással, a \code{commonmark} modul \code{render} függvényével végezd.
+
+Az adatbázisban az eredeti Markdown maradjon a source of truth. Ne tárold el az alkalmazás által generált HTML-t pusztán azért, hogy megspórold a renderelést. A Velranban megírt forrásmodul escape-eli a raw HTML-t és kezeli a link-policyt, miközben csak típusos \code{SafeHtml} értéket építhet. Így a Markdown szintaxis nincs az engine-be égetve, az általános HTML-security boundary viszont megmarad.
 
 Publikus, nem személyre szabott dokumentumnál route cache használható, ha a freshness contract ezt megengedi. A cache a kész választ tárolja; a cache-clause elhagyásával ugyanaz a renderelési útvonal marad cache nélkül. Egy minimális pár:
 
@@ -206,7 +210,7 @@ route markdownDocumentCached GET "/documents-cached/:id<i64>"
     => markdownDocument;
 \end{lstlisting}
 
-A canonical end-to-end példa az \path{examples/markdown-sql-cache/}. SQLite-, PostgreSQL- és MariaDB-sémaváltozatot is tartalmaz, és megmutatja, hogyan táplál egy id-alapú typed SQL olvasás \code{@markdown} renderelést. Böngészőoldali Markdown renderelést csak szerkesztői preview-hoz használj, ha javítja az interakciót; a publikált reprezentációt továbbra is a szerver készítse, hogy a sanitization, cache-policy, CSP-feltételezések és JavaScript nélküli kliensek szempontjából a szerver maradjon authoritative.
+A canonical end-to-end példa az \path{examples/markdown-sql-cache/}. SQLite-, PostgreSQL- és MariaDB-sémaváltozatot is tartalmaz, és megmutatja, hogyan táplál egy id-alapú typed SQL olvasás \code{commonmark::render} hívást. Böngészőoldali Markdown renderelést csak szerkesztői preview-hoz használj, ha javítja az interakciót; a publikált reprezentációt továbbra is a szerver készítse, hogy a sanitization, cache-policy, CSP-feltételezések és JavaScript nélküli kliensek szempontjából a szerver maradjon authoritative.
 
 \section{Demo CMS-től a szerkesztőségi workflow-ig}
 

@@ -55,6 +55,17 @@ impl ExprParser<'_> {
                     };
                     expr = Expr::PureSumPredicate { base, predicate };
                 }
+                RustMethod::StringToOwned => {
+                    self.expect_empty_call("to_string")?;
+                    // Velran strings are immutable shared values. Lower the Rust-surface
+                    // ownership conversion through the verified substring builtin so the
+                    // receiver is type-checked as String and any materialized copy remains
+                    // allocation-budgeted by the runtime.
+                    expr = Expr::Builtin {
+                        function: BuiltinFunction::Substring,
+                        args: vec![expr, Expr::Int(0)],
+                    };
+                }
                 RustMethod::SumUnwrapOr => {
                     let Expr::Variable(base) = expr else {
                         return Err(CompileError::Syntax(

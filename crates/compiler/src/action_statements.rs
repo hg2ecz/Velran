@@ -346,7 +346,14 @@ fn parse_action_statements_known(
         }
         if body[cursor..].starts_with("while ") {
             let (condition, statements, close) = control_flow::parse_while_block(
-                "action", name, namespace, body, cursor, &known, p,
+                "action",
+                name,
+                namespace,
+                body,
+                cursor,
+                &known,
+                p,
+                Some(base_line),
             )?;
             out.push(ActionStatement::While {
                 condition,
@@ -356,8 +363,16 @@ fn parse_action_statements_known(
             continue;
         }
         if body[cursor..].starts_with("if ") {
-            let (condition, statements, close) =
-                control_flow::parse_if_block("action", name, namespace, body, cursor, &known, p)?;
+            let (condition, statements, close) = control_flow::parse_if_block(
+                "action",
+                name,
+                namespace,
+                body,
+                cursor,
+                &known,
+                p,
+                Some(base_line),
+            )?;
             out.push(ActionStatement::If {
                 condition,
                 statements,

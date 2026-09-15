@@ -226,8 +226,16 @@ fn parse_page_statements_known(
             continue;
         }
         if body[cursor..].starts_with("while ") {
-            let (condition, statements, close) =
-                control_flow::parse_while_block("page", name, namespace, body, cursor, &known, p)?;
+            let (condition, statements, close) = control_flow::parse_while_block(
+                "page",
+                name,
+                namespace,
+                body,
+                cursor,
+                &known,
+                p,
+                Some(base_line),
+            )?;
             out.push(Statement::While {
                 condition,
                 statements,
@@ -236,8 +244,16 @@ fn parse_page_statements_known(
             continue;
         }
         if body[cursor..].starts_with("if ") {
-            let (condition, statements, close) =
-                control_flow::parse_if_block("page", name, namespace, body, cursor, &known, p)?;
+            let (condition, statements, close) = control_flow::parse_if_block(
+                "page",
+                name,
+                namespace,
+                body,
+                cursor,
+                &known,
+                p,
+                Some(base_line),
+            )?;
             out.push(Statement::If {
                 condition,
                 statements,

@@ -13,6 +13,18 @@ Velran V1 is the Rust-first, native-only web application language/runtime/server
 - Velran-specific syntax remains where it carries web/security semantics: routes, typed request schemas, authorization policies, HTML/template boundaries, resource contracts and named capabilities.
 - Application execution is verified IR -> generated safe Rust -> `rustc` -> immutable `cdylib` -> atomic activation. There is no VM/interpreter fallback. Unsupported native lowering or host-ABI coverage fails closed and leaves the previous valid generation active.
 
+## Verified pure language productivity update
+
+- Verified pure scalar/borrowed functions accept by-value `i64`/`bool` alongside explicit immutable string/list/struct borrows.
+- Scalar/borrowed pure helpers can call one another with typed expression arguments; call results can initialize or assign locals.
+- Rust-like `if`/`else if`/`else` is supported with single condition evaluation and preserved static security metadata.
+- Scalar pure recursion is hard depth-bounded and remains fuel/allocation-accounted; mutable numeric hot-path recursive cycles are rejected.
+- String `.to_string()` is a verified allocation-accounted operation; string-oriented builtins accept explicit immutable borrows only at string-typed argument positions.
+- Frontend expression/control-flow diagnostics preserve source line information.
+- `SafeHtml` remains a typed lowering boundary, and unknown call-shaped template directives fail fast. Markdown/CommonMark remains a source-level Velran library rather than an engine feature.
+
+Normative details: [`docs/58-verified-pure-functions.md`](docs/58-verified-pure-functions.md).
+
 ## Security and operations
 
 - Explicit route access policy (`public`, authenticated/permission/MFA/critical policies).

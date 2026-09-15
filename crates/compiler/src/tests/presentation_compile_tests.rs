@@ -106,14 +106,18 @@ route home GET "/" public => home;
 }
 
 #[cfg(test)]
-mod m32_markdown_compiler_tests {
+mod m32_safe_html_compiler_tests {
     use super::*;
 
     #[test]
-    fn accepts_markdown_string_in_content_position() {
+    fn accepts_safe_html_from_typed_builder_in_content_position() {
         let src = r#"
+fn render(body: &str) -> SafeHtml {
+    return safeHtmlText(body);
+}
 #[page] fn article(ctx: PageContext, body: String) -> Result<Html, PageError> {
-    return Ok(html {<article>@markdown(body)</article>});
+    let rendered = render(&body);
+    return Ok(html {<article>{{ rendered }}</article>});
 }
 route article GET "/" query body<String> public => article;
 "#;
@@ -122,27 +126,50 @@ route article GET "/" query body<String> public => article;
     }
 
     #[test]
-    fn rejects_markdown_non_string() {
+    fn rejects_arbitrary_string_as_safe_html() {
         let src = r#"
-#[page] fn article(ctx: PageContext, id: i64) -> Result<Html, PageError> {
-    return Ok(html {<article>@markdown(id)</article>});
+fn render(body: &str) -> SafeHtml {
+    return body;
 }
-route article GET "/" query id<i64> public => article;
+#[page] fn article(ctx: PageContext, body: String) -> Result<Html, PageError> {
+    let rendered = render(&body);
+    return Ok(html {<article>{{ rendered }}</article>});
+}
+route article GET "/" query body<String> public => article;
 "#;
         assert!(compile_source(src).is_err());
     }
 
     #[test]
-    fn rejects_markdown_inside_attribute() {
+    fn markdown_directive_is_not_an_engine_feature() {
         let src = r#"
 #[page] fn article(ctx: PageContext, body: String) -> Result<Html, PageError> {
-    return Ok(html {<div class="@markdown(body)">x</div>});
+    return Ok(html {<article>@markdown(body)</article>});
 }
 route article GET "/" query body<String> public => article;
 "#;
-        assert!(matches!(
-            compile_source(src),
-            Err(CompileError::UnsafeHtml(_))
-        ));
+        assert!(compile_source(src).is_err());
+    }
+
+    #[test]
+    fn unknown_html_template_directive_is_rejected() {
+        let src = r#"
+#[page] fn article(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {<article>@doesNotExist()</article>});
+}
+route article GET "/" public => article;
+"#;
+        assert!(compile_source(src).is_err());
+    }
+
+    #[test]
+    fn at_sign_in_static_html_text_is_not_a_directive() {
+        let src = r#"
+#[page] fn article(ctx: PageContext) -> Result<Html, PageError> {
+    return Ok(html {<article>contact@example.com @someone</article>});
+}
+route article GET "/" public => article;
+"#;
+        assert!(compile_source(src).is_ok());
     }
 }

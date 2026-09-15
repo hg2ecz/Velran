@@ -4,6 +4,21 @@ use crate::module_namespace::resolve;
 use crate::{CompileError, builtin_registry};
 use language_core::{BuiltinFunction, Expr};
 
+fn builtin_accepts_immutable_string_borrow(function: BuiltinFunction, index: usize) -> bool {
+    use BuiltinFunction::*;
+    match function {
+        StringLen | Trim | TrimStart | TrimEnd | Lower | Upper | Substring | CharAt | Repeat => {
+            index == 0
+        }
+        Contains | StartsWith | EndsWith | IndexOf | LastIndexOf => index <= 1,
+        Replace => index <= 2,
+        Split | SplitBounded => index <= 1,
+        SafeHtmlText => index == 0,
+        SafeHtmlElement | SafeHtmlLink => index == 0,
+        _ => false,
+    }
+}
+
 impl ExprParser<'_> {
     pub(super) fn parse_primary(&mut self) -> Result<Expr, CompileError> {
         let tok = self
@@ -197,6 +212,23 @@ impl ExprParser<'_> {
                     let mut args = Vec::new();
                     if self.tokens.get(self.pos) != Some(&ExprToken::RParen) {
                         loop {
+                            let arg_index = args.len();
+                            if self.tokens.get(self.pos) == Some(&ExprToken::Amp) {
+                                if !builtin_accepts_immutable_string_borrow(function, arg_index) {
+                                    return Err(CompileError::Syntax(format!(
+                                        "builtin `{v}` argument {} does not accept an immutable borrow",
+                                        arg_index + 1
+                                    )));
+                                }
+                                self.pos += 1;
+                                if matches!(self.tokens.get(self.pos), Some(ExprToken::Ident(name)) if name == "mut")
+                                {
+                                    return Err(CompileError::Syntax(format!(
+                                        "builtin `{v}` argument {} does not accept `&mut`; immutable string borrow required",
+                                        arg_index + 1
+                                    )));
+                                }
+                            }
                             args.push(self.parse_logical_or()?);
                             if self.tokens.get(self.pos) == Some(&ExprToken::Comma) {
                                 self.pos += 1;

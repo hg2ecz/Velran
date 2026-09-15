@@ -10,6 +10,8 @@ Compilation proves source and policy constraints, not business correctness or en
 
 When the compiler or verifier rejects a program with a stable security code, do not start by looking for a way around the check. Read the diagnostic in four passes: identify the code, name the violated invariant, find the authority or data boundary involved, then make the smallest source change that restores that invariant. Re-run the check and keep the rejected variant as a negative test when the rule is security-significant.
 
+Frontend expression and control-flow diagnostics preserve source location. File compilation should report the source path and line number, including errors inside nested \code{if}/\code{else}/\code{while} blocks. Treat a location-less generic parser message as a diagnostics-quality bug when the compiler has enough source information to do better.
+
 A useful debugging note therefore records four things: \emph{code}, \emph{boundary}, \emph{why the program was rejected}, and \emph{what evidence makes the corrected program acceptable}. This is more durable than memorizing message wording, and it teaches the same reasoning used during security review.
 
 Testing in Velran is therefore best treated as a set of layers that build on one another:

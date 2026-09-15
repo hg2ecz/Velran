@@ -54,7 +54,7 @@ fn statements_supported(statements: &[ScalarStatement]) -> bool {
         } => expr_supported(condition) && statements_supported(statements),
         ScalarStatement::ReturnHtml(parts) => parts.iter().all(|part| match part {
             NativeHtmlPart::Text(_) => true,
-            NativeHtmlPart::Escaped(expr) => expr_supported(expr),
+            NativeHtmlPart::Escaped(expr) | NativeHtmlPart::Safe(expr) => expr_supported(expr),
         }),
         ScalarStatement::HostOutboundStatus { .. }
         | ScalarStatement::F32ArraySet { .. }
@@ -153,7 +153,7 @@ pub(crate) fn rust_type(ty: NativeScalarType) -> &'static str {
     match ty {
         NativeScalarType::Int => "i64",
         NativeScalarType::Bool => "bool",
-        NativeScalarType::String => "std::sync::Arc<str>",
+        NativeScalarType::String | NativeScalarType::SafeHtml => "std::sync::Arc<str>",
         NativeScalarType::StringList => "std::sync::Arc<Vec<std::sync::Arc<str>>>",
         NativeScalarType::StringDict => {
             "std::sync::Arc<std::collections::BTreeMap<std::sync::Arc<str>, std::sync::Arc<str>>>"
@@ -221,6 +221,11 @@ fn statement_source(
                             _ => ("typed_html_unsupported", expr_source(body, expr)),
                         };
                         out.push_str(&format!("{pad}if !{function}({value}, &mut velran_output, &mut velran_state) {{ return fail(&velran_fuel, &velran_state); }}\n"));
+                    }
+                    NativeHtmlPart::Safe(expr) => {
+                        debug_assert_eq!(expr_type(body, expr), NativeScalarType::SafeHtml);
+                        let value = borrowed_expr_source(body, expr);
+                        out.push_str(&format!("{pad}if !velran_output.push({value}.as_ref(), &mut velran_state) {{ return fail(&velran_fuel, &velran_state); }}\n"));
                     }
                 }
             }
@@ -362,6 +367,26 @@ fn builtin_source(
             a(0),
             a(1)
         ),
+        ScalarBuiltin::SafeHtmlEmpty => "std::sync::Arc::<str>::from(\"\")".into(),
+        ScalarBuiltin::SafeHtmlText => format!(
+            "match direct_safe_html_text({}, &mut velran_state) {{ Some(v) => v, None => return fail(&velran_fuel, &velran_state) }}",
+            a(0)
+        ),
+        ScalarBuiltin::SafeHtmlElement => format!(
+            "match direct_safe_html_element({}, {}, &mut velran_state) {{ Some(v) => v, None => return fail(&velran_fuel, &velran_state) }}",
+            a(0),
+            a(1)
+        ),
+        ScalarBuiltin::SafeHtmlLink => format!(
+            "match direct_safe_html_link({}, {}, &mut velran_state) {{ Some(v) => v, None => return fail(&velran_fuel, &velran_state) }}",
+            a(0),
+            a(1)
+        ),
+        ScalarBuiltin::SafeHtmlConcat => format!(
+            "match direct_concat_strings({}, {}, &mut velran_state) {{ Some(v) => v, None => return fail(&velran_fuel, &velran_state) }}",
+            a(0),
+            a(1)
+        ),
         ScalarBuiltin::DictNew => "std::sync::Arc::new(std::collections::BTreeMap::new())".into(),
         ScalarBuiltin::ContainsKey => format!("({}).contains_key(({}).as_ref())", b(0), b(1)),
         ScalarBuiltin::RemoveKey => format!(
@@ -457,6 +482,11 @@ fn expr_type(body: &VerifiedScalarBody, expr: &ScalarExpr) -> NativeScalarType {
             | ScalarBuiltin::ContainsKey => NativeScalarType::Bool,
             ScalarBuiltin::SplitBounded => NativeScalarType::StringList,
             ScalarBuiltin::DictNew | ScalarBuiltin::RemoveKey => NativeScalarType::StringDict,
+            ScalarBuiltin::SafeHtmlEmpty
+            | ScalarBuiltin::SafeHtmlText
+            | ScalarBuiltin::SafeHtmlElement
+            | ScalarBuiltin::SafeHtmlLink
+            | ScalarBuiltin::SafeHtmlConcat => NativeScalarType::SafeHtml,
             ScalarBuiltin::Trim
             | ScalarBuiltin::TrimStart
             | ScalarBuiltin::TrimEnd
@@ -476,6 +506,7 @@ fn expr_type(body: &VerifiedScalarBody, expr: &ScalarExpr) -> NativeScalarType {
                 NativePureValueType::Bool => NativeScalarType::Bool,
                 NativePureValueType::String => NativeScalarType::String,
                 NativePureValueType::StringList => NativeScalarType::StringList,
+                NativePureValueType::SafeHtml => NativeScalarType::SafeHtml,
                 NativePureValueType::Struct(id) => NativeScalarType::Struct(*id),
             },
             NativeScalarType::Result { ok, .. } => match ok {
@@ -484,6 +515,7 @@ fn expr_type(body: &VerifiedScalarBody, expr: &ScalarExpr) -> NativeScalarType {
                 NativePureValueType::Bool => NativeScalarType::Bool,
                 NativePureValueType::String => NativeScalarType::String,
                 NativePureValueType::StringList => NativeScalarType::StringList,
+                NativePureValueType::SafeHtml => NativeScalarType::SafeHtml,
                 NativePureValueType::Struct(id) => NativeScalarType::Struct(*id),
             },
             _ => unreachable!("verified unwrap_or type"),

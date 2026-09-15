@@ -108,7 +108,13 @@ Routes also require an explicit access decision: use `public` for intentionally 
 
 The numeric core includes checked `+`, `-`, `*`, `/`, `%`, integer shifts `<<`/`>>`, integer bitwise `&`/`^`/`|`, boolean `!`/`&&`/`||` with short-circuit evaluation, and Rust-like `f32` math methods including `.ln()`, `.log10()`, `.log()`, `.exp()`, `.powf()`, `.round()`, `.floor()`, and `.ceil()`. See [`docs/44-math-and-timing.md`](docs/44-math-and-timing.md).
 
-The Unicode-aware string core prefers Rust-like methods such as `.trim()`, `.trim_start()`, `.trim_end()`, `.to_lowercase()`, `.to_uppercase()`, `.chars().count()`, `.contains()`, `.starts_with()`, `.ends_with()`, `.replace()`, and `.repeat()`, with bounded framework helpers such as `splitBounded(...)` where the secure web contract needs an explicit cardinality limit. See [`docs/46-string-builtins.md`](docs/46-string-builtins.md) and [`docs/49-regular-expressions.md`](docs/49-regular-expressions.md).
+The Unicode-aware string core prefers Rust-like methods such as `.trim()`, `.trim_start()`, `.trim_end()`, `.to_lowercase()`, `.to_uppercase()`, `.to_string()`, `.chars().count()`, `.contains()`, `.starts_with()`, `.ends_with()`, `.replace()`, and `.repeat()`, with bounded framework helpers such as `splitBounded(...)` where the secure web contract needs an explicit cardinality limit. String-oriented builtins accept explicit immutable `&` only at argument positions whose contract is string-like. See [`docs/46-string-builtins.md`](docs/46-string-builtins.md) and [`docs/49-regular-expressions.md`](docs/49-regular-expressions.md).
+
+Verified pure functions are the reusable authority-free compute layer. They support by-value `i64`/`bool`, immutable `&str`/`&[String]`/`&Struct`, a separate explicit `&mut [f32; N]` numeric-kernel family, pure-to-pure expression calls, `if`/`else if`/`else`, and depth-bounded scalar recursion. Pure calls remain instruction/allocation-accounted and cannot cross the scalar/numeric internal ABI boundary. See [`docs/58-verified-pure-functions.md`](docs/58-verified-pure-functions.md).
+
+## Source-level common modules
+
+Reusable application features that do not require engine authority should be written in Velran itself. `common/commonmark.vrn` is the reference example: copy it into an application source tree, declare `mod commonmark;`, and call `commonmark::render(&source)`. Markdown parsing is deliberately not built into the engine; only the generic typed `SafeHtml` security boundary is engine-owned.
 
 ## Native-only execution
 

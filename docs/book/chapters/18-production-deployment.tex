@@ -81,6 +81,12 @@ Do not tie automatic reverse SQL to switching the application symlink back. If a
 
 Before a destructive or schema-compatibility-sensitive release, require a known recovery point and recent restore evidence. Backup contents, DB/AppFs consistency, RPO/RTO, and the rollback-versus-restore decision tree are covered in the next chapter. Deployment is responsible for ensuring that this gate is satisfied before the release switch.
 
+\section{Host maintenance boundary}
+
+Velran can fail closed on application configuration, capabilities, and readiness, but it does not administer the host. Assign explicit ownership for operating-system security updates, time synchronization, disk/inode capacity, TLS certificate renewal at the terminating edge, database/Redis maintenance, and firewall/DNS changes. For a small deployment, a short written runbook naming the responsible system and renewal/patch cadence is enough; leaving these tasks implicit is not.
+
+Treat host maintenance as a controlled change: check capacity and backup/recovery state first, patch or renew one layer at a time where possible, then repeat readiness, smoke, log, and metric checks.
+
 \section{Minimum post-deploy checks}
 
 \begin{enumerate}

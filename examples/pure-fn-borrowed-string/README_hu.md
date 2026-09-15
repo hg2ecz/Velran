@@ -5,4 +5,4 @@
 
 A példa a Rust-szerű `&str` paramétert mutatja verified pure függvényben. A generated shard a framework bounded string reprezentációját használja; az alkalmazáskód nem kap raw pointer, filesystem, network, process, environment, thread, FFI vagy unsafe jogosultságot.
 
-Ebben az iterációban a helper csak scalar értéket ad vissza. Az owned `String`, collection, struct, `Option<T>` és `Result<T,E>` return szándékosan csak a következő, ownership-biztos lépésben kerül be.
+A borrowed-string helper a jelenlegi verified pure surface része: a támogatott scalar/owned/string-list/struct/`Option<T>`/`Result<T,E>` értékeket adhatja vissza, typed expression argumentummal hívhat scalar/borrowolt pure helpert, használhat Rust-szerű branchinget, és a generált pure-call depth/resource limiteken belül rekurzív is lehet. Lásd: [`docs/hu/58-verifikalt-pure-fuggvenyek.md`](../../docs/hu/58-verifikalt-pure-fuggvenyek.md).

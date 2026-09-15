@@ -4,3 +4,5 @@
 # Pure függvény owned String visszatéréssel
 
 Verified pure `fn` példa `&str` bemenettel és owned `String` visszatéréssel, raw pointer és ambient authority nélkül.
+
+Az aktuális pure-call, paraméter-, rekurzió- és resource-safety contract: [`docs/hu/58-verifikalt-pure-fuggvenyek.md`](../../docs/hu/58-verifikalt-pure-fuggvenyek.md).

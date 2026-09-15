@@ -11,6 +11,7 @@ pub(super) fn represented_as(program: &Program, actual: ValueType, expected: Val
 pub(super) fn display(program: &Program, ty: ValueType) -> String {
     match ty {
         ValueType::Credential(purpose) => purpose.source_name().to_string(),
+        ValueType::Domain(id) if id == language_core::SAFE_HTML_DOMAIN_ID => "SafeHtml".to_string(),
         ValueType::Domain(id) => program
             .domain_type_by_id(id)
             .map(|domain| {
