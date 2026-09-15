@@ -21,6 +21,7 @@ pub(super) fn print_domains(domains: &[DomainCliConfig]) {
         println!("max_queued_requests = {}", domain.max_queued_requests);
         println!("queue_timeout_ms = {}", domain.queue_timeout_ms);
         println!("reload_enabled = {}", domain.reload.enabled);
+        println!("reload_mode = {}", domain.reload.mode.as_str());
         println!(
             "reload_poll_interval_ms = {}",
             domain.reload.poll_interval_ms

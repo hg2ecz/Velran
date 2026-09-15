@@ -49,8 +49,9 @@ pub(super) fn print_effective_config(
         tls.handshake_timeout_ms
     );
     println!(
-        "[reload]\nenabled = {}\npoll_interval_ms = {}\ndebounce_ms = {}\ndebug_compile_errors = {}",
+        "[reload]\nenabled = {}\nmode = \"{}\"\npoll_interval_ms = {}\ndebounce_ms = {}\ndebug_compile_errors = {}",
         source_reload.enabled,
+        source_reload.mode.as_str(),
         source_reload.poll_interval_ms,
         source_reload.debounce_ms,
         source_reload.debug_compile_errors

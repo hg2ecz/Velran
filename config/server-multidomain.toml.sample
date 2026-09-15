@@ -47,6 +47,7 @@ immutable_max_age_secs = 31536000
 precompressed = true
 
 [reload]
+mode = "development"
 # Automatically compile and atomically activate changed application sources.
 enabled = true
 poll_interval_ms = 1000

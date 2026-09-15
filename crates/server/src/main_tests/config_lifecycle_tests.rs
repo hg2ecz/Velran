@@ -137,6 +137,7 @@ mod server_config_file_tests {
         assert_eq!(multi.domains[0].aliases.as_deref().unwrap().len(), 3);
         assert!(multi.domains[0].tls.cert_file.is_some());
         assert_eq!(multi.reload.enabled, Some(true));
+        assert_eq!(multi.reload.mode.as_deref(), Some("development"));
         assert_eq!(multi.domains[0].reload.poll_interval_ms, Some(1000));
         let included: FileDomain = toml::from_str(include_str!(
             "../../../../config/domains/domain.toml.sample"
@@ -162,6 +163,12 @@ cors_origins = ["https://example.com"]
         .unwrap();
         assert_eq!(cfg.server.app.as_deref(), Some("/srv/app/app.vrn"));
         assert_eq!(cfg.limits.max_connections, Some(100));
+        let rolling: ServerFileConfig = toml::from_str(include_str!(
+            "../../../../config/server-rolling-prod.toml.sample"
+        ))
+        .unwrap();
+        assert_eq!(rolling.reload.mode.as_deref(), Some("rolling"));
+        assert_eq!(rolling.reload.debug_compile_errors, Some(false));
     }
 
     #[test]

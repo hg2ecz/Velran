@@ -1,5 +1,5 @@
 use crate::WebSecurityCliConfig;
-use crate::server_config_file::{HostingRuntime, SourceReloadCliConfig};
+use crate::server_config_file::{HostingRuntime, ReloadMode, SourceReloadCliConfig};
 use data::DbConfig;
 use language_core::{ProductionPolicy, ServerConfig};
 use std::collections::HashSet;
@@ -35,7 +35,7 @@ impl fmt::Display for ProductionPolicyError {
             ),
             Self::SourceReloadEnabled(label) => write!(
                 f,
-                "production policy for {label} requires source reload to be disabled"
+                "production policy for {label} requires source reload to be disabled or use reload.mode=rolling"
             ),
             Self::DebugCompileErrorsEnabled(label) => write!(
                 f,
@@ -68,7 +68,7 @@ pub(super) fn validate_static(
     config: &ServerConfig,
     db: Option<&DbConfig>,
     web: &WebSecurityCliConfig,
-    source_reload: &SourceReloadCliConfig,
+    _source_reload: &SourceReloadCliConfig,
     native: &crate::server_config_file::NativeCliConfig,
 ) -> Result<(), ProductionPolicyError> {
     for domain in unique_domains(hosting) {
@@ -81,8 +81,8 @@ pub(super) fn validate_static(
             config,
             db,
             web,
-            source_reload.enabled || domain.reload.enabled,
-            source_reload.debug_compile_errors || domain.reload.debug_compile_errors,
+            domain.reload.enabled && domain.reload.mode != ReloadMode::Rolling,
+            domain.reload.debug_compile_errors,
             native.debug_rustc_repro,
         )?;
     }
@@ -114,7 +114,7 @@ fn validate_static_policy(
     config: &ServerConfig,
     db: Option<&DbConfig>,
     web: &WebSecurityCliConfig,
-    reload_enabled: bool,
+    unsafe_reload_enabled: bool,
     debug_compile_errors: bool,
     debug_rustc_repro: bool,
 ) -> Result<(), ProductionPolicyError> {
@@ -122,7 +122,7 @@ fn validate_static_policy(
         if config.insecure_dev_cookies {
             return Err(ProductionPolicyError::InsecureDevCookies(label.into()));
         }
-        if reload_enabled {
+        if unsafe_reload_enabled {
             return Err(ProductionPolicyError::SourceReloadEnabled(label.into()));
         }
         if debug_compile_errors {
@@ -170,4 +170,41 @@ fn unique_domains(hosting: &HostingRuntime) -> Vec<Arc<crate::server_config_file
 fn domain_label(host: Option<&str>) -> String {
     host.map(|value| format!("domain `{value}`"))
         .unwrap_or_else(|| "the default application".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strict_production_accepts_rolling_reload_contract_but_not_development_reload() {
+        let config = ServerConfig::default();
+        let web = WebSecurityCliConfig::default();
+        assert!(
+            validate_static_policy(
+                ProductionPolicy::STRICT,
+                "test",
+                &config,
+                None,
+                &web,
+                false,
+                false,
+                false,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            validate_static_policy(
+                ProductionPolicy::STRICT,
+                "test",
+                &config,
+                None,
+                &web,
+                true,
+                false,
+                false,
+            ),
+            Err(ProductionPolicyError::SourceReloadEnabled(_))
+        ));
+    }
 }

@@ -1,5 +1,5 @@
-<!-- VELRAN-DOC-STATUS: 2026-09-14 -->
-> **Documentation status (2026-09-14):** Verified Development Milestone. On the current source tree, `cargo fmt`, the full workspace test suite, `./verify.sh`, and local test serving have completed successfully. This records the repository-level development baseline; environment-specific production deployment, recovery, and operational evidence remain release-gate responsibilities.
+<!-- VELRAN-DOC-STATUS: 2026-09-15 -->
+> **Documentation status (2026-09-15):** Verified Development Milestone. On the current source tree, `cargo fmt`, the full workspace test suite, `./verify.sh`, and local test serving have completed successfully. This records the repository-level development baseline; environment-specific production deployment, recovery, and operational evidence remain release-gate responsibilities.
 
 # Velran — a security-first web application language and server with Rust syntax.
 
@@ -155,3 +155,18 @@ Velran now accepts a deliberately narrow Rust-like inherent-method surface: `imp
 ## License
 
 Velran is licensed under the Mozilla Public License 2.0 (`MPL-2.0`). Copyright (c) 2026 Zsolt Krüpl. See [`LICENSE`](LICENSE) and [`COPYRIGHT`](COPYRIGHT). Third-party dependencies remain subject to their own licenses.
+
+## Rolling production reload
+
+For PHP-like direct-upload workflows, use transactional rolling reload:
+
+```toml
+[reload]
+enabled = true
+mode = "rolling"
+poll_interval_ms = 1000
+debounce_ms = 1000
+debug_compile_errors = false
+```
+
+Rolling mode never replaces the active generation until the changed source tree has stabilized and the candidate has compiled, passed verification, initialized its native runtime, and survived a post-build source fingerprint check. If compilation or verification fails, or files change while the candidate is building, the previous generation keeps serving requests. In-flight requests retain their generation through `Arc<DomainRuntime>` ownership; new requests see the newly activated generation only after the atomic swap. Production policy permits rolling mode, but still rejects development reload, detailed compile-error pages, insecure development cookies, and `debug_rustc_repro`. See `config/server-rolling-prod.toml.sample`. Source deletion is covered by the same transaction: removing a module/route together with its references withdraws it from the next successful generation, while a dangling reference rejects the candidate and leaves the previous generation serving.

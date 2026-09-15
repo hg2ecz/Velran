@@ -35,13 +35,16 @@ Velran is locally installed software, so this book consistently uses the \code{/
     2026-09-04.1/
   data/                    # AppFs / durable application data
 
+/var/cache/velran/
+  native/                  # verified native cdylib cache
+
 /var/log/velran/
   server.log
   access.log
   audit.log
 \end{lstlisting}
 
-Keep release contents read-only where possible. The server should have write permission only where durable state or logs actually need to be written. Secret files must not live inside the application release directory or source control.
+Keep immutable release contents read-only where possible. For a transactional rolling-source site, use a dedicated application source directory owned by the deployment/upload workflow and readable by the Velran service; do not grant the application runtime arbitrary write access to its own source tree. In either model, the server should have write permission only where durable state, logs, or an explicitly managed native cache need it. Secret files must not live inside the application source/release directory or source control.
 
 \section{Complete minimal Apache reverse-proxy example}
 
@@ -120,7 +123,7 @@ Here Nginx directly sees the client, so it creates the forwarded client address 
 
 \section{systemd service example}
 
-The repository contains the complete example at \code{examples/systemd/velran.service}. Its essential shape is:
+The repository contains a conservative baseline at \code{examples/systemd/velran.service}. The hardened shape below additionally shows the write path needed when a persistent native cache is configured:
 
 \begin{lstlisting}
 [Unit]
@@ -161,11 +164,13 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
-ReadWritePaths=/srv/velran/data /var/log/velran
+ReadWritePaths=/srv/velran/data /var/cache/velran/native /var/log/velran
 
 [Install]
 WantedBy=multi-user.target
 \end{lstlisting}
+
+The example also makes the persistent native-cache directory writable. If \code{native.cache_dir} points elsewhere, align the systemd filesystem sandbox with that exact directory instead of weakening \code{ProtectSystem=strict} globally. In rolling-source deployments, the upload workflow writes the application source tree; read access is sufficient for the Velran service.\par\medskip
 
 Systemd hard limits and Velran request/runtime resource policy are complementary defense layers. In the systemd baseline, systemd itself is the process cgroup authority, so do not also enable Velran's \code{[cgroup]} writer mode. For direct binds to 80/443 grant only \code{CAP_NET_BIND_SERVICE}; behind a reverse proxy on a high loopback port, omit it. \code{TimeoutStopSec} should exceed the configured graceful-shutdown window. In behind-proxy mode SIGHUP can transactionally reload domain/application hosting state, while process-level configuration changes still require a controlled restart; application source alone is normally activated by the automatic source-reload supervisor.
 
@@ -224,7 +229,7 @@ The following list is intentionally short and executable. The earlier chapters p
   \item \textbf{Resources/host:} request/runtime limits and process hard limits are consistent; cgroup authority is either systemd or a separately delegated Velran cgroup, not both; disk/inode headroom and host clock synchronization are healthy.
   \item \textbf{Observability:} server/access/audit logs are writable; request IDs work; metrics and readiness are reachable from the correct management network; minimum alerts are defined.
   \item \textbf{Backup/recovery:} recent verified DB + AppFs + identity backups exist; a recovery manifest exists; restore drills are real rather than theoretical.
-  \item \textbf{Deploy/rollback:} release artifact and checksum are known; the previous release can be restored; schema changes have an explicit app-rollback versus full-restore decision.
+  \item \textbf{Deploy/rollback:} immutable deployments record the release artifact/checksum and rollback target; rolling-source deployments record the active source/generation identity and prove that a rejected candidate leaves the previous generation active. Schema changes have an explicit app-rollback versus full-restore decision.
   \item \textbf{Post-start evidence:} liveness, readiness, and at least one business smoke request succeed; logs show no startup fallback or unexpected policy failure.
 \end{enumerate}
 

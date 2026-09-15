@@ -313,6 +313,9 @@ pub(super) fn load(path: Option<&Path>) -> Result<LoadedCliConfig, CliParseError
         if let Some(v) = file.reload.enabled {
             source_reload.enabled = v;
         }
+        if let Some(v) = file.reload.mode.as_deref() {
+            source_reload.mode = crate::server_config_file::ReloadMode::parse(v)?;
+        }
         if let Some(v) = file.reload.poll_interval_ms {
             source_reload.poll_interval_ms = v;
         }

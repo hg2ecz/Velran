@@ -1,5 +1,5 @@
-<!-- VELRAN-DOC-STATUS: 2026-09-14 -->
-> **Dokumentációs státusz (2026-09-14):** Ellenőrzött fejlesztési mérföldkő. A jelenlegi forrásfán sikeresen lefutott a `cargo fmt`, a teljes workspace tesztkészlet, a `./verify.sh` és a helyi tesztkiszolgálás. Ez a repository-szintű fejlesztési baseline-t rögzíti; a környezetfüggő production deployment, recovery és operátori evidence továbbra is release-gate feladat.
+<!-- VELRAN-DOC-STATUS: 2026-09-15 -->
+> **Dokumentációs státusz (2026-09-15):** Ellenőrzött fejlesztési mérföldkő. A jelenlegi forrásfán sikeresen lefutott a `cargo fmt`, a teljes workspace tesztkészlet, a `./verify.sh` és a helyi tesztkiszolgálás. Ez a repository-szintű fejlesztési baseline-t rögzíti; a környezetfüggő production deployment, recovery és operátori evidence továbbra is release-gate feladat.
 
 # 34. `server.toml` konfigurációs referencia
 
@@ -40,7 +40,7 @@ A parser fail-closed: ismeretlen section/key és duplikált TOML elem hiba; a co
 - `[logging]`: server/access/audit fájlok és stderr.
 - `[rate_limit]`: rate-limit policy file és memory fallback.
 - `[cache]`: public cache ceilingek, single-flight wait és memory fallback.
-- `[reload]`: automatikus alkalmazás-source figyelés globális alapértékei (`enabled`, `poll_interval_ms`, `debounce_ms`, `debug_compile_errors`). A `debug_compile_errors` fejlesztői kapcsoló, production policy alatt tiltott.
+- `[reload]`: automatikus alkalmazás-source figyelés globális alapértékei (`enabled`, `mode`, `poll_interval_ms`, `debounce_ms`, `debug_compile_errors`). A `mode` értéke `development` vagy `rolling`; szigorú production policy alatt csak a tranzakciós `rolling` engedett. A `debug_compile_errors` fejlesztői kapcsoló production policy alatt tiltott.
 - `[limits]`: HTTP/runtime/session/process budgetek és resource profile file.
 - `[cgroup]`: opcionális Linux cgroup memory/swap/CPU/PID budget külön delegált cgroupnál; systemd baseline mellett hagyd kikapcsolva.
 
@@ -71,7 +71,7 @@ Process-szintű config változásnál:
 
 Behind-proxy módban a `SIGHUP` a logok újranyitása mellett tranzakciósan újraolvassa a domain/application hosting konfigurációt; listener, DB/Redis/auth kapcsolat, cgroup és más process-szintű állapot továbbra is restartot igényel.
 
-Az alkalmazás `.vrn` forrásának módosításához normál esetben nem kell `SIGHUP`: a `[reload]` supervisor a teljes ismert modulgráfot `mtime + size` alapján figyeli, debounce után candidate runtime-ot fordít, és csak siker esetén cseréli le az adott domaint. Hibás új kódnál a régi generáció marad aktív. Domainenként `[domains.reload]` blokkal írható felül, process-szinten `--no-source-reload` kapcsolóval tiltható. Részletesen: [Automatikus alkalmazás-forráskód reload](38-automatikus-forraskod-reload.md).
+Az alkalmazás `.vrn` forrásának módosításához normál esetben nem kell `SIGHUP`: a `[reload]` supervisor a forrásfát metaadat + SHA-256 tartalom-fingerprint alapján figyeli, debounce után candidate runtime-ot fordít, és csak siker esetén cseréli le az adott domaint. Production közvetlen feltöltéshez `mode = "rolling"` használható. A hozzáadott, módosított, átnevezett és törölt forrás is generation-változás; konzisztens törlésnél a hozzá tartozó route eltűnik az új generationből, hibás/dangling hivatkozásnál a régi generation marad aktív. Domainenként `[domains.reload]` blokkal írható felül, process-szinten `--no-source-reload` kapcsolóval tiltható. Részletesen: [Automatikus alkalmazás-forráskód reload](38-automatikus-forraskod-reload.md).
 
 ## Cgroup authority
 

@@ -94,7 +94,7 @@ The fast path is not a lesser security mode. It skips breadth, not invariants. I
 
 \section*{Reuse your Rust knowledge}
 
-Velran is deliberately not a second general-purpose language that you must learn beside Rust. For ordinary computation, keep the Rust mental model wherever the web-security contract does not require a framework-owned construct. The recurring \textbf{Rust $\rightarrow$ Velran} blocks show three things: what transfers unchanged, what the framework adds at a boundary, and what you should avoid relearning as a separate Velran concept.
+Velran is a real server-side programming language focused on web applications, but it does not try to replace Rust as a systems language. For ordinary computation, keep the Rust mental model wherever the web-security contract does not require a framework-owned construct. The recurring \textbf{Rust $\rightarrow$ Velran} blocks show three things: what transfers unchanged, what the framework adds at a boundary, and what you should avoid relearning as a separate Velran concept.
 
 If you already understand \code{let}, \code{let mut}, structs, enums, \code{Vec<T>}, \code{Option<T>}, \code{Result<T,E>}, \code{match}, method calls, modules, and \code{?} error propagation, keep using those ideas. Spend your new-learning budget on routes, typed request boundaries, queries, capabilities, authorization, and production policy. Advanced Rust topics such as unsafe code, manual FFI, allocator internals, proc-macro authoring, and low-level async-runtime machinery are not prerequisites for ordinary Velran web development.
 

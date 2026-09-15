@@ -201,6 +201,7 @@ pub(super) struct FileCache {
 #[serde(default, deny_unknown_fields)]
 pub(super) struct FileReload {
     pub(super) enabled: Option<bool>,
+    pub(super) mode: Option<String>,
     pub(super) poll_interval_ms: Option<u64>,
     pub(super) debounce_ms: Option<u64>,
     pub(super) debug_compile_errors: Option<bool>,
@@ -291,9 +292,35 @@ pub(super) struct FileDomain {
     pub(super) reload: FileReload,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReloadMode {
+    Development,
+    Rolling,
+}
+
+impl ReloadMode {
+    pub(super) fn parse(raw: &str) -> Result<Self, ServerConfigError> {
+        match raw {
+            "development" => Ok(Self::Development),
+            "rolling" => Ok(Self::Rolling),
+            other => Err(ServerConfigError::invalid(format!(
+                "reload.mode must be `development` or `rolling`, got `{other}`"
+            ))),
+        }
+    }
+
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Development => "development",
+            Self::Rolling => "rolling",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct SourceReloadCliConfig {
     pub(super) enabled: bool,
+    pub(super) mode: ReloadMode,
     pub(super) poll_interval_ms: u64,
     pub(super) debounce_ms: u64,
     pub(super) debug_compile_errors: bool,
@@ -303,6 +330,7 @@ impl Default for SourceReloadCliConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            mode: ReloadMode::Development,
             poll_interval_ms: 1000,
             debounce_ms: 250,
             debug_compile_errors: false,
@@ -523,6 +551,7 @@ fn merge_domain(base: FileDomain, over: FileDomain) -> FileDomain {
         },
         reload: FileReload {
             enabled: over.reload.enabled.or(base.reload.enabled),
+            mode: over.reload.mode.or(base.reload.mode),
             poll_interval_ms: over
                 .reload
                 .poll_interval_ms
@@ -747,6 +776,10 @@ pub(super) fn build_domain_configs(
         };
         let reload = SourceReloadCliConfig {
             enabled: merged.reload.enabled.unwrap_or(global_reload.enabled),
+            mode: match merged.reload.mode.as_deref() {
+                Some(raw) => ReloadMode::parse(raw)?,
+                None => global_reload.mode,
+            },
             poll_interval_ms: merged
                 .reload
                 .poll_interval_ms

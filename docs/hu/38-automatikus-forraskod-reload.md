@@ -1,5 +1,5 @@
-<!-- VELRAN-DOC-STATUS: 2026-09-14 -->
-> **Dokumentációs státusz (2026-09-14):** Ellenőrzött fejlesztési mérföldkő. A jelenlegi forrásfán sikeresen lefutott a `cargo fmt`, a teljes workspace tesztkészlet, a `./verify.sh` és a helyi tesztkiszolgálás. Ez a repository-szintű fejlesztési baseline-t rögzíti; a környezetfüggő production deployment, recovery és operátori evidence továbbra is release-gate feladat.
+<!-- VELRAN-DOC-STATUS: 2026-09-15 -->
+> **Dokumentációs státusz (2026-09-15):** Ellenőrzött fejlesztési mérföldkő. A jelenlegi forrásfán sikeresen lefutott a `cargo fmt`, a teljes workspace tesztkészlet, a `./verify.sh` és a helyi tesztkiszolgálás. Ez a repository-szintű fejlesztési baseline-t rögzíti; a környezetfüggő production deployment, recovery és operátori evidence továbbra is release-gate feladat.
 
 # Automatikus alkalmazás-forráskód reload
 
@@ -12,6 +12,7 @@ Globális alapértékek:
 ```toml
 [reload]
 enabled = true
+mode = "development"
 poll_interval_ms = 1000
 debounce_ms = 250
 debug_compile_errors = false
@@ -27,6 +28,7 @@ app = "main.vrn"
 
 [domains.reload]
 enabled = true
+mode = "development"
 poll_interval_ms = 1500
 debounce_ms = 300
 ```
@@ -35,7 +37,7 @@ Karbantartáskor kikapcsolható globálisan `reload.enabled = false`, egy domain
 
 ## Mit figyel a szerver?
 
-A reload supervisor a konfigurált alkalmazás entrypoint könyvtára alatti `.vrn` source tree stabil snapshotját figyeli. Ezért egy újonnan bemásolt, átnevezett vagy törölt `.vrn` fájl is automatikusan candidate buildet indíthat; nem szükséges, hogy az előző sikeres fordítás dependency listájában már szerepeljen. A watcher nem hash-el source-ot HTTP requestenként: olcsó fájlrendszer-metaadatból és debounce-olt snapshotból dolgozik, a teljes fordítás csak változás után indul.
+A reload supervisor a konfigurált alkalmazás forrásgyökereiben a releváns `.vrn` és `velran.toml` fájlokat metaadattal és SHA-256 tartalom-fingerprinttel figyeli. Ezért azonos méretű szerkesztés, újonnan bemásolt, átnevezett vagy törölt forrás is észlelhető. A fingerprintelés csak a polling/debounce útvonalon történik, HTTP requestenként nem.
 
 A canonical modulútvonalak mellett a konfigurált logikai `app` útvonal is figyelt. Ez az atomikus release-mintánál fontos:
 
@@ -49,9 +51,9 @@ Az összes domaint egyetlen közös supervisor kezeli, nem domainenként külön
 
 ## Változás, debounce, fordítás, commit
 
-Forrásváltozás észlelése után a Velran `debounce_ms` ideig stabil fájlállapotra vár. Így egy többfájlos feltöltés nem indít minden egyes fájl után külön fordítást.
+Forrásváltozás észlelése után a Velran `debounce_ms` ideig stabil fingerprintre vár. Így egy többfájlos feltöltés nem indít minden egyes fájl után külön fordítást.
 
-Ezután külön candidate alkalmazás fordul és ugyanazokon a hosting-validációkon megy át, mint startup/reload során. Siker esetén csak az adott domain runtime-ja cserélődik atomikusan. A régi runtime-ot már használó requestek azon fejeződnek be, az új requestek pedig az új generációt kapják.
+Ezután külön candidate alkalmazás fordul és ugyanazokon a hosting-validációkon megy át, mint startup/reload során. Aktiválás előtt a Velran újra fingerprinteli az élő forrásfát; ha a build közben bármi változott, a candidate eldobódik és új debounce/build kör indul. Csak stabil candidate esetén cserélődik atomikusan az adott domain runtime-ja. A régi runtime-ot már használó requestek azon fejeződnek be, az új requestek pedig az új generációt kapják.
 
 Sikeres source reload előtt a domain public-cache route generationjei is előrelépnek. Emiatt a régi kód által generált HTML/JSON nem marad látható csak azért, mert a korábbi TTL még nem járt le.
 
@@ -59,7 +61,7 @@ Sikeres source reload előtt a domain public-cache route generationjei is előre
 
 Új modul természetesen követhető: az új `mod` deklaráció miatt a már ismert parent source megváltozik, ez fordítást indít. Siker után a compiler új dependency graphot ad vissza, amely már tartalmazza az új modult is.
 
-Figyelt modul törlése vagy átnevezése szintén változás. A candidate fordítás hibázik, a hiba logolódik, a korábbi működő generáció pedig aktív marad.
+Figyelt modul törlése vagy átnevezése szintén változás. Ha a modult a rá mutató hivatkozásokkal és route-okkal együtt konzisztensen kivonják a projektből, a candidate sikeresen lefordulhat, és a törölt modul, handler illetve route már nem része az újonnan aktivált generationnek. Ha viszont bármely élő forrás továbbra is a hiányzó modulra vagy szimbólumra hivatkozik, a candidate validációja elbukik, a hiba logolódik, és a korábbi működő generation marad aktív. A törlés tehát tranzakciós: vagy egy teljes, érvényes generation részeként lép életbe, vagy nincs hatása az élő forgalomra.
 
 Több fájl feltöltésekor előfordulhat, hogy a parent modul már hivatkozik egy új child fájlra, de az még nem érkezett meg. Ilyenkor az első fordítás jogosan elbukhat. A Velran a stabil, sikertelen candidate-et exponenciális backoffal újrapróbálja: 2 másodperctől indul, legfeljebb 60 másodpercig ritkul. Így a később megérkező modul külön kézi reload nélkül is életbe léphet, miközben egy tartósan hibás forrás nem okoz folyamatos újrafordítást.
 
@@ -68,7 +70,11 @@ Több fájl feltöltésekor előfordulhat, hogy a parent modul már hivatkozik e
 A sikertelen automatikus reload **nem állítja le a domaint**. Az előző valid generáció fut tovább. Fontos strukturált logesemények:
 
 - `source_change_detected`
-- `source_reload_committed`
+- `reload_candidate_started`
+- `reload_candidate_ready`
+- `reload_candidate_source_changed`
+- `reload_activated`
+- `reload_previous_generation_retained`
 - `source_reload_rejected`
 - `source_reload_cache_invalidation_failed`
 - `source_reload_stale`
@@ -77,15 +83,32 @@ A `source_reload_rejected` tartalmazza a canonical domaint, az aktív generation
 
 ## Ajánlott deployment
 
-Normál, csak alkalmazáskódot érintő kiadásnál:
+A Velran két alkalmazáskód-deployment stílust támogat. Rolling production módban a webfejlesztő közvetlenül feltöltheti vagy szerkesztheti a figyelt `.vrn` fájlokat; a debounce, a stabil forrás-fingerprint, a candidate validáció és az atomikus aktiválás védi az élő generationt. Kontrollált kiadásnál továbbra is használható immutable release könyvtár és atomikus `current` symlink, de ez nem követelmény.
 
-1. töltsd fel/építsd fel az új immutable release könyvtárat;
-2. szükség esetén futtasd az `velran-server --config ... --check-config` preflightot;
-3. atomikusan állítsd át a domain `current` symlinkjét, vagy frissítsd a figyelt forrásokat;
-4. a source-reload supervisor lefordítja és siker esetén commitolja az új generációt;
-5. ellenőrizd a `source_reload_committed` eseményt, a health/readiness állapotot és a smoke tesztet.
+Ajánlott rolling folyamat:
+
+1. töltsd fel a módosított `.vrn` fájlokat a figyelt alkalmazásfába;
+2. hagyd, hogy a source-reload supervisor stabil fingerprintre várjon és felépítse a candidate-et;
+3. ellenőrizd a `reload_activated` eseményt, a health/readiness állapotot és a smoke tesztet.
+
+Kontrollált immutable release esetén opcionálisan fusson `velran-server --config ... --check-config`, majd atomikus `current` symlink-váltás, végül ugyanaz az aktiválási és smoke-check ellenőrzés.
 
 A listener, DB/Redis/auth kapcsolat, cgroup limit, logging sink és más process-szintű beállítás továbbra is a normál config/restart lifecycle része. Behind-proxy módban a `SIGHUP` a domain/application konfiguráció tranzakciós reloadjára szolgál; az automatikus source reload ennél könnyebb, kifejezetten alkalmazáskódra szánt út.
+
+## Rolling production mód
+
+PHP-szerű közvetlen fájlfeltöltéshez:
+
+```toml
+[reload]
+enabled = true
+mode = "rolling"
+poll_interval_ms = 1000
+debounce_ms = 1000
+debug_compile_errors = false
+```
+
+A `rolling` a production-safe reload mód. A szigorú `production { debug disabled; ... }` policy ezt engedi, mert az aktiválás tranzakciós és last-known-good szemantikájú. Ugyanez a policy továbbra is tiltja a `mode = "development"` reloadot, a részletes compiler-hibaoldalt, az insecure development cookie-kat és a `native.debug_rustc_repro = true` beállítást. `native.required = true` mellett az első startup továbbra is fail-closed; későbbi rolling candidate hiba viszont csak az új candidate-et utasítja el, a jelenlegi generation aktív marad. Teljes minta: `config/server-rolling-prod.toml.sample`.
 
 ## Fejlesztői compiler hibaképernyő a terminálon
 

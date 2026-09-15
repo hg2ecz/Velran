@@ -1,5 +1,5 @@
-<!-- VELRAN-DOC-STATUS: 2026-09-14 -->
-> **Documentation status (2026-09-14):** Verified Development Milestone. On the current source tree, `cargo fmt`, the full workspace test suite, `./verify.sh`, and local test serving have completed successfully. This records the repository-level development baseline; environment-specific production deployment, recovery, and operational evidence remain release-gate responsibilities.
+<!-- VELRAN-DOC-STATUS: 2026-09-15 -->
+> **Documentation status (2026-09-15):** Verified Development Milestone. On the current source tree, `cargo fmt`, the full workspace test suite, `./verify.sh`, and local test serving have completed successfully. This records the repository-level development baseline; environment-specific production deployment, recovery, and operational evidence remain release-gate responsibilities.
 
 # Velran security status
 
@@ -125,8 +125,9 @@ Implemented:
 Implemented:
 
 - typechecked `production { ... }` security requirements;
-- production startup rejects insecure HTTPS/cookie/source-reload/origin/database-TLS combinations;
+- production startup rejects insecure HTTPS/cookie/development-reload/origin/database-TLS combinations while permitting transactional `reload.mode = "rolling"`;
 - source reload cannot silently change the deployment security contract;
+- rolling source reload is last-known-good and transactional for additions, edits, renames, and deletions: only a complete valid candidate can withdraw live routes/modules;
 - exact `Cargo.lock` plus explicit direct-dependency capability inventory;
 - checksummed crates.io-only external provenance in the current policy;
 - `VELRAN-SUPPLY-CHAIN.lock` seals Cargo lock + capability policy state;

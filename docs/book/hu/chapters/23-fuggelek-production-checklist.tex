@@ -35,13 +35,16 @@ A Velran helyben telepített szoftver, ezért a könyv következetesen a \code{/
     2026-09-04.1/
   data/                    # AppFs / durable application data
 
+/var/cache/velran/
+  native/                  # verified native cdylib cache
+
 /var/log/velran/
   server.log
   access.log
   audit.log
 \end{lstlisting}
 
-A release tartalom legyen lehetőleg read-only. A szervernek csak azokon a helyeken legyen írási joga, ahol valóban tartós állapotot vagy logot kell írnia. A secret fájl ne legyen az alkalmazás release könyvtárában és ne kerüljön verziókezelésbe.
+Az immutable release tartalom legyen lehetőleg read-only. Tranzakciós rolling-source oldalnál külön alkalmazás-forráskönyvtárat használj, amelyet a deployment/feltöltési workflow birtokol és a Velran service olvasni tud; maga az alkalmazás-runtime ne kapjon általános írási jogot a saját forrásfájaira. Mindkét modellben csak ott legyen szerveroldali írási jog, ahol tartós állapot, log vagy explicit kezelt natív cache ezt igényli. A secret fájl ne legyen az alkalmazás forrás/release könyvtárában és ne kerüljön verziókezelésbe.
 
 \section{Apache reverse proxy teljes minimálminta}
 
@@ -120,7 +123,7 @@ A példában az Nginx közvetlenül látja a klienst, ezért a forwarding címet
 
 \section{systemd service minta}
 
-A repository teljes mintája: \code{examples/systemd/velran.service}. A lényegi forma:
+A repository konzervatív baseline mintája: \code{examples/systemd/velran.service}. Az alábbi hardened forma ezen felül megmutatja a perzisztens natív cache-hez szükséges írható útvonalat is:
 
 \begin{lstlisting}
 [Unit]
@@ -161,11 +164,13 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
-ReadWritePaths=/srv/velran/data /var/log/velran
+ReadWritePaths=/srv/velran/data /var/cache/velran/native /var/log/velran
 
 [Install]
 WantedBy=multi-user.target
 \end{lstlisting}
+
+A minta a perzisztens natív cache könyvtárat is írhatóként engedi. Ha a \code{native.cache_dir} máshová mutat, a systemd filesystem sandboxot ugyanahhoz az explicit könyvtárhoz igazítsd; ne oldd fel általánosan a \code{ProtectSystem=strict} védelmet. Rolling-source telepítésnél a feltöltési workflow írja az alkalmazás-forráskönyvtárat, a Velran service számára olvasási jog elegendő.\par\medskip
 
 A systemd hard limit és a Velran request/runtime resource policyja egymást kiegészítő védelmi réteg. A systemd baseline maga legyen a process cgroup authority; ilyenkor ne kapcsold be mellette a Velran \code{[cgroup]} író módját. Közvetlen 80/443 bindnál csak a \code{CAP_NET_BIND_SERVICE} capabilityt add, reverse proxy mögötti magas portnál ezt is hagyd el. A \code{TimeoutStopSec} legyen nagyobb, mint az alkalmazott graceful shutdown időablak. Behind-proxy módban a SIGHUP tranzakciósan újratöltheti a domain/application hosting állapotot, míg process-szintű konfigurációváltozás után továbbra is kontrollált restart kell; pusztán alkalmazásforrás-változást normál esetben az automatikus source-reload supervisor aktivál.
 
@@ -224,7 +229,7 @@ A következő lista szándékosan rövid és végrehajtható. A részletes indok
   \item \textbf{Erőforrások/host:} request/runtime limitek és process hard limitek konzisztensen be vannak állítva; cgroup authorityként systemd vagy külön delegált Velran cgroup legyen, ne mindkettő; legyen elegendő lemez/inode tartalék és működő host időszinkron.
   \item \textbf{Observability:} server/access/audit log írható; request ID működik; metrics és readiness elérhető a megfelelő belső hálózatról; riasztási minimum definiált.
   \item \textbf{Backup/recovery:} van friss, ellenőrzött DB + AppFs + identity backup; recovery manifest rendelkezésre áll; restore drill nem csak papíron létezik.
-  \item \textbf{Deploy/rollback:} a release artifact és checksum ismert; a régi release visszaállítható; schema-változásnál tisztázott, hogy app rollback vagy teljes restore lehetséges.
+  \item \textbf{Deploy/rollback:} immutable deploymentnél ismert a release artifact/checksum és a rollback cél; rolling-source deploymentnél ismert az aktív source/generation identity, és bizonyított, hogy az elutasított candidate mellett az előző generation marad aktív. Schema-változásnál tisztázott, hogy app rollback vagy teljes restore lehetséges.
   \item \textbf{Indítás utáni evidence:} liveness, readiness és legalább egy üzleti smoke kérés sikeres; logban nincs startup fallback vagy váratlan policy-hiba.
 \end{enumerate}
 

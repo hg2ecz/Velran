@@ -16,6 +16,8 @@ production {
 
 The declaration is a security contract, not a second server-configuration system. Certificates, CIDRs, database endpoints and secret paths remain trusted operator configuration.
 
-With the strict production policy enabled, startup fails closed when the effective deployment is incompatible, including insecure development cookies, application source reload, permissive missing-Origin behavior, remote database connections without TLS enforcement, non-HTTPS configured CORS origins or an effectively non-HTTPS public topology.
+With the strict production policy enabled, startup fails closed when the effective deployment is incompatible, including insecure development cookies, development-mode application source reload, permissive missing-Origin behavior, remote database connections without TLS enforcement, non-HTTPS configured CORS origins or an effectively non-HTTPS public topology.
+
+`reload.mode = "rolling"` is permitted under strict production policy because a candidate is activated only after stable-source verification, compile/validation, native initialization, and an atomic generation swap; candidate failure retains the previous generation. Detailed compile-error pages and rustc reproduction mode remain forbidden.
 
 Production policy cannot be silently changed through source reload; a policy change requires process restart/operator review.

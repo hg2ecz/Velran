@@ -1,9 +1,9 @@
-<!-- VELRAN-DOC-STATUS: 2026-09-14 -->
-> **Dokumentációs státusz (2026-09-14):** Ellenőrzött fejlesztési mérföldkő. A jelenlegi forrásfán sikeresen lefutott a `cargo fmt`, a teljes workspace tesztkészlet, a `./verify.sh` és a helyi tesztkiszolgálás. Ez a repository-szintű fejlesztési baseline-t rögzíti; a környezetfüggő production deployment, recovery és operátori evidence továbbra is release-gate feladat.
+<!-- VELRAN-DOC-STATUS: 2026-09-15 -->
+> **Dokumentációs státusz (2026-09-15):** Ellenőrzött fejlesztési mérföldkő. A jelenlegi forrásfán sikeresen lefutott a `cargo fmt`, a teljes workspace tesztkészlet, a `./verify.sh` és a helyi tesztkiszolgálás. Ez a repository-szintű fejlesztési baseline-t rögzíti; a környezetfüggő production deployment, recovery és operátori evidence továbbra is release-gate feladat.
 
 # Production deployment és starter project
 
-A Velran production ajánlása egyetlen, auditálható út: **immutable release + trusted TOML config + külön secret files + explicit migration step + controlled restart**.
+A Velran production ajánlása két auditálható alkalmazáskód-útvonalat támogat: **transactional rolling reload** közvetlen `.vrn` feltöltéshez, illetve **immutable release** kontrollált kiadásokhoz. Mindkettő trusted TOML configra, külön secret file-okra és explicit migration lépésre épül; process-szintű konfiguráció változásakor továbbra is controlled restart szükséges.
 
 Kiindulópont: `examples/starter-project/`.
 
@@ -145,8 +145,8 @@ Röviden: a safe V1 baseline controlled stop/drain után készített application
 
 ## Automatikus alkalmazáskód-élesítés
 
-Normál `.vrn` release-nél a szervernek nem kell újraindulnia. A közös source-reload supervisor az entrypointot és a compiler által visszaadott teljes tranzitív modulgráfot figyeli `mtime + size` alapján. Változás után debounce következik, majd candidate fordítás és validáció. Csak sikeres candidate kerül atomikusan az élő domain helyére; hibás feltöltésnél a korábbi generáció szolgál tovább.
+Normál `.vrn` release-nél a szervernek nem kell újraindulnia. A közös source-reload supervisor a forrásfát metaadat + SHA-256 tartalom-fingerprint alapján figyeli. Változás után debounce következik, majd candidate fordítás és validáció. Aktiválás előtt új fingerprint készül; ha a feltöltés a build közben tovább változott, a candidate eldobódik. Csak stabil, sikeres candidate kerül atomikusan az élő domain helyére; hibás feltöltésnél a korábbi generáció szolgál tovább. PHP-szerű közvetlen feltöltéshez productionben `reload.mode = "rolling"` használható.
 
-Az ajánlott release-layout immutable könyvtár + atomikusan cserélt `current` symlink. A logikai `app` útvonal figyelése miatt a symlink-csere is reloadot indít. Sikeres commitkor a domain public-cache generationjei is invalidálódnak, így a régi generált tartalom nem marad a korábbi TTL végéig.
+Kontrollált release-nél ajánlott az immutable könyvtár + atomikusan cserélt `current` symlink, de rolling productionnél ez nem kötelező: a webfejlesztő közvetlenül is frissítheti a figyelt forrásfát. A logikai `app` útvonal és a tartalom-fingerprint mindkét esetet kezeli. Sikeres commitkor a domain public-cache generationjei is invalidálódnak, így a régi generált tartalom nem marad a korábbi TTL végéig. Egy modul/route konzisztens törlése a következő generationből visszavonja a kiszolgálást; dangling hivatkozás esetén a candidate elbukik és a régi generation marad aktív.
 
 Konfiguráció és részletes hibaviselkedés: [Automatikus alkalmazás-forráskód reload](38-automatikus-forraskod-reload.md).

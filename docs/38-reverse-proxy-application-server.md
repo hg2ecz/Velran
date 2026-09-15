@@ -1,5 +1,5 @@
-<!-- VELRAN-DOC-STATUS: 2026-09-14 -->
-> **Documentation status (2026-09-14):** Verified Development Milestone. On the current source tree, `cargo fmt`, the full workspace test suite, `./verify.sh`, and local test serving have completed successfully. This records the repository-level development baseline; environment-specific production deployment, recovery, and operational evidence remain release-gate responsibilities.
+<!-- VELRAN-DOC-STATUS: 2026-09-15 -->
+> **Documentation status (2026-09-15):** Verified Development Milestone. On the current source tree, `cargo fmt`, the full workspace test suite, `./verify.sh`, and local test serving have completed successfully. This records the repository-level development baseline; environment-specific production deployment, recovery, and operational evidence remain release-gate responsibilities.
 
 # 38. Reverse-proxy application-server mode
 
@@ -103,13 +103,13 @@ poll_interval_ms = 2000
 debounce_ms = 300
 ```
 
-At compile time the compiler returns the exact source dependency graph (entrypoint plus all direct and transitive `mod` files). A single shared supervisor periodically checks only those known files using `mtime + size`; it does not walk the workdir and it does not hash every source on every request. The configured logical entrypoint path is watched as well, so an atomic deployment that switches a `current` directory symlink to a new release is detected even though the previous compiler graph used canonical paths.
+A single shared supervisor periodically fingerprints the relevant Velran source roots using filesystem metadata plus SHA-256 content hashes. The work happens on the polling/debounce path, never on ordinary HTTP requests. A candidate is activated only if a second fingerprint after build matches the stable pre-build source state; uploads that continue during compilation therefore cause the candidate to be discarded and retried.
 
 When a metadata change is observed, the supervisor waits until the observed file set has remained stable for `debounce_ms`. It then compiles a candidate runtime on a blocking worker, validates the same route-rate/cache/auth/resource-profile constraints used by startup reload, and atomically replaces only that domain runtime. Existing requests finish on the old `Arc`; new requests use the new generation.
 Before the new generation is committed, Velran advances the public-cache generation for every cached route belonging to the old or candidate application. A successful source reload therefore cannot leave old generated HTML/JSON visible until its previous TTL expires; new requests either miss and regenerate under the new code or consume content generated for the new cache generation. If cache-generation invalidation fails, the code reload is rejected and the previous runtime stays active.
 
 If compilation or validation fails, the active generation is left untouched and a structured `source_reload_rejected` event contains the canonical domain, active generation and compiler/validation error. A changed watched file resets retry state immediately. If a deployment references a brand-new module that was not part of the previous dependency graph and that file arrives after the parent source, Velran retries the failed stable candidate with exponential backoff (2 seconds up to 60 seconds) so the late file can still activate without repeatedly compiling a permanently broken source at high frequency.
 
-Adding a new module is therefore handled naturally: the already-known parent source changes when its `mod` declaration is added, which triggers recompilation; after success the compiler returns a new dependency graph containing the added module. Removing or renaming a watched module also counts as a change and produces a compiler error while the previous generation remains live.
+Adding a new module is therefore handled naturally: the already-known parent source changes when its `mod` declaration is added, which triggers recompilation; after success the compiler returns a new dependency graph containing the added module. Removing or renaming a watched module also counts as a change. A consistent removal (module plus its references/routes) can activate normally and withdraw that functionality from the new generation; a dangling reference makes the candidate fail while the previous generation remains live.
 
 For controlled maintenance, automatic source reload can be disabled globally with `reload.enabled = false`, per domain with `domains.reload.enabled = false`, or from the command line with `--no-source-reload`.

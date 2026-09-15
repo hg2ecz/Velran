@@ -116,7 +116,8 @@ optimization = "release"
 # cpu_features = "+sse2,+avx2"
 
 [reload]
-# Shared low-cost mtime+size watcher for the application source graph.
+mode = "development"
+# Shared content-fingerprint watcher for the application source tree.
 enabled = true
 poll_interval_ms = 1000
 debounce_ms = 250

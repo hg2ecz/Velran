@@ -1,5 +1,5 @@
-<!-- VELRAN-DOC-STATUS: 2026-09-14 -->
-> **Dokumentációs státusz (2026-09-14):** Ellenőrzött fejlesztési mérföldkő. A jelenlegi forrásfán sikeresen lefutott a `cargo fmt`, a teljes workspace tesztkészlet, a `./verify.sh` és a helyi tesztkiszolgálás. Ez a repository-szintű fejlesztési baseline-t rögzíti; a környezetfüggő production deployment, recovery és operátori evidence továbbra is release-gate feladat.
+<!-- VELRAN-DOC-STATUS: 2026-09-15 -->
+> **Dokumentációs státusz (2026-09-15):** Ellenőrzött fejlesztési mérföldkő. A jelenlegi forrásfán sikeresen lefutott a `cargo fmt`, a teljes workspace tesztkészlet, a `./verify.sh` és a helyi tesztkiszolgálás. Ez a repository-szintű fejlesztési baseline-t rögzíti; a környezetfüggő production deployment, recovery és operátori evidence továbbra is release-gate feladat.
 
 # Velran — a security-first web application language and server with Rust syntax.
 
@@ -163,3 +163,18 @@ A Velran támogatja a modulhoz relatív `mod`, a nested API-határhoz használha
 ## Licenc
 
 A Velran a Mozilla Public License 2.0 (`MPL-2.0`) alatt érhető el. Copyright (c) 2026 Zsolt Krüpl. Részletek: [`LICENSE`](LICENSE) és [`COPYRIGHT`](COPYRIGHT). A harmadik féltől származó függőségekre a saját licenceik vonatkoznak.
+
+## Rolling production reload
+
+PHP-szerű, közvetlen fájlfeltöltéses munkamenethez tranzakciós rolling reload használható:
+
+```toml
+[reload]
+enabled = true
+mode = "rolling"
+poll_interval_ms = 1000
+debounce_ms = 1000
+debug_compile_errors = false
+```
+
+Rolling módban az aktív generation addig nem cserélődik le, amíg a módosult forrásfa nem stabil, a candidate le nem fordult, át nem ment az ellenőrzéseken, a natív runtime be nem töltődött, és a build utáni forrás-fingerprint ellenőrzés nem igazolta, hogy fordítás közben nem változott újra a forrás. Hiba vagy közbeni újabb feltöltés esetén az előző generation szolgál tovább. A már futó requestek az `Arc<DomainRuntime>` miatt a saját generationjükön fejeződnek be; csak az atomikus csere után induló requestek kapják az újat. A production policy a rolling módot engedi, de a development reloadot, részletes compile-error oldalt, insecure dev cookie-kat és a `debug_rustc_repro` módot továbbra is tiltja. Minta: `config/server-rolling-prod.toml.sample`. A forrástörlés ugyanennek a tranzakciónak a része: ha egy modult/route-ot a hivatkozásaival együtt kivonnak, a következő sikeres generationből eltűnik; ha hiányzó hivatkozás marad, a candidate elutasításra kerül és az előző generation szolgál tovább.

@@ -223,6 +223,7 @@ Security rule: performance settings may change code generation, but they do not 
 Key & Default & Meaning \\
 \midrule
 \path{reload.enabled} & \code{true} & Enables the shared source-graph watcher. \\
+\path{reload.mode} & \code{development} & \code{development} or transactional \code{rolling}; strict production policy permits only \code{rolling}. \\
 \path{reload.poll_interval_ms} & \code{1000} & Metadata polling interval. \\
 \path{reload.debounce_ms} & \code{250} & Debounce interval before compiling a candidate generation. \\
 \path{reload.debug_compile_errors} & \code{false} & Development diagnostic output while the last valid generation keeps serving. Production security policy rejects this mode. \\
@@ -320,10 +321,30 @@ resource_profiles_file = "/usr/local/etc/velran/resource-profiles.toml"
 
 This is only a baseline. Auth, static assets, metrics, rate limiting, TLS, and cgroup settings must match the deployment topology.
 
+For a PHP-like rolling-production site where a web developer occasionally uploads source changes directly, add:
+
+\begin{lstlisting}
+[reload]
+enabled = true
+mode = "rolling"
+poll_interval_ms = 1000
+debounce_ms = 1000
+debug_compile_errors = false
+
+[native]
+enabled = true
+required = true
+optimization = "release"
+debug_rustc_repro = false
+cache_dir = "/var/cache/velran/native"
+\end{lstlisting}
+
+The developer does not need to manage release symlinks. Uploads, edits, renames, and deletions become candidate source-tree changes; only a stable, fully verified candidate is activated.
+
 
 \section{Automatic source reload}
 
-The global \code{[reload]} section defines \code{enabled}, \code{poll_interval_ms}, \code{debounce_ms}, and the development-only \code{debug_compile_errors}. Each multi-domain entry may override them in \code{[domains.reload]}. The default policy enables metadata polling. A single shared supervisor watches the compiler-reported source graph with \code{mtime + size}, including the configured logical entrypoint path for atomic symlink deployments. Failed candidates leave the old generation active; successful commits atomically replace only the affected domain and invalidate its public-cache generations. Use \code{--no-source-reload} for a process-wide maintenance override.
+The global \code{[reload]} section defines \code{enabled}, \code{mode}, \code{poll_interval_ms}, \code{debounce_ms}, and the development-only \code{debug_compile_errors}. \code{mode} is either \code{development} or \code{rolling}; strict production policy permits only transactional \code{rolling} reload. A single shared supervisor fingerprints the Velran source tree with filesystem metadata plus SHA-256 content hashes. After debounce it builds and validates a candidate, fingerprints the live sources again, and discards the candidate if upload activity continued during compilation. Failed candidates leave the old generation active; successful candidates atomically replace only the affected domain and invalidate its public-cache generations. A consistent source deletion removes the corresponding module/handler/route from the next generation; a dangling reference rejects the candidate and preserves the previous generation. Requests already using the old \code{Arc<DomainRuntime>} finish on that generation. Use \code{--no-source-reload} for a process-wide maintenance override.
 
 \section{Change workflow}
 

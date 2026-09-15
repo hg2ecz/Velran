@@ -146,7 +146,7 @@ production {
 }
 \end{lstlisting}
 
-Startup fail closed, ha a deployment nem tudja teljesíteni. Production policy tiltja az insecure development cookie-t, unsafe source reloadot, missing-Origin engedményt és insecure remote DB transportot. Reload nem változtathatja meg csendben a deployment security contractot; ehhez restart és operator review kell.
+Startup fail closed, ha a deployment nem tudja teljesíteni. Production policy tiltja az insecure development cookie-t, a development-mode source reloadot, a missing-Origin engedményt és az insecure remote DB transportot; a tranzakciós \code{reload.mode = "rolling"} engedett marad. Reload nem változtathatja meg csendben a deployment security contractot; ehhez restart és operator review kell.
 
 \section{Supply-chain state a release része}
 

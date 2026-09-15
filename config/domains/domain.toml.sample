@@ -29,6 +29,7 @@ queue_timeout_ms = 3000
 resource_profiles_file = "config/resource-profiles.toml"
 
 [reload]
+mode = "development"
 enabled = true
 poll_interval_ms = 1500
 debounce_ms = 300

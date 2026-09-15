@@ -23,7 +23,18 @@ production {
 
 Ez nem második secret/config rendszer. Követelményt deklarál; certificate/path/trusted network továbbra is server/operator config. Másképp fogalmazva: a Velran source azt mondja meg, \emph{minek kell igaznak lennie}, a trusted deployment config pedig azt, \emph{hogyan teszi ezt igazzá az adott környezet}. Startup elbukik, ha a valós topology nem teljesíti a contractot. Source reload nem változtathatja meg csendben; production security requirement módosítás restartot és explicit operator review-t igényel.
 
-\section{Release útvonal}
+\section{Két érvényes production frissítési út}
+
+A Velran két production-biztos workflow-t támogat. Tudatosan válassz közülük, és ne keverd a fájlrendszerre vonatkozó feltételezéseiket.
+
+\begin{description}
+  \item[Immutable release deployment] Teljes, verziózott release könyvtár készül, ellenőrzéssel és atomikus active-path váltással; restart vagy reload csak ott történik, ahol valóban szükséges. Ezt használd, ha az üzemeltetés explicit release-eket és migrációkat kezel.
+  \item[Tranzakciós rolling source] A \code{reload.mode = "rolling"} aktív; a webfejlesztő közvetlenül feltöltheti, szerkesztheti, átnevezheti vagy törölheti a figyelt \code{.vrn} fájlokat. A szerver a megállapodott forrásfát fingerprinteli, live forgalomtól elkülönítve candidate-et épít és validál, majd csak teljes siker után aktivál atomikusan.
+\end{description}
+
+Mindkét módban alapinvariáns, hogy félkész forrásállapot nem válhat aktív runtime-má. Az adatbázis-migráció továbbra is explicit operátori művelet; a rolling source aktiválás nem futtat automatikusan schema-változást.
+
+\section{Immutable release útvonal}
 
 Ajánlott sorrend:
 
@@ -42,7 +53,7 @@ Ajánlott sorrend:
 -> log / metric / audit review
 \end{lstlisting}
 
-A buildelt \code{velran-server} és \code{velran-cli} bináris, az alkalmazásforrás és a migration legyen ugyanahhoz a release-azonosítóhoz köthető. Ne egy élő \code{/srv/velran/current} könyvtár tartalmát módosítsd fájlonként; új immutable release könyvtárat készíts, majd atomikusan válts symlinket.
+A buildelt \code{velran-server} és \code{velran-cli} bináris, az alkalmazásforrás és a migration legyen ugyanahhoz a release-azonosítóhoz köthető. Az immutable-release workflow-ban ne egy élő \code{/srv/velran/current} könyvtár tartalmát módosítsd fájlonként; új release könyvtárat készíts, majd atomikusan válts symlinket. Ez a tiltás nem vonatkozik arra a forrásfára, amelyet szándékosan tranzakciós \code{rolling} módban üzemeltetsz: ott a candidate-generation határ adja az atomikusságot.
 
 \section{systemd service}
 
@@ -125,6 +136,7 @@ A source reload szándékosan szűkebb, mint a process reconfiguration. A kettő
 Változás & Normál mechanizmus & Indok \\
 \midrule
 Velran application source/modulgráf & candidate compile, validation, atomic generation swap & application-local code generation \\
+Közvetlen feltöltés/szerkesztés/törlés rolling módban & stabil fingerprint, candidate build, atomikus generation swap & PHP-szerű workflow release-könyvtár kezelés nélkül \\
 Immutable release symlink célja & a figyelt source path candidate generationt indít & megőrzi az atomikus release layoutot \\
 Logrotation támogatott topológiában & SIGHUP/log reopen & nincs application-policy változás \\
 Listener/TLS/process topology & config check + controlled restart & process-level authority \\
@@ -138,11 +150,13 @@ Ez a különbség megakadályozza, hogy a kényelmes source reload implicit proc
 
 \section{Candidate aktiválás: az operátori szabály}
 
-Kezeld az aktiválást kétlépcsős határként: \emph{előbb compile/validate, utána activate}. Hiba esetén a known-good generáció szolgál tovább; az aktív generált artifactot ne módosítsd helyben. Alkalmazásfejlesztőként ennél a contractnál megállhatsz.
+Kezeld az aktiválást kétlépcsős határként: \emph{előbb compile/validate, utána activate}. Hiba esetén a known-good generáció szolgál tovább. Tranzakciós \code{rolling} módban a webfejlesztő közvetlenül feltöltheti, szerkesztheti, átnevezheti vagy törölheti a figyelt \code{.vrn} fájlokat; a szerver az így létrejövő forrásfát candidate-ként kezeli, és nem az aktív runtime-ot módosítja helyben. Alkalmazásfejlesztőként ennél a contractnál megállhatsz.
+
+A forrástörlés ugyanennek a tranzakciónak a része. Ha egy modult, handlert vagy route-ot minden rá mutató hivatkozással együtt kivonnak, a következő érvényes generation egyszerűen már nem szolgálja ki azt a route-ot. Ha bármely élő forrás továbbra is a hiányzó modulra vagy szimbólumra hivatkozik, a candidate validáció elbukik és az előző generation marad aktív. A törlés tehát vagy egy teljes, érvényes generation részeként commitolódik, vagy nincs hatása az élő forgalomra.
 
 \subsection*{A motorháztető alatt: hogyan őrzi meg a natív aktiválás a határt}
 
-Alkalmazásfejlesztőként első olvasáskor ezt a részt átugorhatod. A source-reload supervisor a logikai entrypointot és a teljes tranzitív modulgráfot figyeli. Miután a fájlkészlet a debounce időn át stabil, a fordítás a request handlingtől elkülönítve történik. A candidate ugyanazokon a route-, resource-, cache-, authentication- és hosting ellenőrzéseken megy át, mint startupkor.
+Alkalmazásfejlesztőként első olvasáskor ezt a részt átugorhatod. A source-reload supervisor a logikai entrypointot és a releváns forrásfát fájlrendszer-metaadat + tartalom-fingerprint alapján figyeli. Miután a fájlkészlet a debounce időn át stabil, a fordítás a request handlingtől elkülönítve történik. A candidate ugyanazokon a route-, resource-, cache-, authentication- és hosting ellenőrzéseken megy át, mint startupkor.
 
 Belsőleg az elfogadott forrás verified executable IR-ré, generált safe Rusttá, majd \code{rustc} által fordított immutable \code{cdylib}-bé és új runtime-generációvá válik. Csak ezek sikere után történik az adott domain runtime atomikus cseréje. A régi runtime-ot már birtokló requestek azon a generáción fejeződnek be; a későbbiek az újat használják. Sikeres kódaktiváláskor a public-cache generationök is ugyanennél a határnál lépnek előre.
 
@@ -167,7 +181,7 @@ Kerüld ezeket a shortcutokat:
 
 \begin{itemize}
   \item unlocked release build, amely csendben dependency resolutiont módosíthat;
-  \item fájlok közvetlen szerkesztése az aktív release könyvtárban;
+  \item fájlok közvetlen szerkesztése egy immutable aktív release könyvtárban úgy, hogy a tranzakciós \code{rolling} supervisort megkerülöd;
   \item application rollback automatikus adatbázis-rollbackként kezelése;
   \item migration implicit futtatása server startup közben;
   \item secret CLI argumentba, release manifestbe vagy source-ba írása;

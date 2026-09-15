@@ -1,5 +1,5 @@
-<!-- VELRAN-DOC-STATUS: 2026-09-14 -->
-> **Dokumentációs státusz (2026-09-14):** Ellenőrzött fejlesztési mérföldkő. A jelenlegi forrásfán sikeresen lefutott a `cargo fmt`, a teljes workspace tesztkészlet, a `./verify.sh` és a helyi tesztkiszolgálás. Ez a repository-szintű fejlesztési baseline-t rögzíti; a környezetfüggő production deployment, recovery és operátori evidence továbbra is release-gate feladat.
+<!-- VELRAN-DOC-STATUS: 2026-09-15 -->
+> **Dokumentációs státusz (2026-09-15):** Ellenőrzött fejlesztési mérföldkő. A jelenlegi forrásfán sikeresen lefutott a `cargo fmt`, a teljes workspace tesztkészlet, a `./verify.sh` és a helyi tesztkiszolgálás. Ez a repository-szintű fejlesztési baseline-t rögzíti; a környezetfüggő production deployment, recovery és operátori evidence továbbra is release-gate feladat.
 
 # Velran starter project
 
@@ -46,6 +46,8 @@ A process cgroup hard limitjeinek authorityja ebben a starterben **systemd** (`M
 5. `migrate apply` külön migration credentialdel;
 6. új immutable release telepítése;
 7. `current` symlink atomikus átállítása;
+
+PHP-szerű, közvetlen feltöltéses oldalnál a symlink folyamat opcionális: állítsd `reload.mode = "rolling"` értékre, és töltsd fel közvetlenül a figyelt `.vrn` fájlokat. A Velran stabilizálja, validálja és atomikusan aktiválja a candidate-et; hibás vagy félkész feltöltésnél a korábbi generation marad aktív. Konzisztens forrástörlés a következő sikeres aktiváláskor visszavonja a törölt route/modul kiszolgálását.
 8. controlled `systemctl restart velran`;
 9. `/health/live` és `/health/ready` ellenőrzése;
 10. log/metrics/audit ellenőrzése.

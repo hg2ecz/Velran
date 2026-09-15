@@ -23,7 +23,18 @@ production {
 
 This is not a second secret/configuration system. It states requirements; the server/operator configuration still supplies certificates, paths and trusted networks. In other words, the Velran source says \emph{what must be true}, while trusted deployment configuration says \emph{how this environment makes it true}. Startup fails if the real topology cannot satisfy the contract. Source reload cannot silently change it; changing production security requirements requires a restart and explicit operator review.
 
-\section{Release path}
+\section{Two valid production update paths}
+
+Velran supports two production-safe workflows. Choose one deliberately rather than mixing their filesystem assumptions.
+
+\begin{description}
+  \item[Immutable release deployment] Build a complete versioned release directory, verify it, switch the active path atomically, then restart or reload as required. Use this when operations owns explicit releases and migrations.
+  \item[Transactional rolling source] Keep \code{reload.mode = "rolling"}; a web developer may upload, edit, rename, or delete watched \code{.vrn} files in place. The server fingerprints the settled source tree, builds and verifies a candidate away from live traffic, and atomically activates it only on success.
+\end{description}
+
+In both modes, partial source state must never become the active runtime. Database migrations remain explicit operator actions; rolling source activation does not run schema changes automatically.
+
+\section{Immutable release path}
 
 Recommended order:
 
@@ -42,7 +53,7 @@ Recommended order:
 -> log / metric / audit review
 \end{lstlisting}
 
-The built \code{velran-server} and \code{velran-cli} binaries, application source, and migrations should all be attributable to the same release identifier. Do not modify files one by one inside a live \code{/srv/velran/current} directory. Prepare a new immutable release directory and switch the symlink atomically.
+The built \code{velran-server} and \code{velran-cli} binaries, application source, and migrations should all be attributable to the same release identifier. In the immutable-release workflow, do not modify files one by one inside a live \code{/srv/velran/current} directory; prepare a new release directory and switch the symlink atomically. This restriction does not apply to a source tree intentionally operated in transactional \code{rolling} mode, where the candidate-generation boundary provides the atomicity.
 
 \section{systemd service}
 
@@ -125,6 +136,7 @@ Source reload is intentionally narrower than process reconfiguration. Treat thes
 Change & Normal mechanism & Reason \\
 \midrule
 Velran application source/module graph & compile candidate, validate, atomic generation swap & application-local code generation \\
+Direct upload/edit/delete in rolling mode & stable fingerprint, candidate build, atomic generation swap & PHP-like workflow without release-directory manipulation \\
 Immutable release symlink target & watched source path triggers candidate generation & preserves atomic release layout \\
 Log rotation in supported topology & SIGHUP/log reopen & no application-policy change \\
 Listener/TLS/process topology & config check + controlled restart & process-level authority \\
@@ -138,11 +150,13 @@ This distinction prevents a convenient source reload mechanism from turning into
 
 \section{Candidate activation: the operator rule}
 
-Treat activation as a two-step boundary: \emph{compile/validate first, activate second}. Failure leaves the known-good generation serving traffic; never edit the active generated artifact in place. Application developers can stop at this contract.
+Treat activation as a two-step boundary: \emph{compile/validate first, activate second}. Failure leaves the known-good generation serving traffic. In transactional \code{rolling} mode, a web developer may upload, edit, rename, or delete watched \code{.vrn} files directly; the server treats the resulting source tree as a candidate rather than mutating the active runtime in place. Application developers can stop at this contract.
+
+A source deletion follows the same transaction. If a module, handler, or route is removed together with all references to it, the next valid generation simply no longer serves that route. If any live source still references the missing module or symbol, candidate validation fails and the previous generation remains active. Deletion therefore either commits as part of one complete valid generation or has no effect on live traffic.
 
 \subsection*{Under the hood: how native activation preserves the boundary}
 
-This subsection is optional for application developers. The source-reload supervisor watches the logical entrypoint and complete transitive module graph. After the file set remains stable for the debounce period, compilation happens away from request handling. The candidate is checked against the same route, resource, cache, authentication and hosting constraints used at startup.
+This subsection is optional for application developers. The source-reload supervisor watches the logical entrypoint and relevant source tree using filesystem metadata plus content fingerprints. After the file set remains stable for the debounce period, compilation happens away from request handling. The candidate is checked against the same route, resource, cache, authentication and hosting constraints used at startup.
 
 Internally, the accepted source becomes verified executable IR, generated safe Rust, a \code{rustc}-compiled immutable \code{cdylib}, and only then a new runtime generation. Only after those checks succeed is the domain runtime replaced atomically. Requests that already hold the previous runtime finish on that generation; later requests use the new one. Public-cache generations advance at the same activation boundary, so stale rendered content does not survive merely because its previous TTL has not expired.
 
@@ -167,7 +181,7 @@ Avoid the following shortcuts:
 
 \begin{itemize}
   \item running an unlocked release build that silently updates dependency resolution;
-  \item editing files directly inside the active release directory;
+  \item editing files directly inside an immutable active release directory while bypassing the transactional \code{rolling} supervisor;
   \item treating application rollback as automatic database rollback;
   \item letting the server apply migrations implicitly during startup;
   \item putting secrets in command-line arguments, release manifests or source files;

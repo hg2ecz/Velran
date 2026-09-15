@@ -223,6 +223,7 @@ Security szabály: a performance-beállítás módosíthatja a kódgenerálást,
 Kulcs & Default & Jelentés \\
 \midrule
 \path{reload.enabled} & \code{true} & A shared source-graph watcher engedélyezése. \\
+\path{reload.mode} & \code{development} & \code{development} vagy tranzakciós \code{rolling}; szigorú production policy alatt csak a \code{rolling} engedett. \\
 \path{reload.poll_interval_ms} & \code{1000} & Metadata polling intervallum. \\
 \path{reload.debounce_ms} & \code{250} & Candidate generáció fordítása előtti debounce. \\
 \path{reload.debug_compile_errors} & \code{false} & Fejlesztői compiler-diagnosztika, miközben az utolsó valid generáció tovább szolgál. Production security policy ezt a módot elutasítja. \\
@@ -320,10 +321,30 @@ resource_profiles_file = "/usr/local/etc/velran/resource-profiles.toml"
 
 Ez csak baseline: auth, static, metrics, rate-limit, TLS és cgroup a deployment topológiájához igazítandó.
 
+PHP-szerű rolling-production oldalhoz, ahol a webfejlesztő időnként közvetlenül tölti fel a forrásmódosítást, add hozzá:
+
+\begin{lstlisting}
+[reload]
+enabled = true
+mode = "rolling"
+poll_interval_ms = 1000
+debounce_ms = 1000
+debug_compile_errors = false
+
+[native]
+enabled = true
+required = true
+optimization = "release"
+debug_rustc_repro = false
+cache_dir = "/var/cache/velran/native"
+\end{lstlisting}
+
+A fejlesztőnek nem kell release symlinket kezelnie. A feltöltés, szerkesztés, átnevezés és törlés candidate forrásfa-változás; csak stabil, teljesen verifikált candidate aktiválódhat.
+
 
 \section{Automatikus source reload}
 
-A globális \code{[reload]} section az \code{enabled}, \code{poll_interval_ms}, \code{debounce_ms} és a fejlesztői \code{debug_compile_errors} alapértékeket adja. Multi-domain módban ezek \code{[domains.reload]} alatt domainenként felülírhatók. Egyetlen közös supervisor figyeli a compiler által visszaadott source graphot \code{mtime + size} alapján, beleértve az atomikus symlink deploymenthez szükséges logikai entrypoint útvonalat is. Sikertelen candidate esetén a régi generáció marad aktív; sikeres commit csak az érintett domaint cseréli, és invalidálja annak public-cache generationjeit. Karbantartáskor a \code{--no-source-reload} kapcsoló process-szinten tiltja a figyelést.
+A globális \code{[reload]} section az \code{enabled}, \code{mode}, \code{poll_interval_ms}, \code{debounce_ms} és a fejlesztői \code{debug_compile_errors} alapértékeket adja. A \code{mode} értéke \code{development} vagy \code{rolling}; szigorú production policy alatt csak a tranzakciós \code{rolling} engedett. Egyetlen közös supervisor fájlrendszer-metaadat + SHA-256 tartalom-fingerprint alapján figyeli a Velran forrásfát. Debounce után candidate-et fordít és validál, majd aktiválás előtt újra fingerprintel; ha a feltöltés a build közben tovább változott, a candidate eldobódik. Sikertelen candidate esetén a régi generáció marad aktív; sikeres candidate csak az érintett domaint cseréli atomikusan és invalidálja annak public-cache generationjeit. Konzisztens forrástörlésnél a hozzá tartozó modul/handler/route eltűnik a következő generationből; dangling hivatkozás esetén a candidate elbukik és az előző generation marad aktív. A régi \code{Arc<DomainRuntime>} értéket már használó requestek azon fejeződnek be. Karbantartáskor a \code{--no-source-reload} kapcsoló process-szinten tiltja a figyelést.
 
 \section{Változtatási workflow}
 

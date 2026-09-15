@@ -22,7 +22,8 @@ max_bytes = 67108864
 singleflight_wait_timeout_ms = 5000
 
 [reload]
-# Shared metadata watcher for application entrypoints and transitive modules.
+mode = "development"
+# Shared content-fingerprint watcher for the application source tree.
 enabled = true
 poll_interval_ms = 1000
 debounce_ms = 250

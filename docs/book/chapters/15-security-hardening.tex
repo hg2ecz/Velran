@@ -146,7 +146,7 @@ production {
 }
 \end{lstlisting}
 
-Startup fails closed when the deployment cannot satisfy the contract. Production mode rejects insecure development cookies, unsafe source reload, missing-Origin exceptions and insecure remote database transport. Reload cannot silently change the deployment security contract; changing it requires restart and operator review.
+Startup fails closed when the deployment cannot satisfy the contract. Production mode rejects insecure development cookies, development-mode source reload, missing-Origin exceptions and insecure remote database transport; transactional \code{reload.mode = "rolling"} remains allowed. Reload cannot silently change the deployment security contract; changing it requires restart and operator review.
 
 \section{Supply-chain state is part of the release}
 

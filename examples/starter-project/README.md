@@ -1,5 +1,5 @@
-<!-- VELRAN-DOC-STATUS: 2026-09-14 -->
-> **Documentation status (2026-09-14):** Verified Development Milestone. On the current source tree, `cargo fmt`, the full workspace test suite, `./verify.sh`, and local test serving have completed successfully. This records the repository-level development baseline; environment-specific production deployment, recovery, and operational evidence remain release-gate responsibilities.
+<!-- VELRAN-DOC-STATUS: 2026-09-15 -->
+> **Documentation status (2026-09-15):** Verified Development Milestone. On the current source tree, `cargo fmt`, the full workspace test suite, `./verify.sh`, and local test serving have completed successfully. This records the repository-level development baseline; environment-specific production deployment, recovery, and operational evidence remain release-gate responsibilities.
 
 # Velran starter project
 
@@ -44,6 +44,8 @@ In this starter, systemd is the authority for process-level cgroup ceilings (`Me
 5. run `migrate apply` using a dedicated migration credential;
 6. install the new immutable release;
 7. atomically switch the `current` symlink;
+
+For PHP-like direct-upload sites, the symlink workflow is optional: configure `reload.mode = "rolling"` and upload watched `.vrn` files directly. Velran stabilizes, validates, and atomically activates the candidate; failed or incomplete uploads leave the previous generation live. Consistent source deletion withdraws the removed route/module on the next successful activation.
 8. perform a controlled `systemctl restart velran`;
 9. check `/health/live` and `/health/ready`;
 10. inspect logs, metrics, and audit evidence.

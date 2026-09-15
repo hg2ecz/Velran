@@ -6,6 +6,7 @@ use crate::server_config_file::{DomainRuntime, HostingRuntime};
 use crate::server_errors::SourceReloadError;
 use crate::source_reload_candidate::build_candidate;
 use observability::{server_event, server_log};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
@@ -17,6 +18,7 @@ pub(super) struct SourceFileState {
     pub(super) path: PathBuf,
     pub(super) modified: Option<SystemTime>,
     pub(super) len: Option<u64>,
+    pub(super) sha256: Option<[u8; 32]>,
 }
 
 pub(super) fn snapshot_source_files(paths: &[PathBuf]) -> Vec<SourceFileState> {
@@ -63,15 +65,25 @@ pub(super) fn snapshot_source_roots(roots: &[PathBuf]) -> Vec<SourceFileState> {
 
 fn source_state(path: &PathBuf) -> SourceFileState {
     match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => SourceFileState {
-            path: path.clone(),
-            modified: meta.modified().ok(),
-            len: Some(meta.len()),
-        },
+        Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {
+            let sha256 = fs::read(path).ok().map(|bytes| {
+                let digest = Sha256::digest(bytes);
+                let mut out = [0u8; 32];
+                out.copy_from_slice(&digest);
+                out
+            });
+            SourceFileState {
+                path: path.clone(),
+                modified: meta.modified().ok(),
+                len: Some(meta.len()),
+                sha256,
+            }
+        }
         _ => SourceFileState {
             path: path.clone(),
             modified: None,
             len: None,
+            sha256: None,
         },
     }
 }
@@ -285,6 +297,15 @@ pub(super) fn spawn_source_reload_supervisor(
                 state.pending_since = None;
                 let _ = state;
 
+                let candidate_generation = domain.generation.saturating_add(1);
+                server_log(&format!(
+                    "{{\"event\":\"reload_candidate_started\",\"domain\":\"{}\",\"current_generation\":{},\"candidate_generation\":{},\"mode\":\"{}\"}}",
+                    json_log_escape(&key),
+                    domain.generation,
+                    candidate_generation,
+                    domain.reload.mode.as_str()
+                ));
+
                 let old: Arc<DomainRuntime> = Arc::clone(&domain);
                 let lifecycle_for_build = lifecycle.clone();
                 let limiter_for_build = Arc::clone(&route_rate_limiter);
@@ -308,6 +329,28 @@ pub(super) fn spawn_source_reload_supervisor(
 
                 match build {
                     Ok(Ok((old, candidate))) => {
+                        let after_build = resnapshot(old.source_roots.as_ref());
+                        if after_build != failed_snapshot {
+                            server_log(&format!(
+                                "{{\"event\":\"reload_candidate_source_changed\",\"domain\":\"{}\",\"candidate_generation\":{},\"action\":\"discard_and_retry\"}}",
+                                json_log_escape(&key),
+                                candidate.generation
+                            ));
+                            if let Some(state) = states.get_mut(&key) {
+                                state.observed = after_build;
+                                state.pending_since = Some(Instant::now());
+                                state.failed_observed = None;
+                                state.retry_after = None;
+                                state.retry_delay_ms = 2000;
+                            }
+                            continue;
+                        }
+                        server_log(&format!(
+                            "{{\"event\":\"reload_candidate_ready\",\"domain\":\"{}\",\"candidate_generation\":{},\"source_files\":{}}}",
+                            json_log_escape(&key),
+                            candidate.generation,
+                            candidate.source_files.len()
+                        ));
                         if let Err(err) =
                             invalidate_domain_cache(&public_cache, &old, &candidate).await
                         {
@@ -334,7 +377,7 @@ pub(super) fn spawn_source_reload_supervisor(
                                     crate::dev_compile_error::clear(&key);
                                 }
                                 server_log(&format!(
-                                    "{{\"event\":\"source_reload_committed\",\"domain\":\"{}\",\"old_generation\":{},\"new_generation\":{},\"source_files\":{}}}",
+                                    "{{\"event\":\"reload_activated\",\"domain\":\"{}\",\"old_generation\":{},\"new_generation\":{},\"source_files\":{}}}",
                                     json_log_escape(&key),
                                     old.generation,
                                     candidate.generation,
@@ -377,6 +420,12 @@ pub(super) fn spawn_source_reload_supervisor(
                             "reload",
                             &format!("domain={key} generation={} error={err}", domain.generation),
                         );
+                        server_log(&format!(
+                            "{{\"event\":\"reload_previous_generation_retained\",\"domain\":\"{}\",\"generation\":{},\"rejected_candidate_generation\":{}}}",
+                            json_log_escape(&key),
+                            domain.generation,
+                            domain.generation.saturating_add(1)
+                        ));
                         if let Some(rustc) = err.rustc_diagnostics() {
                             server_event(
                                 "error",
@@ -436,4 +485,36 @@ pub(super) fn spawn_source_reload_supervisor(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn source_snapshot_detects_same_length_content_changes() {
+        let path = std::env::temp_dir().join(format!(
+            "velran-rolling-reload-fingerprint-{}-{}.vrn",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        {
+            let mut file = fs::File::create(&path).unwrap();
+            file.write_all(b"let a = 1;\n").unwrap();
+        }
+        let first = snapshot_source_files(std::slice::from_ref(&path));
+        {
+            let mut file = fs::File::create(&path).unwrap();
+            file.write_all(b"let b = 2;\n").unwrap();
+        }
+        let second = snapshot_source_files(std::slice::from_ref(&path));
+        assert_eq!(first[0].len, second[0].len);
+        assert_ne!(first[0].sha256, second[0].sha256);
+        assert_ne!(first, second);
+        let _ = fs::remove_file(path);
+    }
 }
