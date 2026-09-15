@@ -1,0 +1,27 @@
+# Rolling-production profile: developers may upload changed .vrn files directly.
+# The current generation remains active until the new candidate is stable,
+# compiled, verified, loaded, and ready for atomic activation.
+
+[server]
+app = "/var/www/site/main.vrn"
+listen = "[::1]:8080"
+insecure_dev_cookies = false
+
+[reload]
+enabled = true
+mode = "rolling"
+poll_interval_ms = 1000
+debounce_ms = 1000
+debug_compile_errors = false
+
+[native]
+enabled = true
+required = true
+optimization = "release"
+debug_rustc_repro = false
+rustc = "/usr/bin/rustc"
+cache_dir = "/var/cache/velran/native"
+
+[limits]
+# Tune from production measurements; do not use an effectively unbounded value.
+max_instructions = 50000000
