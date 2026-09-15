@@ -569,23 +569,34 @@ fn lower_pure_args(
     }
     let mut lowered = Vec::with_capacity(args.len());
     for (arg, param) in args.iter().zip(&pure.params) {
+        // Mutable numeric-kernel parameters are deliberately not general scalar
+        // expressions. The frontend has already required explicit `&mut variable`
+        // syntax and records that borrow as Expr::Variable. Preserve that contract
+        // here instead of routing F32 arrays through lower_expr(), which intentionally
+        // rejects arrays as ordinary scalar values.
+        if matches!(param.ty, PureParamType::F32ArrayMut(_)) {
+            let Expr::Variable(name) = arg else {
+                return Err(ScalarLowerError::TypeMismatch);
+            };
+            if locals.get(name).copied() != Some(ScalarType::F32Array) {
+                return Err(ScalarLowerError::TypeMismatch);
+            }
+            lowered.push(ScalarExpr::Variable(name.clone()));
+            continue;
+        }
+
         let Some((expr, actual)) = lower_expr(arg, locals, Some(program))? else {
             return Err(ScalarLowerError::TypeMismatch);
         };
         let expected = match param.ty {
-            PureParamType::F32ArrayMut(_) => ScalarType::F32Array,
             PureParamType::Int => ScalarType::Int,
             PureParamType::Bool => ScalarType::Bool,
             PureParamType::Str => ScalarType::String,
             PureParamType::StringList => ScalarType::StringList,
             PureParamType::Struct(id) => ScalarType::Struct(id),
+            PureParamType::F32ArrayMut(_) => unreachable!("handled above"),
         };
         if actual != expected {
-            return Err(ScalarLowerError::TypeMismatch);
-        }
-        if matches!(param.ty, PureParamType::F32ArrayMut(_))
-            && !matches!(expr, ScalarExpr::Variable(_))
-        {
             return Err(ScalarLowerError::TypeMismatch);
         }
         lowered.push(expr);
@@ -2053,6 +2064,60 @@ fn lower_op(op: BinaryOp) -> Option<ScalarBinaryOp> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mutable_numeric_pure_args_lower_as_explicit_array_variables() {
+        let pure = PureFunction {
+            name: "fft".into(),
+            params: vec![
+                language_core::PureFunctionParam {
+                    name: "real".into(),
+                    ty: PureParamType::F32ArrayMut(4096),
+                },
+                language_core::PureFunctionParam {
+                    name: "imag".into(),
+                    ty: PureParamType::F32ArrayMut(4096),
+                },
+            ],
+            return_type: PureReturnType::Unit,
+            inline: language_core::InlineHint::Never,
+            body: vec![],
+        };
+        let locals = BTreeMap::from([
+            ("real".into(), ScalarType::F32Array),
+            ("imag".into(), ScalarType::F32Array),
+        ]);
+        let args = vec![Expr::Variable("real".into()), Expr::Variable("imag".into())];
+        assert_eq!(
+            lower_pure_args(&args, &pure, &locals, &Program::default()),
+            Ok(vec![
+                ScalarExpr::Variable("real".into()),
+                ScalarExpr::Variable("imag".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn mutable_numeric_pure_args_reject_array_expressions() {
+        let pure = PureFunction {
+            name: "kernel".into(),
+            params: vec![language_core::PureFunctionParam {
+                name: "data".into(),
+                ty: PureParamType::F32ArrayMut(16),
+            }],
+            return_type: PureReturnType::Unit,
+            inline: language_core::InlineHint::Unspecified,
+            body: vec![],
+        };
+        let args = vec![Expr::F32ArrayNew {
+            len: Box::new(Expr::Int(16)),
+            fill: Box::new(Expr::F32(language_core::F32Value::new(0.0).unwrap())),
+        }];
+        assert_eq!(
+            lower_pure_args(&args, &pure, &BTreeMap::new(), &Program::default()),
+            Err(ScalarLowerError::TypeMismatch)
+        );
+    }
 
     #[test]
     fn mixed_scalar_types_fail_closed() {
